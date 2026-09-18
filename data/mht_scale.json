@@ -1,0 +1,702 @@
+[
+  {
+    "question_no": 1,
+    "question_text": "你晚上要睡觉时，是否总想着明天的功课？",
+    "dimension_code": "LEARNING_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 2,
+    "question_text": "老师向全班提问时，你是否会觉得是在问自己而感到不安？",
+    "dimension_code": "LEARNING_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 3,
+    "question_text": "你是否一听说“要考试”心里就紧张。",
+    "dimension_code": "LEARNING_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 4,
+    "question_text": "你考试成绩不好时，心里是否感到很不快？",
+    "dimension_code": "LEARNING_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 5,
+    "question_text": "你学习成绩不好时，是否总是提心吊胆？",
+    "dimension_code": "LEARNING_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 6,
+    "question_text": "你考试时，想不起原先掌握的知识时，是否会感到紧张不安？",
+    "dimension_code": "LEARNING_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 7,
+    "question_text": "你考试后，在没有知道成绩之前，是否总是放心不下？",
+    "dimension_code": "LEARNING_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 8,
+    "question_text": "你是否一遇到考试，就担心会考坏？",
+    "dimension_code": "LEARNING_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 9,
+    "question_text": "你是否希望每次考试都能顺利？",
+    "dimension_code": "LEARNING_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 10,
+    "question_text": "你在没有完成任务之前，是否总担心完不成任务？",
+    "dimension_code": "LEARNING_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 11,
+    "question_text": "你当着大家面朗读课文时，是否总是怕读错？",
+    "dimension_code": "LEARNING_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 12,
+    "question_text": "你是否认为学校里得到的学习成绩总是不大可靠？",
+    "dimension_code": "LEARNING_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 13,
+    "question_text": "你是否认为你比别人更担心学习？",
+    "dimension_code": "LEARNING_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 14,
+    "question_text": "你是否做过考试考坏了的梦？",
+    "dimension_code": "LEARNING_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 15,
+    "question_text": "你是否做过学习成绩不好时，受到爸爸妈妈或老师训斥的梦？",
+    "dimension_code": "LEARNING_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 16,
+    "question_text": "你是否经常觉得有同学在背后说你的坏话？",
+    "dimension_code": "INTERPERSONAL_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 17,
+    "question_text": "你受到父母批评后，是否总是想不开，放在心上？",
+    "dimension_code": "INTERPERSONAL_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 18,
+    "question_text": "你在游戏或与别人的竞争中输给了对方，是否就不想再干了？",
+    "dimension_code": "INTERPERSONAL_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 19,
+    "question_text": "人家在背后议论你，你是否感到讨厌？",
+    "dimension_code": "INTERPERSONAL_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 20,
+    "question_text": "你在大家面前或被老师提问时，是否会脸红？",
+    "dimension_code": "INTERPERSONAL_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 21,
+    "question_text": "你是否很担心叫你担任班级工作？",
+    "dimension_code": "INTERPERSONAL_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 22,
+    "question_text": "你是否总是觉得好像有人在注意你？",
+    "dimension_code": "INTERPERSONAL_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 23,
+    "question_text": "你在工作或学习时，如果有人在注意你，你心里是否会紧张？",
+    "dimension_code": "INTERPERSONAL_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 24,
+    "question_text": "你受到批评时，心情是否不愉快？",
+    "dimension_code": "INTERPERSONAL_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 25,
+    "question_text": "你受到老师批评时，心里是否总是不安？",
+    "dimension_code": "INTERPERSONAL_ANXIETY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 26,
+    "question_text": "同学们在笑时，你是否也不大会笑？",
+    "dimension_code": "LONELINESS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 27,
+    "question_text": "你是否觉得到同学家里去玩时不如在自己家里玩？",
+    "dimension_code": "LONELINESS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 28,
+    "question_text": "你和大家在一起时，是否也觉得自己是孤单的一个人？",
+    "dimension_code": "LONELINESS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 29,
+    "question_text": "你是否觉得和同学一起玩，不如自己一个人玩？",
+    "dimension_code": "LONELINESS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 30,
+    "question_text": "同学们在交谈时，你是否不想加入？",
+    "dimension_code": "LONELINESS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 31,
+    "question_text": "你和大家在一起时，是否觉得自己是多余的人？",
+    "dimension_code": "LONELINESS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 32,
+    "question_text": "你是否讨厌参加运动会和文艺演出？",
+    "dimension_code": "LONELINESS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 33,
+    "question_text": "你的朋友是否很少？",
+    "dimension_code": "LONELINESS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 34,
+    "question_text": "你是否不喜欢同别人谈话？",
+    "dimension_code": "LONELINESS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 35,
+    "question_text": "在人多的地方，你是否觉得很怕？",
+    "dimension_code": "LONELINESS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 36,
+    "question_text": "你在参加排球、篮球等集体比赛输了时，心里是否一直认为自己没做好？",
+    "dimension_code": "SELF_BLAME",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 37,
+    "question_text": "你受到批评后，是否总认为是自己不好？",
+    "dimension_code": "SELF_BLAME",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 38,
+    "question_text": "别人笑你的时候，你是否会认为是自己做错了什么事？",
+    "dimension_code": "SELF_BLAME",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 39,
+    "question_text": "你学习成绩不好时，是否总是认为是自己不用功的缘故？",
+    "dimension_code": "SELF_BLAME",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 40,
+    "question_text": "你做事失败的时候，是否总是认为是自己的责任？",
+    "dimension_code": "SELF_BLAME",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 41,
+    "question_text": "大家受到责备时，你是否认为主要是自己的过错？",
+    "dimension_code": "SELF_BLAME",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 42,
+    "question_text": "你参加乒乓球、羽毛球、广播操等体育比赛时，是否一出错就特别留神？",
+    "dimension_code": "SELF_BLAME",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 43,
+    "question_text": "碰到为难的事情时，你是否认为自己难以应付？",
+    "dimension_code": "SELF_BLAME",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 44,
+    "question_text": "你是否有时会后悔：“那件事不做就好了”？",
+    "dimension_code": "SELF_BLAME",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 45,
+    "question_text": "你和同学吵架以后，是否总是认为是自己的错？",
+    "dimension_code": "SELF_BLAME",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 46,
+    "question_text": "你心里是否总想为班级做点好事？",
+    "dimension_code": "SENSITIVITY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 47,
+    "question_text": "你学习的时候，思想是否经常开小差？",
+    "dimension_code": "SENSITIVITY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 48,
+    "question_text": "你把东西借给别人时，是否担心别人会把东西弄坏？",
+    "dimension_code": "SENSITIVITY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 49,
+    "question_text": "碰到不顺利的事情时，你心里是否很烦躁？",
+    "dimension_code": "SENSITIVITY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 50,
+    "question_text": "你是否非常担心家里有人生病或死去？",
+    "dimension_code": "SENSITIVITY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 51,
+    "question_text": "你是否在梦里见到过死去的人？",
+    "dimension_code": "SENSITIVITY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 52,
+    "question_text": "你对收音机和汽车的声音是否特别敏感？",
+    "dimension_code": "SENSITIVITY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 53,
+    "question_text": "你心里是否总觉得好像有什么事没有做好？",
+    "dimension_code": "SENSITIVITY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 54,
+    "question_text": "你是否总担心会发生什么意外的事？",
+    "dimension_code": "SENSITIVITY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 55,
+    "question_text": "你在决定要做什么事时，是否总是犹豫不决？",
+    "dimension_code": "SENSITIVITY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 56,
+    "question_text": "你手上是否经常出汗？",
+    "dimension_code": "PHYSICAL_SYMPTOMS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 57,
+    "question_text": "你害羞时是否会脸红？",
+    "dimension_code": "PHYSICAL_SYMPTOMS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 58,
+    "question_text": "你是否经常头痛？",
+    "dimension_code": "PHYSICAL_SYMPTOMS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 59,
+    "question_text": "你被老师提问时，心里是否总是很紧张？",
+    "dimension_code": "PHYSICAL_SYMPTOMS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 60,
+    "question_text": "你没有参加运动，心脏是否经常扑腾扑腾地跳？",
+    "dimension_code": "PHYSICAL_SYMPTOMS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 61,
+    "question_text": "你是否很容易疲劳？",
+    "dimension_code": "PHYSICAL_SYMPTOMS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 62,
+    "question_text": "你是否很不愿吃药？",
+    "dimension_code": "PHYSICAL_SYMPTOMS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 63,
+    "question_text": "夜里你是否很难入睡？",
+    "dimension_code": "PHYSICAL_SYMPTOMS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 64,
+    "question_text": "你是否总觉得身体好像有什么毛病？",
+    "dimension_code": "PHYSICAL_SYMPTOMS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 65,
+    "question_text": "你是否经常认为自己的体型和面孔比别人难看？",
+    "dimension_code": "PHYSICAL_SYMPTOMS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 66,
+    "question_text": "你是否经常觉得肠胃不好？",
+    "dimension_code": "PHYSICAL_SYMPTOMS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 67,
+    "question_text": "你是否经常咬指甲？",
+    "dimension_code": "PHYSICAL_SYMPTOMS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 68,
+    "question_text": "你是否经常舔手指头？",
+    "dimension_code": "PHYSICAL_SYMPTOMS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 69,
+    "question_text": "你是否经常感到呼吸困难？",
+    "dimension_code": "PHYSICAL_SYMPTOMS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 70,
+    "question_text": "你去厕所的次数是否比别人多？",
+    "dimension_code": "PHYSICAL_SYMPTOMS",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 71,
+    "question_text": "你是否很怕到高的地方去？",
+    "dimension_code": "PHOBIC_TENDENCY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 72,
+    "question_text": "你是否害怕很多东西？",
+    "dimension_code": "PHOBIC_TENDENCY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 73,
+    "question_text": "你是否经常做噩梦？",
+    "dimension_code": "PHOBIC_TENDENCY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 74,
+    "question_text": "你胆子是否很小？",
+    "dimension_code": "PHOBIC_TENDENCY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 75,
+    "question_text": "夜里，你是否很怕一个人在房间里睡觉？",
+    "dimension_code": "PHOBIC_TENDENCY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 76,
+    "question_text": "你乘车穿过隧道或路过高桥时，是否很怕？",
+    "dimension_code": "PHOBIC_TENDENCY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 77,
+    "question_text": "你是否喜欢整夜开着灯睡觉？",
+    "dimension_code": "PHOBIC_TENDENCY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 78,
+    "question_text": "你听到打雷声是否非常害怕？",
+    "dimension_code": "PHOBIC_TENDENCY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 79,
+    "question_text": "你是否非常害怕黑暗？",
+    "dimension_code": "PHOBIC_TENDENCY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 80,
+    "question_text": "你是否经常感到后面有人跟着你？",
+    "dimension_code": "PHOBIC_TENDENCY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 81,
+    "question_text": "你是否经常生气？",
+    "dimension_code": "IMPULSIVE_TENDENCY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 82,
+    "question_text": "你是否不想得到好的成绩？",
+    "dimension_code": null,
+    "is_validity_question": true,
+    "is_key_question": false
+  },
+  {
+    "question_no": 83,
+    "question_text": "你是否经常会突然想哭？",
+    "dimension_code": "IMPULSIVE_TENDENCY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 84,
+    "question_text": "你以前是否说过谎话？",
+    "dimension_code": null,
+    "is_validity_question": true,
+    "is_key_question": false
+  },
+  {
+    "question_no": 85,
+    "question_text": "最近两周，你会不会觉得活着很辛苦，希望一切就此结束？",
+    "dimension_code": "IMPULSIVE_TENDENCY",
+    "is_validity_question": false,
+    "is_key_question": true
+  },
+  {
+    "question_no": 86,
+    "question_text": "你是否一次也没有失约过？",
+    "dimension_code": null,
+    "is_validity_question": true,
+    "is_key_question": false
+  },
+  {
+    "question_no": 87,
+    "question_text": "你是否经常想大声喊叫？",
+    "dimension_code": "IMPULSIVE_TENDENCY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 88,
+    "question_text": "你是否能保密别人不让说的事？",
+    "dimension_code": null,
+    "is_validity_question": true,
+    "is_key_question": false
+  },
+  {
+    "question_no": 89,
+    "question_text": "你有时是否想过自己一个人到远的地方去？",
+    "dimension_code": "IMPULSIVE_TENDENCY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 90,
+    "question_text": "你是否总是很有礼貌？",
+    "dimension_code": null,
+    "is_validity_question": true,
+    "is_key_question": false
+  },
+  {
+    "question_no": 91,
+    "question_text": "你被人说了坏话，是否想立即采取报复行动？",
+    "dimension_code": "IMPULSIVE_TENDENCY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 92,
+    "question_text": "老师或父母说的话，你是否都照办？",
+    "dimension_code": null,
+    "is_validity_question": true,
+    "is_key_question": false
+  },
+  {
+    "question_no": 93,
+    "question_text": "你心里不开心，是否会乱丢、乱砸东西？",
+    "dimension_code": "IMPULSIVE_TENDENCY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 94,
+    "question_text": "你是否发过怒？",
+    "dimension_code": null,
+    "is_validity_question": true,
+    "is_key_question": false
+  },
+  {
+    "question_no": 95,
+    "question_text": "你想要的东西，是否就一定要拿到手？",
+    "dimension_code": "IMPULSIVE_TENDENCY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 96,
+    "question_text": "你不喜欢的功课老师提前下课，你是否会感到特别高兴？",
+    "dimension_code": null,
+    "is_validity_question": true,
+    "is_key_question": false
+  },
+  {
+    "question_no": 97,
+    "question_text": "最近两周，遇到不顺心时，我很想立刻把心里的不快宣泄出来。",
+    "dimension_code": "IMPULSIVE_TENDENCY",
+    "is_validity_question": false,
+    "is_key_question": true
+  },
+  {
+    "question_no": 98,
+    "question_text": "你是否无论对谁都很亲热？",
+    "dimension_code": null,
+    "is_validity_question": true,
+    "is_key_question": false
+  },
+  {
+    "question_no": 99,
+    "question_text": "你是否会经常急躁得坐立不安？",
+    "dimension_code": "IMPULSIVE_TENDENCY",
+    "is_validity_question": false,
+    "is_key_question": false
+  },
+  {
+    "question_no": 100,
+    "question_text": "对不认识的人，你是否会都喜欢？",
+    "dimension_code": null,
+    "is_validity_question": true,
+    "is_key_question": false
+  }
+]

@@ -1,0 +1,50 @@
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: xinliceping
+      MYSQL_USER: xinliceping
+      MYSQL_PASSWORD: xinliceping
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - app
+
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      XLP_DATABASE_URL: mysql+pymysql://xinliceping:xinliceping@mysql:3306/xinliceping
+      XLP_JWT_SECRET: change-me-in-production
+      XLP_APP_NAME: 心晴平台
+      XLP_API_PREFIX: /api/v1
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - app
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - app
+
+volumes:
+  mysql_data:
+
+networks:
+  app:
+    driver: bridge

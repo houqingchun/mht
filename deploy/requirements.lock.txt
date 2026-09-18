@@ -1,0 +1,76 @@
+# Python dependencies installed on the target machine (Windows / CPython 3.11 x64).
+#
+# >>> THIS FILE MUST STAY PURE ASCII. <<<
+# On the target machine it is pip that reads it, and pip picks the decoder from
+# the locale when the file carries no UTF-8 BOM (pip/_internal/utils/encoding.py,
+# auto_decode()). On a Chinese Windows that locale is GBK, so ONE Chinese
+# character anywhere below -- even inside a comment -- aborts the install at
+# step 4 ("installing dependencies") with a UnicodeDecodeError, long after
+# anything that points here.
+# This is not theoretical: it is what happened on 2026-09-18 at a school.
+# The reasoning in full (and why a BOM is not the fix) is in deploy/README.md
+# -- search that file for "requirements.lock.txt". Do not translate this file.
+#
+# The installer runs this on the target machine -- offline, no network (the
+# flags are written out here verbatim so nobody "aligns" them by guesswork):
+#
+#   python -m pip install --isolated --no-index --find-links <install>\wheels
+#       --no-deps --only-binary=:all: --no-input --disable-pip-version-check
+#       --no-cache-dir --retries 0 --timeout 5
+#       -r <install>\deploy\requirements.lock.txt
+#
+# --no-deps is deliberate: this file is an explicit LEAF list, not a dependency
+# tree (pip cannot evaluate environment markers for another platform; see the
+# README section on why the lock file is a leaf list).
+#
+# Nine of the 31 wheels below are named cp311-cp311-win_amd64 -- they carry no
+# abi3 tag, so the interpreter is pinned: CPython 3.11, 64-bit, nothing else.
+#
+# A missing package here is reported by nobody, so build_package.py opens every
+# wheel's METADATA and evaluates Requires-Dist for Windows (verify_wheel_closure).
+# That check is how these three were caught, and why they are not "just in case":
+#   greenlet   SQLAlchemy 2.0.53 requires it unconditionally on amd64 / x86_64 /
+#              win32 platform_machine (note: not only under the `asyncio` extra).
+#              Plain synchronous use never imports it, but the metadata says so,
+#              and skipping it means shipping an environment pip would not build.
+#   cffi       cryptography 50 requires cffi>=2.0.0 on non-PyPy.
+#   pycparser  cffi requires it in turn.
+# cryptography is not optional either: MySQL 8 defaults to caching_sha2_password,
+# and pymysql raises "'cryptography' package is required" on the sha2_rsa_encrypt
+# path -- which is every path after a MySQL restart empties the server-side cache.
+# So the chain has to be verified end to end, not just its first link.
+
+# --- direct dependencies (mirrors backend/pyproject.toml, plus cryptography) ---
+alembic==1.20.0
+bcrypt==5.0.0
+cryptography==50.0.1
+fastapi==0.141.1
+pydantic-settings==2.15.0
+PyJWT==2.14.0
+PyMySQL==1.2.0
+python-multipart==0.0.32
+SQLAlchemy==2.0.53
+uvicorn==0.53.0
+
+# --- pulled in by the above (including the ones uvicorn[standard] expands to) ---
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+cffi==2.1.1
+click==8.5.0
+greenlet==3.5.6
+h11==0.16.0
+httptools==0.8.0
+idna==3.19
+Mako==1.4.1
+MarkupSafe==3.0.3
+pycparser==3.0
+pydantic==2.13.5
+pydantic_core==2.46.5
+python-dotenv==1.2.3
+PyYAML==6.0.3
+starlette==1.6.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+watchfiles==1.2.0
+websockets==17.1

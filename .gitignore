@@ -1,0 +1,30 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+backend/dev.db
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.vue.js
+*.js.map
+*.egg-info/
+*.tsbuildinfo
+
+# 本地环境
+backend/.env
+.claude/settings.local.json
+
+# 部署包产物（`make deploy-package`）。`/dist/` 只匹配仓库根那一层，
+# 不用裸 `dist/`——那会把任何一层叫 dist 的目录都吞掉，包括
+# frontend/dist（它上面已经单独列过，但依赖「恰好也叫 dist」是脆的）。
+/dist/
+
+# Playwright
+node_modules/
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/playwright/.auth/
