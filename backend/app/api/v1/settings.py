@@ -41,8 +41,9 @@ public_router = APIRouter(prefix="/public", tags=["public"])
 @public_router.get("/branding")
 def read_branding(db: Annotated[Session, Depends(get_db)]):
     org = get_namespace(db, "org")
-    # 显示的是 `V1.0` 那一串（`VERSION_LABEL`），不是规范的 `1.0.0` ——
-    # 界面从 `/openapi.json` 拿不到东西，而这一格是给人念给支持听的。
+    # 显示的是标签那一串（`VERSION_LABEL`，形如 `V1.1`），不是规范串（`__version__`，
+    # 形如 `1.1.2`）——界面从 `/openapi.json` 拿不到东西，而这一格是给人念给支持听的。
+    # **举的是「形如」，不写死当前那一版**：写死了每次升版本都要来改这两行注释。
     return ok({key: org[key] for key in BRANDING_KEYS} | {"version": VERSION_LABEL})
 
 

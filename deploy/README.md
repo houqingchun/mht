@@ -205,8 +205,10 @@ python deploy/build_package.py --keep             # 保留上一次解开的 dis
     install.ps1             安装逻辑，中文提示都在这里（UTF-8 **with BOM**）
     ops.ps1                 装完之后八个按钮背后的动作
     manual-start.ps1        手工启动（`-Action backend|frontend`），见下面一节
+    manual-migrate.ps1      只升数据库（不起服务、不碰程序文件），见下面一节
     serve_frontend.py       只发前端时用的静态服务器 + `/api` 反代（纯标准库）
-    手工启动后端.bat 手工启动前端.bat   ★ 出路，不是步骤：见下面一节（纯 ASCII）
+    手工启动后端.bat 手工启动前端.bat 数据库增量升级.bat   ★ 出路，不是步骤（纯 ASCII）
+      后端 / 前端那两枚：一键安装装不完时；第三枚：库要单独升（见下面「把停在 V1.0.0 的库升上来」）
     sitecustomize.py        固定 stdout 编码（装进 venv 的 site-packages 才生效）
     package-info.txt        版本 + 构建时间 + 需要的 Python 版本，install.ps1 读它
     requirements.lock.txt   （副本，出问题时好对账）
@@ -302,6 +304,81 @@ python deploy/build_package.py --keep             # 保留上一次解开的 dis
 
 ---
 
+## 把停在 V1.0.0 的库升上来：`manual-migrate.ps1` 与那份手工 SQL
+
+**这一节回答的是「我的库是 V1.0.0，现在这一版的程序架上去能不能用」。** 能——但那要
+库先走一遍 `0012 → 0018` 那六条迁移。两条路，**做的是同一件事**（同一组迁移、同一个
+版本戳），选一条就行：
+
+| 路 | 谁用 | 动作 |
+|---|---|---|
+| 一键安装（推荐） | 装得上 | 把新包覆盖到安装目录 → 双击「一键安装.bat」→ 第 4 步跑迁移 |
+| `数据库增量升级.bat` | 只想先升库、或后端起不来看不出库升没升 | 在**装过的**安装目录里双击它 |
+| `backend\sql\upgrade_from_v1_0_0.sql` | 那台机器根本没有 venv / 起不了 Python | 拿这个文件到别处 `mysql < 它` |
+
+三条路都**只对 V1.0.0 的库跑一次**。跑第二次不用怕（迁移是幂等的、会直接跑完），但它
+是白跑的。
+
+### `manual-migrate.ps1` 做的是安装器第 4 步那两步
+
+```
+python -m app.db.ensure_schema      ← 校对表结构（手工建的表在这里盖章）
+python -m alembic upgrade head      ← 执行迁移
+python -m app.db.ensure_schema      ← 再校对一遍，并由它念出最终的版本戳
+```
+
+**次序不能换，两头都不能**：手写的建表语句里没有 `alembic_version`（Alembic 自己的
+账本），直接迁移会撞 `Duplicate column name`；而换了程序文件却没迁移的下场是
+「登录页打得开、一操作就 500」（CLAUDE.md §18「数据库由谁准备」那一节）。
+
+**第三步不是走过场**：屏幕最后那一行 `alembic_version = …` 是 `ensure_schema` **自己
+念出来的**，不是脚本拼的。拼出来的那句没有任何东西保证它是真的。
+
+它**不碰程序文件、不注册计划任务、不写 `runtime\build.json`**，也**不设管理员密码**——
+与「升级不动你已经配好的东西」是同一条（见下面「重跑即升级」）。所以它的正确用法是
+**先把新包覆盖到安装目录，再从那里双击它**；如果你是在刚解压开的包里点的它，脚本会
+停下来告诉你还没有 venv。
+
+### 那份手工 SQL 是怎么来的（★ 别手写它）
+
+`backend/sql/upgrade_from_v1_0_0.sql` 是**生成的**，生成器是
+`deploy/build_migration_sql.py`（`make db-upgrade-sql` 跑它，**出包时也跑**）。它从
+**两份既有来源**现渲染：
+
+    链上每条迁移的 `PRECHECKS` 常量   +   `alembic upgrade 0012:head --sql` 的离线渲染
+
+所以它与 `schema_mysql8.sql` 同一个性质：**快照，不是来源**。改了任何一条迁移就要重跑
+`make db-upgrade-sql` 并提交那份文件——它随 `backend/` 一起进包，出事的地方是客户手上的库。
+`test_incremental_upgrade_sql.py` 逐字节盯着它。
+
+**三件只有真 MySQL 才知道的事**，都写进了生成器与那份文件的注释里：
+
+1. **每个迁移拆成【检查】/【DDL】两半、交错排列。** 全部检查堆在最前面**真的失败过**：
+   `assessment_session.school_id` 是 `0013` 加的，于是第一条检查就死在一句
+   `1054 Unknown column 'school_id'` 上。
+2. **检查本身不会让脚本停下。** 它此前只是把有问题的行打出来、然后继续跑一百条 DDL，
+   直到某条无关的 `ALTER` 报 `1048 Column … cannot be null`——库留下一半新表，版本戳停在
+   `0012`。现在每条检查后面跟一次 `CALL xlp_check_empty(...)`，那个临时存储过程里有
+   `SIGNAL SQLSTATE '45000'`，**有行就当场中断**，而且中断发生在任何 DDL 之前。所以
+   操作员看到的 `ERROR 1644 (45000)` 是一句中文，不是一句英文列名。
+3. **检查写成 `SELECT EXISTS(<子查询>)`。** 派生表会在**重复列名**上撞 1060，`COUNT(*)`
+   会在带 `GROUP BY` 的检查上撞 1172（返回多行）。`EXISTS` 一律返回一行一列。
+
+存储过程要 `CREATE ROUTINE` 权限，用完**删掉**（文件最后一句就是 `DROP PROCEDURE`）。
+
+**它仍然是「一条长 SQL」**，而需求说明书 §16.1 明确说这种长脚本不建议直接在生产上跑
+——这一点是知情的：把它变得可执行的是上面那道门（**先检查、后 DDL**，不是把文件切开），
+以及它就是那六条迁移的渲染、不是第二份实现。装得上就还是走一键安装。
+
+### `is_offline_mode()` 那两行
+
+`0013` / `0014` 的 `_precheck()` 开头有一句 `if context.is_offline_mode(): return`。
+`--sql` 模式下 `op.get_bind()` 回的是一个 `MockConnection`，它的 `execute()` 返回 `None`
+→ 后面 `.fetchall()` 抛 `AttributeError`，那份 SQL 根本渲染不出来。跳过这一层**不是**
+放松校验：真正的检查由 `PRECHECKS` 常量表达，生成器把它提升到那份文件的【检查】段里。
+
+---
+
 ## 加一个依赖：改**两处**
 
 ```toml
@@ -342,12 +419,12 @@ SHA256 scramble）用不到 RSA，也就不需要 `cryptography`；缓存未命�
 ## 改系统版本：改**一处**
 
 ```python
-# backend/app/version.py —— 唯一出处
-__version__ = "1.0.0"      # 规范串：进 package-info.txt、进 /openapi.json
-VERSION_LABEL = "V" + …    # 显示串（V1.0）：进 /public/branding，界面那一行读它
+# backend/app/version.py —— 唯一出处（今天这一版是 1.1.2 / V1.1）
+__version__ = "1.1.2"      # 规范串：进 package-info.txt、进 /openapi.json
+VERSION_LABEL = "V" + …    # 显示串（V1.1）：进 /public/branding，界面那一行读它
 ```
 
-改完重出包，目标机上 `install.ps1` 第 0 步会打 `安装包版本 1.0.0+<日期>`，
+改完重出包，目标机上 `install.ps1` 第 0 步会打 `安装包版本 1.1.2+<日期>`，
 「查看状态」里也有一份。
 
 **`frontend/package.json` 的 `version` 是唯一的镜像**，因为 npm 那个字段没法动态

@@ -20,7 +20,7 @@
 
 ## 它守不住什么（网眼写明）
 
-- **打包产物的那一行**：`write_package_info` 是否真把 `1.0.0+20260919` 写进了
+- **打包产物的那一行**：`write_package_info` 是否真把 `1.1.2+20260920` 写进了
   `package-info.txt`，要跑 `make deploy-package` 才知道，而那只在开发机上能跑
   （要 `wheels/`）。所以这里只做**静态**检查（读源码，看它读的是哪个文件）。
   真机证据是目标机上 `install.ps1` 第 0 步打出来的那一行版本。
@@ -102,9 +102,15 @@ def test_the_version_is_a_three_part_release_number():
 
 
 def test_the_label_drops_the_patch_segment():
-    """`1.0.0` → `V1.0`：界面显示的是主.次，修订号不外露。"""
+    """`1.1.2` → `V1.1`：界面显示的是主.次，修订号不外露。
+
+    末尾那个字面量是**跟着 `__version__` 一起改的**，不是第二个出处 ——
+    它在这里的作用是让「修订号被丢掉了」这句话变成一条判据：只写上面那一行
+    恒等式的话，一个把 `[:2]` 误写成 `[:3]` 的实现照样绿（两边一起变），
+    而界面上会冒出一个 `V1.1.2`。
+    """
     assert VERSION_LABEL == "V" + ".".join(__version__.split(".")[:2])
-    assert VERSION_LABEL == "V1.0", f"标签变成了 {VERSION_LABEL!r}"
+    assert VERSION_LABEL == "V1.1", f"标签变成了 {VERSION_LABEL!r}"
 
 
 # --------------------------------------------------------------------------
@@ -186,7 +192,7 @@ def test_the_frontend_package_version_mirrors_the_backend():
 
 
 def test_branding_exposes_the_display_label(client: TestClient):
-    """`/public/branding` 发的是 `V1.0`（给人念的），不是 `1.0.0`（规范的）。
+    """`/public/branding` 发的是 `V1.1`（给人念的），不是 `1.1.2`（规范的）。
 
     这一格是「账号与权限」页脚读的那一个，所以它必须在**免认证**端点里 ——
     与登录页拿校名走的是同一个端点，界面因此不需要新开一次取数。

@@ -49,6 +49,14 @@ except ImportError:  # pragma: no cover - 只会在没跑过 make install 的机
         "先在仓库根跑一次 `make install`，或者用 backend/.venv/bin/python 跑这个脚本。"
     )
 
+# 增量 SQL 的生成器与这个脚本**同目录**。直接跑脚本时 Python 会把脚本所在目录放进
+# `sys.path[0]`，所以正常路径下这一行本来就能成——**显式插一次是为了有第二条路**：
+# 从仓库根 `python deploy/build_package.py` 跑时 `sys.path[0]` 是 `deploy/`（一样），
+# 而从别处 `import build_package` 时它两个都不在。两行换掉一整类「换个目录跑就
+# ModuleNotFoundError」的困惑，而那个错与「包坏了」看起来一模一样。
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import build_migration_sql  # noqa: E402 —— 必须在上面那行 sys.path 之后
+
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "deploy"
 DIST = ROOT / "dist"
@@ -115,6 +123,10 @@ REQUIRED_PATHS = [
     "deploy/serve_frontend.py",
     "deploy/手工启动后端.bat",
     "deploy/手工启动前端.bat",
+    # 数据库增量升级那一枚按钮（2026-09-20 加）：只动库、不起服务。与手工启动那一套
+    # 同一个位置、同一条理由（是**出路**不是步骤，所以不进包根）。
+    "deploy/manual-migrate.ps1",
+    "deploy/数据库增量升级.bat",
     "backend/app/main.py",
     "backend/run_server.py",
     "backend/alembic.ini",
@@ -124,6 +136,15 @@ REQUIRED_PATHS = [
     # `mysqldump --no-data` 出来的一份，要么什么都没有——这一份让他们**不必先有一台
     # 装好的库**就能把表建出来。它与 reset 那份是一对：那份删行，这份建表。
     "backend/sql/schema_mysql8.sql",
+    # 从 V1.0.0 升到当前版本的增量 SQL（2026-09-20 加）。`copy_backend` 拷的是整棵
+    # `backend/`，所以它自动跟着进包、落在 `<安装目录>\backend\sql\` 下；
+    # `deploy\manual-migrate.ps1` 就是按这个路径去找它的（找不到时它说「多半是程序文件
+    # 还是旧版」）。生成器另外还往 `dist/` 写一份——那一份是给直接执行的人拿的。
+    #
+    # 文件名里的 `v1_0_0` 是 `build_migration_sql.BASELINE_LABEL` 派生的
+    # (`OUTPUT_NAME`)。基线换代（比如改成从 V1.1.0 升）时**这里要跟着改**——
+    # 忘了改会红在下面那次自检上（「缺这个路径」），而不是静默少带一个文件。
+    "backend/sql/upgrade_from_v1_0_0.sql",
     "backend/app/db/create_database.py",
     "data/mht_scale.json",
     "frontend/dist/index.html",
@@ -164,7 +185,7 @@ def run(command: list[str], cwd: Path) -> None:
 
 
 def build_frontend(*, rebuild: bool) -> Path:
-    step("1/5 构建前端")
+    step("1/6 构建前端")
     if not rebuild:
         log("--reuse-frontend：跳过构建，直接用磁盘上的 frontend/dist")
         return ROOT / "frontend" / "dist"
@@ -194,7 +215,7 @@ def locked_requirements() -> list[str]:
 
 
 def download_wheels(target: Path) -> None:
-    step("2/5 下载 Windows 依赖")
+    step("2/6 下载 Windows 依赖")
     target.mkdir(parents=True, exist_ok=True)
     requirements = locked_requirements()
 
@@ -522,7 +543,7 @@ def verify_zip_names(path: Path) -> list[str]:
 
 
 def verify_package(package: Path, wheels: Path) -> None:
-    step("4/5 自检")
+    step("5/6 自检")
     problems: list[str] = []
 
     for relative in REQUIRED_PATHS:
@@ -555,7 +576,7 @@ def verify_package(package: Path, wheels: Path) -> None:
 
 
 def write_zip(package: Path, path: Path) -> None:
-    step("5/5 压缩")
+    step("6/6 压缩")
     if path.exists():
         path.unlink()
     # 压缩的是**目录本身**，不是它的内容：Windows 上「解压到」会得到一个 心晴部署包\
@@ -638,7 +659,20 @@ def main() -> int:
     wheels = PACKAGE_DIR / "wheels"
     download_wheels(wheels)
 
-    step("3/5 复制源码与前端")
+    # 增量 SQL **必须在下面那次整份拷贝之前**生成：它落在 `backend/sql/` 里，而
+    # `copy_backend` 是它进包的唯一途径。**次序反过来不会报错**——`build()` 照样写那两个
+    # 文件、自检照样过（它只问「这个路径在不在」），而包里那一份是**上一次**生成的。
+    # 这是这一节唯一会静默失效的地方，所以这句注释不能删。
+    #
+    # **每次出包都重生成，不复用仓库里那一份。** 它的两个来源（链上每条迁移的 `PRECHECKS`
+    # 常量、`alembic upgrade <基线>:head --sql` 的离线渲染）都长在**当前这棵源码树**上，
+    # 所以「仓库里那份」与「这棵树今天渲染出来的那份」是两件事；它们不一样时，出错的地方
+    # 是客户手上的库。`app/tests/test_incremental_upgrade_sql.py` 从另一头盯着同一条。
+    step("3/6 生成数据库增量 SQL")
+    for sql_path in build_migration_sql.build(DIST):
+        log(f"{sql_path.relative_to(ROOT)}  ({sql_path.stat().st_size} 字节)")
+
+    step("4/6 复制源码与前端")
     copy_backend(PACKAGE_DIR / "backend")
     # `dirs_exist_ok=True` 是给 `--keep` 用的：不加的话，第二次跑（也就是 `--keep`
     # **唯一**的用法——上一次出包失败在半路，想把那 31 个 wheel 省下来）会在这一行

@@ -1,4 +1,4 @@
-.PHONY: install dev backend frontend test e2e docker-up docker-down docker-logs clean reset seed seed-demo purge-demo deploy-package
+.PHONY: install dev backend frontend test e2e docker-up docker-down docker-logs clean reset seed seed-demo purge-demo db-upgrade-sql deploy-package
 
 # Install dependencies
 install:
@@ -59,6 +59,18 @@ reset-db:
 # 学号落在生成区间里的真实学生会被一起删掉。
 purge-demo:
 	cd backend && source .venv/bin/activate && python -m app.db.purge demo
+
+# 重新生成「从 V1.0.0 升到当前版本」的数据库增量 SQL
+# -> backend/sql/upgrade_from_v1_0_0.sql 与 dist/ 下同一份。
+#
+# **改了 alembic 迁移就要重跑它。** 产物是从两份既有来源现渲染出来的（链上每条迁移的
+# PRECHECKS 常量 + `alembic upgrade <基线>:head --sql`），所以迁移一动、不重跑，
+# 仓库里那份快照与磁盘上那份文件就各说各话——而它会随 `backend/` 一起打进安装包，
+# 落在客户手上。`app/tests/test_incremental_upgrade_sql.py` 盯着这条。
+#
+# 只写文件、不碰数据库，所以在开发机上跑是安全的。
+db-upgrade-sql:
+	cd backend && source .venv/bin/activate && python ../deploy/build_migration_sql.py
 
 # 打 Windows 一键安装包 -> dist/心晴部署包.zip
 #

@@ -1049,7 +1049,7 @@ export interface Branding {
   school_name: string
   brand_name: string
   brand_subtitle: string
-  /** 显示用的版本标签（`V1.0`）。服务端算的，前端不写死：部署包里 `frontend/dist`
+  /** 显示用的版本标签（形如 `V1.1`）。服务端算的，前端不写死：部署包里 `frontend/dist`
    *  是预构建的，写死会造出「后端升了、界面还说旧版本」的静默分岔。 */
   version: string
 }

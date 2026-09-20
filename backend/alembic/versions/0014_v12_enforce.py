@@ -35,7 +35,7 @@ Revises: 0013_v12_expand
 Create Date: 2026-09-19
 """
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 revision = "0014_v12_enforce"
@@ -166,7 +166,18 @@ def _precheck() -> None:
 
     MySQL 的 DDL 不在事务里，所以「先改一半再发现不行」是不可回退的：
     报出来的还会是一句英文的 1062 / 1452，离真正的原因（哪一行数据不对）很远。
+
+    **离线模式（`alembic upgrade --sql`）下这一层不跑**，因为那几条 SELECT 要读回结果，
+    而离线渲染拿到的是一个 `MockConnection`——它的 `execute()` 返回 `None`，
+    下一句 `.fetchall()` 当场 `AttributeError`。
+
+    出路不是把校验丢掉：`deploy/build_migration_sql.py` 生成增量 SQL 时，会把这里的
+    `PRECHECKS` **原样搬到那份文件的最前面**当第一段，由执行的人先跑一遍再看结果。
+    校验的**唯一出处仍然是下面这个常量**，只是换了个执行者。这一侧的十二条尤其不能省
+    ——它们断言的正是「旧数据里没有反例」，而 DDL 一旦发出就收不回来了。
     """
+    if context.is_offline_mode():
+        return
     bind = op.get_bind()
     for what, sql in PRECHECKS:
         rows = bind.execute(sa.text(sql)).fetchall()

@@ -1917,8 +1917,8 @@ def test_every_bat_the_scripts_name_is_a_file_that_exists():
     真的写了不存在的名字。
     """
     # 三处按钮，各在包里的不同位置，缺一处这里就会把**存在的**名字报成不存在：
-    #   · `deploy\windows\*.bat`   → 包里的 `<pkg>\deploy\`（手工启动那两枚，
-    #     与 `manual-start.ps1` 同目录，所以它们用 `%~dp0` 找得到它）
+    #   · `deploy\windows\*.bat`   → 包里的 `<pkg>\deploy\`（手工启动那两枚与
+    #     `数据库增量升级.bat`，与各自的 `.ps1` 同目录，所以它们用 `%~dp0` 找得到它）
     #   · `deploy\windows\ops\*.bat` → 装完拷到**安装根**，所以 `install.ps1` 与
     #     `部署说明.txt` 提到它们时只写文件名
     #   · `一键安装.bat` 是唯一留在包根的那一个（`build_package.py` 的 `ROOT_LEVEL_ASSETS`）
@@ -1926,8 +1926,12 @@ def test_every_bat_the_scripts_name_is_a_file_that_exists():
     known |= {path.name for path in (WINDOWS_ASSETS / "ops").glob("*.bat")}
     known.add("一键安装.bat")  # 包根那一个，不在 ops\ 里
 
+    # **每加一个会提到按钮的 `.ps1` 就要把它加进这份名单**，否则最新的那个脚本恰好是
+    # 唯一没人守的：`manual-migrate.ps1` 点了四个按钮名（`数据库增量升级.bat`、
+    # `手工启动后端.bat`、`停止服务.bat`、`查看状态.bat`），而名单里漏掉它时，
+    # 这四个名字写错任何一个都不会有任何东西报红——正是这条用例要挡的那件事。
     seen: set[str] = set()
-    for name in ("install.ps1", "ops.ps1", "manual-start.ps1"):
+    for name in ("install.ps1", "ops.ps1", "manual-start.ps1", "manual-migrate.ps1"):
         text = (WINDOWS_ASSETS / name).read_text(encoding="utf-8-sig")
         seen |= set(re.findall(r"[一-鿿A-Za-z0-9_]+\.bat", text))
 

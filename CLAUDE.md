@@ -21,13 +21,14 @@
 |---|---|
 | `make install` | 安装前后端依赖 |
 | `make dev` / `make backend` / `make frontend` | 启动服务（后端 8000，前端 5173） |
-| `make test` | 后端 pytest（542 个测试）。**跑在真 MySQL 上**：建一个 `<库名>_test`、`alembic upgrade head` 建表、用完即弃。库名不以 `_test` 结尾会拒绝运行。见 §20 |
-| `make e2e` | Playwright（113 个测试，需两个服务都在跑） |
+| `make test` | 后端 pytest（730 个测试）。**跑在真 MySQL 上**：建一个 `<库名>_test`、`alembic upgrade head` 建表、用完即弃。库名不以 `_test` 结尾会拒绝运行。见 §20 |
+| `make e2e` | Playwright（127 个测试，需两个服务都在跑） |
 | `make migrate` / `make seed` | Alembic 迁移 / 初始化数据 |
 | `make seed-demo` | 填入演示数据（多年级班级、各分数段测评、各阶段档案），可重复执行 |
 | `make reset-db` | 清空测评数据并重新种子（保留名册与账号） |
 | `make purge-demo` | 把 `seed-demo` 填进去的一切删干净，回到只有 `seed.py` 基线的状态。**仅用于开发库** |
 | `mysql … < backend/sql/reset_to_baseline.sql` | 清到「只有 admin + 基本配置」。给**别处的新环境**用，见 §16 |
+| `make db-upgrade-sql` | 重新渲染 `backend/sql/upgrade_from_v1_0_0.sql`（+ `dist/` 一份）。**改过 alembic 迁移就要跑**，见 §30 |
 | `make deploy-package` | 打 Windows 一键安装包 → `dist/心晴部署包.zip`。**在开发机上跑**，见 §18 |
 | `python backend/run_server.py` | 生产启动器（`chdir` + 日志轮转 + 数据库等待 + 崩溃重试）。计划任务跑的就是它 |
 | `make clean` | 清理编译产物 |
@@ -72,15 +73,19 @@ deploy/
     sitecustomize.py         把 stdout/stderr 固定成 UTF-8（装进 venv 的 site-packages）
     ops/*.bat                八个三行按钮，装完由 install.ps1 拷到安装根目录再删掉源目录
     manual-start.ps1         手工启动（-Action backend|frontend）：一键安装装不完时的出路
+    manual-migrate.ps1       只升数据库（不起服务、不碰程序文件），§30
     serve_frontend.py        只发前端时的静态服务器 + /api 反代（纯标准库）
     手工启动后端.bat 手工启动前端.bat  ★ 那个出路的两个入口。纯 ASCII（只有文件名是中文）
+    数据库增量升级.bat         ★ 停在 V1.0.0 的库要单独升时的那一枚。纯 ASCII，§30
+  build_migration_sql.py    生成 `backend/sql/upgrade_from_v1_0_0.sql`（`make db-upgrade-sql`，§30）
   README.md                  面向维护者：怎么重出包、加一个依赖要改哪两处
 ```
 
-产物 `dist/心晴部署包.zip`（约 22MB）→ 拷到目标机 → 解压 → 双击。包里带着 Windows 版的
-CPython、Windows 版的 wheel、构建好的前端，所以目标机上**不需要** Python、pip、网络，
-唯一要有的外部东西是 MySQL 8.0。**运维文档面向两种人，是两份东西**：`部署说明.txt` 给
-操作员（非技术），`deploy/README.md` 给下一个改这套东西的人。
+产物 `dist/心晴部署包.zip`（约 11MB）→ 拷到目标机 → 解压 → 双击。包里带着 Windows 版的
+wheel 与构建好的前端，运行环境是**安装时用目标机上那个 Python 3.11 现建的 venv**
+（2026-09-18 起不再内嵌 CPython，见下文），所以目标机上不需要 pip、不需要网络，
+唯一要有的外部东西是 Python 3.11 x64 与 MySQL 8.0。**运维文档面向两种人，是两份东西**：
+`部署说明.txt` 给操作员（非技术），`deploy/README.md` 给下一个改这套东西的人。
 
 ## 不可破坏的约定
 
@@ -745,12 +750,18 @@ mysql -h HOST -u USER -p DB < backend/sql/reset_to_baseline.sql
 （`DEFAULT_RULE_CONFIG`）。在 SQL 里再抄一份必然漂移，而一份抄错的规则 JSON 会让那个库的评分
 与别处不同、且看不出来（§6：阈值随规则版本走）。**这是一条约定，不是没写完。**
 
-#### `sql/` 下现在有**两个**文件，分工不要混（2026-09-18 补）
+#### `sql/` 下现在有**三个**文件，分工不要混（2026-09-18 补，2026-09-20 加第三个）
 
-| 文件 | 建表吗 | 删行吗 | 谁用 |
-|---|---|---|---|
-| `reset_to_baseline.sql` | 不 | 删（清成基线） | 上面那张表 |
-| `schema_mysql8.sql` | **建**（24 张表，父先子后） | 不 | §18 的 `schema_prepared` 分工 |
+| 文件 | 建表吗 | 删行吗 | 改行吗 | 谁用 |
+|---|---|---|---|---|
+| `reset_to_baseline.sql` | 不 | 删（清成基线） | 不 | 上面那张表 |
+| `schema_mysql8.sql` | **建**（34 张表，父先子后） | 不 | 不 | §18 的 `schema_prepared` 分工 |
+| `upgrade_from_v1_0_0.sql` | **改**（`0012 → 0018` 六条迁移的渲染） | 不 | 不 | §30：停在 V1.0.0 的库 |
+
+前两份都是**手写并受静态守卫**（`test_sql_schema_matches_models.py` /
+`test_sql_reset_to_baseline.py`）；第三份**是生成的**（`deploy/build_migration_sql.py`，
+`make db-upgrade-sql`），守卫是逐字节比对今天这棵树渲染出来的东西（§30）。**谁也不许手改
+它**——改了下次重跑就没了，而且守卫会红。
 
 `schema_mysql8.sql` 是**快照，不是来源**——上面那句「schema 归 `alembic upgrade head`」一个字
 没变，它只是把迁移链**当时**建出来的形状印了一份出来。它存在是因为 `schema_prepared` 那条路上
@@ -4194,6 +4205,194 @@ M2（让回访审计带上正文）、M3（真的把重点题授给德育领导�
    是同一类**已知且接受**的残留——区别是那个看得见、点得掉，而这个要去库里删。
 3. **`verification_status` 仍然没有读者**（缺口 11 未变）。阶段 8 没有碰它——四档处置
    那一列的唯一读点还是审计的 `detail`，而那一串 `detail` 仍然只有数据库看得见。
+
+### 30. 手工数据库增量升级：停在 V1.0.0 的库怎么升上来（2026-09-20）
+
+**这一期不是功能，是一条交付路。** 客户的库停在 V1.0.0（`alembic_version = 0012`），
+而程序已经到 1.1.2——中间是六条迁移。一键安装包本来就会跑（升级模式的第 4 步），
+但那两条路各自会断：
+
+- 「只想先把库升上去，程序文件过一会儿再换」；
+- 「后端起不来，想单独确认库到底升上去了没有」；
+- 「那台机器根本起不了 Python，只有一份能执行的 SQL」。
+
+所以产物是**一条路加一枚按钮**，做的是同一件事（同一组迁移、同一个版本戳）：
+
+| 路 | 谁用 | 动作 |
+|---|---|---|
+| 一键安装（**推荐**） | 装得上 | 新包覆盖 → 双击「一键安装.bat」→ 第 4 步跑迁移 |
+| `数据库增量升级.bat` → `manual-migrate.ps1` | 装过的机器上，只想升库 | 双击，不起服务、不碰程序文件 |
+| `backend\sql\upgrade_from_v1_0_0.sql` | 目标机没有 venv / 起不了 Python | 拿这个文件到别处 `mysql < 它` |
+
+三条路都**只对 V1.0.0 的库跑一次**。
+
+#### 那份 SQL 是**生成的**，不是手写的（★ 谁也不许手改它）
+
+`deploy/build_migration_sql.py` 从**两份既有来源**现渲染：链上每条迁移的 `PRECHECKS`
+**常量本身**（按文件路径 import 出来）+ `alembic upgrade 0012:head --sql` 的离线渲染。
+它在这里一个字的 SQL 都不重写——**再抄一份就等于开出第二个出处**，两份会在某次改迁移
+之后各说各话，而它们看起来都对。所以它与 `schema_mysql8.sql` 同一个性质：快照，不是来源
+（§16 那张表现在是三行）。
+
+- 生成：`make db-upgrade-sql`，**出包时也跑**（每次都重新生成，不复用仓库里那份）。
+- 落两处、同一个文件名：`backend/sql/`（随 `backend/` 进包）与 `dist/`（拿给执行的人）。
+- 守卫 `test_incremental_upgrade_sql.py`：逐字节比对「盘上那份 == 今天这棵树渲染出来的
+  那份」，红了就重跑 `make db-upgrade-sql` 并把那份文件一起提交。
+- **不能手改**：改了下次重跑就没了，而且守卫会红。
+
+#### ★ 每个迁移拆成【检查】/【DDL】两半，交错排列
+
+第一版是两段式（13 条检查全在最前面），**在客户的库形状上第一条就死**：
+
+```
+SELECT id, student_id FROM assessment_session WHERE school_id IS NULL LIMIT 5;
+→ (1054, "Unknown column 'school_id' in 'where clause'")
+```
+
+`assessment_session.school_id` 是 **`0013` 才加上的列**，而 `0014` 的检查问的正是
+「`0013` 的回填做干净了没有」。**这类检查在 `0013` 的 DDL 跑完之前根本执行不了**——
+真实迁移链的形状也是这个。所以现在是「迁移 1/6 的检查 → 它的 DDL → 迁移 2/6 的检查 →
+…」。**别改回两段式。**
+
+「动手之前先看见结果」这条没有被削弱：`0014` 那 12 条检查仍然全部排在 `0014` 的第一条
+DDL 之前（迁移文件里就是这么写的），而 `0013` 是**只加不改**的、没有可能失败。
+
+#### ★ 检查语句不会让 `mysql` 停下——每条后面必须有一次 `CALL`
+
+同一次真库验证里撞出来的第二件事，比第一件严重。反向验证是这样做的：在一个停在 `0012`
+的库上塞一行 `risk_type` 认不出的 `risk_event`，再跑那份脚本，**期望被拦下**。实际是：
+
+```
+id      risk_type               trigger_rule
+1       NOT_A_REAL_RISK_TYPE    r          ← 检查确实认出来了，也打出来了
+ERROR 1048 (23000) at line 581: Column 'requires_manual_review' cannot be null
+```
+
+**检查打出了那一行，然后脚本继续往下跑了一百多条 DDL**，直到某条 `ALTER` 撞上一句与
+真正原因毫无关系的英文错误；库最后是 35 张表、版本戳还停在 `0012`——正是「改了一半」。
+根因一句话：**检查是 `SELECT`，而 `mysql` 客户端不会因为你看见了结果就停下**（那句
+「有结果就停下来反馈」是写给**人**的），而 MySQL 的 DDL 不在事务里。
+
+出路是每条检查后面配一道**机器**能过的门：原样打印那句 SQL 给人看，紧接着
+`CALL xlp_check_empty(<同一条 SQL>, '…')`——有行就 `SIGNAL SQLSTATE '45000'`，当场中断，
+**那时一行 DDL 都还没跑**。操作员看到的 `ERROR 1644 (45000)` 是一句中文，不是英文列名。
+
+三个细节：
+
+- **`SIGNAL` 只许出现在复合语句里**，所以那个存储过程是唯一能做条件中断的东西。它要
+  `CREATE ROUTINE` 权限（root 有），建不出来时 `mysql` 停在那一行——**那是安全的一侧**，
+  因为它什么都没执行。首尾各一句 `DROP PROCEDURE IF EXISTS`：收尾那句在被 `SIGNAL`
+  中断时跑不到，所以开头那句顶着。
+- **名字带 `xlp_` 前缀**：它在对方的生产库里只活这一趟，而一个叫 `check_empty` 的存储
+  过程留在那儿会让人以为是他们自己的东西。
+- **检查写成 `SELECT EXISTS(<子查询>)`**：派生表会在**重复列名**上撞 1060，`COUNT(*)`
+  会在带 `GROUP BY` 的检查上撞 1172（返回多行）。`EXISTS` 一律返回一行一列。
+
+#### `is_offline_mode()` 那两行
+
+`0013` / `0014` 的 `_precheck()` 开头各有一句 `if context.is_offline_mode(): return`。
+`--sql` 模式下 `op.get_bind()` 回的是 `MockConnection`，它的 `execute()` 返回 `None`
+→ 下一句 `.fetchall()` 当场 `AttributeError`，那份 SQL 根本渲染不出来。**跳过不是放松
+校验**：真正的检查由 `PRECHECKS` 常量表达，生成器把它提升到那份文件的【检查】段里
+（唯一出处仍然只有那一处，两个 `docstring` 都写着这句话）。
+
+#### ★ 出包里 `3/6` 的次序不能颠倒，而颠倒了不会报错
+
+`step("3/6 生成数据库增量 SQL")` 排在 `copy_backend`（4/6）**之前**：它落在
+`backend/sql/` 里，而整份拷贝是它进包的**唯一**途径。反过来**不会报错**——`build()` 照样
+写那两个文件、自检照样过（它只问「这个路径在不在」），而包里那一份是**上一次**生成的。
+这是那一节唯一会静默失效的地方，注释就写在调用点上。
+
+#### ★ 守卫不许调 `build()`——它是「先写后比」
+
+`build(output_dir)` 会**先写** `backend/sql/<名字>`、**再写** `output_dir` 那一份。所以
+「拿 `build(tmp_path)` 生成一份、再与盘上那份比」是**恒真**的：它在比对之前已经把那两份
+变成了同一串字节。那不是一条会红的守卫，是一条**永远绿**的守卫，而它看起来完全像是在
+证明完整性——§29 那条（一条恒绿的守卫比没有更糟，它占着「这一条有人守」的位置）在这里
+换了第二次皮。
+
+所以守卫走 `compose(...)` 这个**纯函数**，自己拼字符串，一个字节都不落盘。并且另有一条
+`test_the_comparison_is_not_vacuous` **在同一次运行里**自证：检查段的每条提示语都逐字
+出现在文件里，且**在内存里**改一下 `blocks` / `prechecks` 会让 `compose` 的输出跟着变
+（少了它，一个 `return (SQL_DIR / OUTPUT_NAME).read_text()` 的 `compose` 会让两条一起绿）。
+
+它**守不住什么**，写在模块 docstring 里：那份 SQL 在真 MySQL 8 上跑不跑得动（那要靠
+**真库**——本文里「真机」指那台 Windows、`make test` 够不着，而这一件在一台装着
+MySQL 与 `mysql` 客户端的机器上就能重跑，见本节最后那张表），以及包里那一份（它由出包
+脚本**当场重新生成**，不是拷这个快照，两条路各自成立、互不代替）。
+
+#### `manual-migrate.ps1` 做的是第 4 步那两步，三步
+
+```
+python -m app.db.ensure_schema      ← 校对表结构（手工建的表在这里盖章）
+python -m alembic upgrade head      ← 执行迁移
+python -m app.db.ensure_schema      ← 再校对一遍，并由它念出最终的版本戳
+```
+
+**次序两头都不能换**（§18 那一节记着理由：手写的建表语句里没有 `alembic_version`；
+换了程序没迁移则是「登录页打得开、一操作就 500」）。**第三步不是走过场**：屏幕最后那行
+`alembic_version = …` 是 `ensure_schema` **自己念出来的**，不是脚本拼的——拼出来的那句
+没有任何东西保证它是真的。
+
+它**不碰程序文件、不注册计划任务、不写 `runtime\build.json`、不设管理员密码**（与
+「升级不动你已经配好的东西」同一条），并且**在真机上跑不动时自己会说**：读不出版本号
+时 WARN、`backend\sql\` 里那份不在时 WARN（那说明这个目录里的程序文件**还是旧版**，
+而旧树跑迁移会说「无事可做」、屏幕上看着像成功）。**这个陷阱没有别的机器判据**——旧树
+的 `ensure_schema` 拿旧模型比旧库也会说对得上——只能靠把版本号念出来给人看。
+
+编码与调用三件套（`.ps1` 带 BOM、`.bat` 纯 ASCII、Python 输出走
+`Start-Process -NoNewWindow` 不经管道、`ContainsKey` 而不是裸读键）全部照 §18 的既有约定，
+`test_windows_assets.py` 的扫描列表里加了 `manual-migrate.ps1`——**每个「点了会叫一个
+按钮名」的新 `.ps1` 都要加进那张表**，否则最新那个脚本是唯一不受保护的一个。
+
+#### 版本号 1.0.0 → 1.1.2
+
+`backend/app/version.py` 的 `__version__` 与唯一的镜像 `frontend/package.json` 一起改，
+`VERSION_LABEL` 自动变 `V1.1`（§19）。`test_app_version.py` 里那条「标签丢掉修订号」
+的断言也跟着改成 `V1.1`——**字面量随 `__version__` 变是有意的**：写死一个不随它动的
+期望值，`[:2]` 被误写成 `[:3]` 时就抓不住了。顺带把两处「形如 `V1.0` / 不是规范的
+`1.0.0`」的注释改成「形如 `V1.1` / 形如 `1.1.2`」：那不是版本声明，是例子，写死了每次
+升版本都要来改它。
+
+#### 跑数与守卫
+
+`make test` **727 → 730 passed / 0 failed / 393.64s**（新增的三条就是
+`test_incremental_upgrade_sql.py` 那一个文件）；`make e2e` **127 passed**——本期没有
+e2e 用例：升级那三条路都不经过浏览器（`/tmp` 那份 SQL 与两枚 `.bat` 归
+`test_windows_assets.py`，跑的那一步只有真机能判）。
+`test_windows_assets.py` 里改的是**已有的**用例（`manual-migrate.ps1` 加进那份脚本名单），
+`test_app_version.py` 改的是一条断言的字面量，两者都不增加用例数。
+
+**变异验证 2/2，两条各自红的正是它该红的那一条**（`cp -p` 落盘备份，改完 `cmp` 逐字节还原）：
+
+| 变异 | 位置 | 结果 |
+|---|---|---|
+| M1 改了迁移、忘了重跑生成器（只改 `0014` 里一句 `PRECHECKS` 的提示语，DDL 一个字不动） | `0014_v12_enforce.py` | `test_the_snapshot_is_what_todays_migrations_render` **1 failed / 2 passed** |
+| M2 把 `compose` 换成「读盘上那份再返回」（也就是 `build()` 的写法） | `build_migration_sql.py` | `test_the_comparison_is_not_vacuous` **1 failed / 2 passed** |
+
+M2 那一条值得单独看一眼：它是 **`1 failed` 而不是 `3 failed`**——**那份逐字节比对的主用例
+仍然是绿的**。一个「先把两份写成同一串字节、再比一次」的实现，在主用例下完全看不出问题；
+抓住它的是那条**自证**用例。这就是「一条恒绿的守卫比没有更糟」那句话的可执行形式，
+也说明那第二条用例不是重复劳动。
+
+**这一期唯一一处只有真库才知道的东西**（与 §18 那三件同类）：那份 SQL 在**同一台
+MySQL 8.4.4 上两个方向各跑过一遍**，走的都是操作员会走的那条路——
+`mysql --default-character-set=utf8mb4 <库> < 那份文件`：
+
+| 方向 | 库的起点 | 实测结果 |
+|---|---|---|
+| 正向 | 停在 `0012` 的空白库 | `EXIT=0`，版本戳到 `0018_row_conflict_resolution`、**35 张表**，收尾时存储过程已删掉 |
+| 反向 | 同一个库上先塞一行 `risk_type = 'NOT_A_REAL_RISK_TYPE'` | **`ERROR 1644 (45000) at line 103: 检查 [1/1] 未通过`**，`EXIT=1`——而库**一个字没动**：仍是 **25 张表**、版本戳仍是 `0012`、`assessment_session` 上没有 `school_id` 那一列 |
+
+**反向那一趟才是这个文件存在的理由。** 「检查把那行打出来了」与「脚本因此停下」是两件
+事（上面那一节记的就是它们之间曾经什么都没有），而缝上它们的是 `CALL xlp_check_empty`：
+产物里 13 条检查各配一次 `CALL`（`[1/1]` 是 `0013` 的，`[1/12]`–`[12/12]` 是 `0014` 的），
+而第一条在 **103 行**——**每一条 DDL 都排在它后面**。
+
+**这两件事 `make test` 一件都证明不了**：那三条用例只读文件、一个字都不连库
+（它们能挡的是「有人改回去」，不是「它在真库上成立」）。所以上面这张表的每一格都只能
+重跑一次才有——`DROP DATABASE` 一个验证库、`alembic upgrade 0012_drop_care_case_unique`
+建到起点、然后跑那两趟。**别照抄这张表去断言，也别把它读成「已经有人替这次改动验过了」。**
 
 ## 已知缺口（动手前先看这里）
 

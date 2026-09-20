@@ -44,7 +44,7 @@ Create Date: 2026-09-19
 版本戳那一条 UPDATE 才失败，库从此卡在「已迁移但仍记在上一版」。
 """
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 revision = "0013_v12_expand"
@@ -75,7 +75,18 @@ def _precheck() -> None:
 
     MySQL 的 DDL 不在事务里，所以「先改一半再发现不行」是不可回退的：
     报出来的还会是一句英文的 1062 / 1452，离真正的原因（哪一行数据不对）很远。
+
+    **离线模式（`alembic upgrade --sql`）下这一层不跑**，因为那几条 SELECT 要读回结果，
+    而离线渲染拿到的是一个 `MockConnection`——它的 `execute()` 返回 `None`，
+    下一句 `.fetchall()` 当场 `AttributeError`。0013 与 0014 都会撞上（0013 也要读数据）。
+
+    出路不是把校验丢掉：`deploy/build_migration_sql.py` 生成增量 SQL 时，会把这里的
+    `PRECHECKS` **原样搬到那份文件的最前面**当第一段，由执行的人先跑一遍再看结果。
+    校验的**唯一出处仍然是下面这个常量**，只是换了个执行者——
+    别在这条 return 上面顺手加一句「离线就不校验了」的注释，那正是这一句要挡的事。
     """
+    if context.is_offline_mode():
+        return
     bind = op.get_bind()
     for what, sql in PRECHECKS:
         rows = bind.execute(sa.text(sql)).fetchall()
