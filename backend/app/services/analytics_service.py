@@ -10,6 +10,7 @@ from app.models.assessment import (
     AssessmentSession,
     AssessmentTarget,
     DimensionResult,
+    effective_session_predicate,
 )
 from app.models.care import FollowUpRecord, RetestPlan, StudentCareCase
 from app.models.enums import RoleCode
@@ -74,6 +75,12 @@ def latest_result_subquery(db: Session, user: UserAccount):
     排序复用 `latest_session_order`（施测时间优先，id 兜底），不是 `max(id)`：导入的历史
     普查 `id` 更大，按 id 取会把去年那场当成「本次」。
 
+    **被降级的那一场（`is_effective = 0`）不参与排名**（`effective_session_predicate`，
+    §18.8）：一名学生的在线答卷被外部结果顶掉之后，他「现在是什么状态」应以外部分数为准，
+    而如果两场都参与排名，取到哪一场就取决于文件里那个测评日期与在线交卷时刻谁更晚——
+    那正是这个子查询存在的意义所在（一个口径，不是两个）。窗口函数是按分区排名、过滤要
+    在 `WHERE` 里，所以谓词加在下面的 `.where(...)` 上，不能并进 `order_by`。
+
     会话与结果**内连接**：一场都没交卷的学生没有结果，也就没有等级可数。他由此落在
     `assessed_count` 之外而不是被算成「一般范围」——「还没测」和「测了没事」不是一回事。
 
@@ -97,7 +104,7 @@ def latest_result_subquery(db: Session, user: UserAccount):
             .label("rank"),
         )
         .join(Student, Student.id == AssessmentSession.student_id)
-        .where(student_scope_predicate(db, user))
+        .where(student_scope_predicate(db, user), effective_session_predicate())
         .subquery()
     )
     return (
@@ -501,7 +508,10 @@ def student_result_list(db: Session, user: UserAccount) -> list[dict]:
 
     latest_session_id = (
         select(AssessmentSession.id)
-        .where(AssessmentSession.student_id == Student.id)
+        .where(
+            AssessmentSession.student_id == Student.id,
+            effective_session_predicate(),
+        )
         .correlate(Student)
         .order_by(*latest_session_order())
         .limit(1)

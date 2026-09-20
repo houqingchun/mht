@@ -17,19 +17,18 @@ from sqlalchemy import select
 from app.models.account import UserAccount, UserScope
 from app.models.assessment import (
     AssessmentResult,
-    AssessmentSession,
     AssessmentTarget,
     AssessmentTask,
     DimensionResult,
-    RiskEvent,
 )
 from app.models.audit import AuditLog
 from app.models.care import FollowUpRecord, RetestPlan, StudentCareCase
 from app.models.enums import AccountType, RoleCode, ScopeType
 from app.models.organization import ClassGroup, Grade, School, Student
-from app.models.scale import AssessmentScale
 from app.security.passwords import hash_password
 from app.tests.conftest import auth_headers
+from app.tests.factories import make_risk_event, make_sitting, make_target, published_scale
+from app.tests.test_audit_export_api import export_and_download
 from app.tests.test_care_api import create_risk_case
 
 OTHER_SCHOOL_CODE = "YH"
@@ -59,6 +58,33 @@ def make_other_school_student(db) -> Student:
     return student
 
 
+def other_school_task(db) -> AssessmentTask:
+    """云海中学自己的一场任务。
+
+    存在的理由是**结构**，不是数据量：V1.2 那对复合外键（
+    `assessment_target_fk_task_school` 与 `assessment_target_fk_school_student`）
+    合起来把「目标的学校 = 任务的学校」与「目标的学校 = 学生的学校」都钉住了，
+    所以别校学生的目标行只能挂在别校的任务上。`make_other_school_population`
+    要给别校学生造目标行，就得先有这一场。
+
+    它同时让「任务行本身不按范围过滤」（`list_assessment_tasks`：状态、名称、
+    起止日期是任务自身的属性）第一次在测试里有个**真**的样本——此前库里只有一场
+    青禾任务，那条约定等于没被验过。
+    """
+    school = db.scalar(select(School).where(School.code == OTHER_SCHOOL_CODE))
+    task = AssessmentTask(
+        task_no="TASK-YH-SURVEY",
+        name="云海中学筛查",
+        scale_id=published_scale(db).id,
+        school_id=school.id,
+        scope_type="SCHOOL",
+        status="ACTIVE",
+    )
+    db.add(task)
+    db.flush()
+    return task
+
+
 def make_other_school_case(db) -> tuple[StudentCareCase, int]:
     """An open case at 云海中学, plus the session and pending risk event the
     review path needs.
@@ -68,24 +94,8 @@ def make_other_school_case(db) -> tuple[StudentCareCase, int]:
     exists, so the test would pass for the wrong reason and prove nothing.
     """
     student = make_other_school_student(db)
-    scale = db.scalar(select(AssessmentScale).where(AssessmentScale.status == "PUBLISHED"))
-    session = AssessmentSession(
-        student_id=student.id,
-        scale_id=scale.id,
-        scale_version=scale.version,
-        status="SUBMITTED",
-    )
-    db.add(session)
-    db.flush()
-    risk_event = RiskEvent(
-        student_id=student.id,
-        session_id=session.id,
-        risk_type="MANUAL_REVIEW_REQUIRED",
-        risk_level="HIGH_SENSITIVITY",
-        trigger_rule="KEY_QUESTION_85_YES",
-        status="PENDING",
-    )
-    db.add(risk_event)
+    session = make_sitting(db, student)
+    risk_event = make_risk_event(db, session)
     care_case = StudentCareCase(student_id=student.id, status="PENDING_REVIEW")
     db.add(care_case)
     db.commit()
@@ -142,19 +152,15 @@ def make_other_school_population(db) -> Student:
     counselor = seed_counselor(db)
     today = datetime.now(UTC).date()
 
-    task = db.scalar(select(AssessmentTask))
-    if task:
-        db.add(AssessmentTarget(task_id=task.id, student_id=student.id, status="COMPLETED"))
+    # 目标行必须挂在一场**云海中学自己的**任务上。V1.2 的复合外键
+    # `assessment_target_fk_task_school (task_id, school_id_snapshot) →
+    # assessment_task (id, school_id)` 说的就是这件事：一场任务的发放对象必须是这所
+    # 学校的学生。V1.0 的夹具把别校学生挂到种子那场青禾任务上，那样的行在新结构下
+    # **根本写不进去**（1452）——而它本来也不该存在（一次校内普查的范围就是本校）。
+    make_target(db, student, other_school_task(db), status="COMPLETED")
 
-    scale = db.scalar(select(AssessmentScale).where(AssessmentScale.status == "PUBLISHED"))
-    session = AssessmentSession(
-        student_id=student.id,
-        scale_id=scale.id,
-        scale_version=scale.version,
-        status="SUBMITTED",
-    )
-    db.add(session)
-    db.flush()
+    scale = published_scale(db)
+    session = make_sitting(db, student)
     db.add(
         AssessmentResult(
             session_id=session.id,
@@ -175,16 +181,7 @@ def make_other_school_population(db) -> Student:
             rule_version=scale.version,
         )
     )
-    db.add(
-        RiskEvent(
-            student_id=student.id,
-            session_id=session.id,
-            risk_type="MANUAL_REVIEW_REQUIRED",
-            risk_level="HIGH_SENSITIVITY",
-            trigger_rule="KEY_QUESTION_85_YES",
-            status="PENDING",
-        )
-    )
+    make_risk_event(db, session)
     db.add(StudentCareCase(student_id=student.id, status="FOLLOWING"))
     db.add(
         FollowUpRecord(
@@ -277,9 +274,15 @@ MUTATIONS = [
             "close_reason": "完成阶段跟进并进入一般观察",
             "close_note": "已检查后续安排。",
             "confirm_follow_up_checked": True,
+            # 乐观锁的号是**必填**的（§16.4：一个选填的版本号等于没有版本号），
+            # 少了它这两条走的是 422 而不是这里要验的 403。`make_other_school_case`
+            # 建出来的是新行，它的版本号就是 1——而范围守卫排在版本检查**之前**
+            # （`_scoped_case` 在 `_check_case_version` 前面），所以这里的值不影响
+            # 结果，写 1 是因为它确实是这一行的号。
+            "case_version": 1,
         },
     ),
-    ("reopen", {"reason": "出现新的已确认事实，需要重新跟进。"}),
+    ("reopen", {"reason": "出现新的已确认事实，需要重新跟进。", "case_version": 1}),
 ]
 
 
@@ -327,7 +330,15 @@ def test_batch_assign_rejects_the_whole_batch_if_any_case_is_out_of_scope(client
     response = client.post(
         "/api/v1/care-cases/batch-assign",
         headers=counselor,
-        json={"case_ids": [reachable_case.id, other_case.id], "owner_id": owner_id},
+        # 逐行带版本号（§16.4）：载荷不是一串 id，因为一条「批量分配」动的是每一行
+        # 档案的 `owner_id`，而客户端读到的那一行的版本各不相同。
+        json={
+            "assignments": [
+                {"case_id": reachable_case.id, "case_version": reachable_case.case_version},
+                {"case_id": other_case.id, "case_version": other_case.case_version},
+            ],
+            "owner_id": owner_id,
+        },
     )
 
     assert response.status_code == 403
@@ -468,7 +479,7 @@ def test_import_preview_ignores_duplicates_held_by_other_schools(client, db_sess
 
     csv = f"student_no,name,grade,class_name\n{other.student_no},新同学,初一,701\n"
     response = client.post(
-        "/api/v1/students/import/preview",
+        "/api/v1/student-roster/import/preview",
         headers=admin,
         files={"file": ("students.csv", csv.encode("utf-8"), "text/csv")},
     )
@@ -492,7 +503,7 @@ def test_import_preview_still_flags_a_same_school_duplicate(client, db_session):
 
     csv = "student_no,name,grade,class_name\nS001,林同学,初一,701\n"
     response = client.post(
-        "/api/v1/students/import/preview",
+        "/api/v1/student-roster/import/preview",
         headers=admin,
         files={"file": ("students.csv", csv.encode("utf-8"), "text/csv")},
     )
@@ -610,13 +621,28 @@ def test_student_roster_excludes_other_schools(client, db_session):
 
 
 def test_task_list_completion_follows_scope(client, db_session):
+    """完成率跟读者的范围走，而任务行本身不跟。
+
+    两句话都要断言，因为它们是**同一行上的两个数**：`total_targets` 是这位心理老师
+    范围内的人数，而 `name` / `status` 是任务自身的属性——一个连自己学校都不是的
+    任务也照样列得出来。2026-09-19 之前库里只有一场任务，所以后一句没有被验过。
+
+    前一句的力度变了，值得写明：V1.2 的复合外键（目标的学校 = 任务的学校 = 学生的
+    学校）现在**从结构上**挡住了「别校学生进了青禾任务的分母」这件事，范围谓词不再是
+    唯一挡住它的东西。但谓词仍然要管另一件事——同一所学校里、不在我班上的学生
+    （`test_task_status.py::test_the_completion_rate_follows_the_readers_scope`
+    钉的是那个）。所以这一条不是多余，只是它挡的不再是这里唯一的那种人。
+    """
     make_other_school_population(db_session)
     counselor = auth_headers(client, "counselor", "13800000001")
 
     tasks = client.get("/api/v1/assessment-tasks", headers=counselor).json()["data"]["items"]
+    by_no = {task["task_no"]: task for task in tasks}
 
-    # Unscoped the task would carry 云海中学's target in its denominator too.
-    assert [task["total_targets"] for task in tasks] == [1]
+    # 范围内的那个数：青禾那场只有 S001 一个人进了分母
+    assert by_no["TASK-2026-FALL-MHT"]["total_targets"] == 1
+    # 而别校那一场也在列表里——它的目标行不是这位老师的范围，所以是 0
+    assert by_no["TASK-YH-SURVEY"]["total_targets"] == 0
 
 
 def test_task_targets_are_issued_within_the_creators_scope(client, db_session):
@@ -674,8 +700,11 @@ def test_bulk_export_excludes_other_schools(client, db_session):
     counselor = create_risk_case(client)
     make_other_school_population(db_session)
 
-    response = client.post(
-        "/api/v1/care-cases/export", headers=counselor, json={"purpose": "阶段工作统计"}
+    # 两跳（阶段 8，见 `export_and_download` 的 docstring）：建作业回的是作业载荷，
+    # 字节从 `/export-jobs/{id}/download` 出去。范围谓词在**建作业那一刻**就生效了
+    # （文件是那时生成并落盘的），所以这一条断的仍然是「这份文件里没有云海的人」。
+    response = export_and_download(
+        client, "/api/v1/care-cases/export", counselor, json={"purpose": "阶段工作统计"}
     )
 
     assert response.status_code == 200

@@ -16,6 +16,7 @@ from app.services.assessment_service import (
     list_session_questions,
     list_student_assessment_history,
     list_student_tasks,
+    retry_calculation,
     save_answer,
     session_payload,
     student_for_user,
@@ -106,6 +107,42 @@ def submit(
         resource_id=str(session_id),
         actor=current_user,
         request=request,
+    )
+    db.commit()
+    return ok(data)
+
+
+@router.post("/assessment-sessions/{session_id}/calculate")
+def recalculate_session(
+    session_id: int,
+    request: Request,
+    current_user: Annotated[UserAccount, Depends(require_role(RoleCode.COUNSELOR))],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """重算一场「评分没成」的答卷 —— 个案详情上那个「重算评分」按钮。
+
+    **归心理老师，不归管理员**（§4 那条「测评任务不是一个能力，是角色」的同一层：
+    测评这条线是学校业务，客户端写侧归业务负责人）。管理员要到不了这里——他也没有
+    个案详情页可去。
+
+    它是一次**敏感访问**：重算要读满整份答卷（重点题也在里面）。所以审计写在返回
+    数据之前（§8），并且带上 `student_id`——那一列才让这一次重算出现在这名学生的
+    「敏感访问记录」页签里，而 `actor_role` 回答不了「三位心理老师里是谁点的」。
+    """
+    data = retry_calculation(db, current_user, session_id)
+    write_audit(
+        db,
+        action="重算测评评分",
+        resource_type="ASSESSMENT_SESSION",
+        resource_id=str(session_id),
+        actor=current_user,
+        request=request,
+        student_id=data["student_id"],
+        # `detail` 回答的是「这一次到底动了什么」：已经有结果的那一次什么都没写，
+        # 而它与真正重算过的那一次在 `action` 上一模一样。
+        detail="重算完成，已写入结果"
+        if data["recalculated"]
+        else f"未重算：会话仍是 {data['calculation_status']}",
     )
     db.commit()
     return ok(data)

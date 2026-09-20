@@ -1,18 +1,24 @@
 import csv
+import hashlib
 import io
 import json
+from datetime import datetime
 from typing import Any
 
-import jwt
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
 from app.core.errors import AppError
 from app.models.account import UserAccount, UserScope
 from app.models.enums import AccountType, RoleCode, ScopeType
+from app.models.importing import (
+    StudentAgeChangeLog,
+    StudentRosterImportBatch,
+    StudentRosterImportRow,
+)
 from app.models.organization import ClassGroup, Grade, School, Student
 from app.security.passwords import hash_password
+from app.services.audit_service import write_audit
 # 处置方式的两个码与测评导入**共用一套**：同一份 API 词汇出现在两个端点里，
 # 各写一份字面量就会有第三种写法悄悄冒出来，而它只会在前端提交时变成一句 422。
 # 中文标签各自定义——含义确实不同（测评那边「覆盖」是替换上次导入的那一场，
@@ -40,6 +46,30 @@ CONFLICT_STUDENT_NO = "STUDENT_NO_EXISTS"
 
 # 名册字段里，「覆盖」能改哪些。学号是主键，不在其中——它正是冲突的判据。
 OVERWRITABLE_FIELDS = ("name", "grade", "class_name", "gender", "age")
+
+# ── 批次与逐行的状态码（`student_roster_import_batch.status` /
+#    `student_roster_import_row.processing_status`）─────────────────────────
+#
+# 批次的 `status` 两个取值**都会真的出现**：上传一份文件落一行 `PREVIEW`，确认导入
+# 把它改成 `COMMITTED`。`PREVIEW` 不是「没写完的临时行」——它是「有人上传过这份文件、
+# 看过校验结果、还没有拍板」，而这正是操作员回到这一页时想找的那一行：他上传完之后
+# 被叫走了，回来要能接着提交，而不是重新传一次文件。
+BATCH_STATUS_PREVIEW = "PREVIEW"
+BATCH_STATUS_COMMITTED = "COMMITTED"
+
+# 逐行状态。前四个在**提交**时才定得下来（提交之前没人知道这一行会新建还是更新）；
+# `ERROR` 在**预览**时就定了——坏单元格（缺列、班级与年级对不上）没有任何处置方式
+# 能救，所以那一行的结论不会因为后面的选择而改变。
+ROW_STATUS_PENDING = "PENDING"
+ROW_STATUS_CREATED = "CREATED"
+ROW_STATUS_UPDATED = "UPDATED"
+ROW_STATUS_SKIPPED = "SKIPPED"
+ROW_STATUS_ERROR = "ERROR"
+
+# 批次号按**天**，与测评导入的 `IMPORT-YYYYMM-N` 不同（那边按月的理由是「一场任务
+# 就是一个月」）。名册导入没有任务这一层，它的事件单位是「某天有人拿了一份文件来」，
+# 而改正一处错别字再导一次是常态——同一天两批是正常的，不该被折成一批。
+ROSTER_BATCH_PREFIX = "ROSTER"
 
 
 def student_resolution_label(resolution: str | None) -> str:
@@ -69,7 +99,7 @@ MIN_AGE, MAX_AGE = 3, 100
 # 班级编号的首位数字表示年级：701 = 初一 1 班，801 = 初二 1 班，901 = 初三 1 班。
 # 学校按这个规则编号，所以「班级」里其实已经编进了年级——但年级列仍然必填，两列对不上
 # 就按行报错。这里的冗余是特性，不是遗留：静默地按班级把学生挂到一个错年级下
-# （`commit_student_import` 只会拿字符串去 `Grade.name` 里找、找不到就新建一个），
+# （`commit_roster_import` 只会拿字符串去 `Grade.name` 里找、找不到就新建一个），
 # 比让录错的人当场看见一行错误糟得多。
 GRADE_CLASS_PREFIX = {"初一": "7", "初二": "8", "初三": "9"}
 CLASS_PREFIX_GRADE = {prefix: grade for grade, prefix in GRADE_CLASS_PREFIX.items()}
@@ -151,7 +181,7 @@ def parse_age(value: str) -> int | None:
     A date typed into this cell (`2013-09-01`) is therefore an error, which is
     the point: the column changed name and meaning, and an old template must be
     told so rather than quietly storing NULL ages for the whole roster (see
-    `preview_student_import`).
+    `analyze_roster_rows`).
     """
     if not value:
         return None
@@ -177,6 +207,47 @@ def _target_school(db: Session) -> School | None:
     discloses which student numbers other schools have.
     """
     return db.scalar(select(School).where(School.code == "QH"))
+
+
+def _ensure_target_school(db: Session) -> School:
+    """取这所学校，没有就建出来。
+
+    预览与提交都要它，而且现在**预览也需要**：批次行上 `school_id` 是 NOT NULL，
+    而预览已经落一行批次了（见 `start_roster_import`）。从前只有提交会建学校，
+    是因为预览那一侧只需要一个「判冲突用的锚」——取不到就跳过冲突判定。
+    现在那条路走不通了，所以建学校的动作**提前到预览**，两边共用这一处。
+
+    幂等：一个库里只有一行 `QH`（单校写死，缺口 2）。
+    """
+    school = _target_school(db)
+    if school is None:
+        # `name` 只写这一次、也**不会显示给任何人**：界面上所有校名都读配置里的
+        # `system_setting.org.school_name`（`auth_service._school_display_names`），
+        # 这一行只是组织表里的一个锚点。所以不必去同步它。
+        school = School(code="QH", name="青禾实验学校")
+        db.add(school)
+        db.flush()
+    return school
+
+
+def _next_batch_no(db: Session) -> str:
+    """`ROSTER-20260919-1`：当天第几批。
+
+    `taken` 一次取全而不是逐条查：同一天里已经有三批时，逐条查是三次往返，
+    而这一天剩下的批次数一眼就看得出来。
+    """
+    prefix = f"{ROSTER_BATCH_PREFIX}-{datetime.now():%Y%m%d}"
+    taken = set(
+        db.scalars(
+            select(StudentRosterImportBatch.batch_no).where(
+                StudentRosterImportBatch.batch_no.like(f"{prefix}-%")
+            )
+        ).all()
+    )
+    number = 1
+    while f"{prefix}-{number}" in taken:
+        number += 1
+    return f"{prefix}-{number}"
 
 
 def conflicts_for_row(db: Session, school: School, row: dict[str, str]) -> list[dict[str, Any]]:
@@ -206,11 +277,21 @@ def conflicts_for_row(db: Session, school: School, row: dict[str, str]) -> list[
     ]
 
 
-def preview_student_import(db: Session, rows: list[dict[str, str]]) -> dict:
-    school = _target_school(db)
+def analyze_roster_rows(
+    db: Session, school: School, rows: list[dict[str, str]]
+) -> list[dict[str, Any]]:
+    """逐行校验与冲突判定，一行一条结论。
+
+    单独一个函数，因为**预览与提交各要算一遍**，而且必须用同一份判据：预览与提交
+    之间可能又有人导了同一份文件（这正是 `assessment_import_service` 里 `planned`
+    那条注释的同一件事）。抽出来之前它是内联在旧那个 `preview_student_import` 里的。
+
+    返回的每一项在文件里那一行的**原始文本**之上加了四样东西：
+    `row_no`（文件里的行号）、`errors`（只能改文件重导的问题）、`conflicts`
+    （要操作员拍板的事）、以及 `gender_code` / `age_value`（这一行落库时要用的值）。
+    """
     seen: set[str] = set()
-    importable_rows = []
-    preview_rows = []
+    analyzed: list[dict[str, Any]] = []
     # `start=2`：这是**文件里的行号**，不是记录序号——第 1 行是表头。操作员拿到
     # 「第 2 行」是要回 Excel 里改那一行的，改成 1 会让他去改表头。
     for index, row in enumerate(rows, start=2):
@@ -221,10 +302,7 @@ def preview_student_import(db: Session, rows: list[dict[str, str]]) -> dict:
         if row.get("student_no") in seen:
             errors.append("文件内重复学号")
         seen.add(row.get("student_no", ""))
-        # 找不到学校就没法判冲突——那种情况下冲突清单是空的，
-        # `commit_student_import` 会自己把学校建出来，而它那边的同一份判据
-        # 会在学校建好之后重算。这里不猜。
-        conflicts = conflicts_for_row(db, school, row) if school else []
+        conflicts = conflicts_for_row(db, school, row)
         if row.get("grade") and row.get("class_name"):
             # 年级与班级编号的一致性。放在预览里而不是提交时：这一层的约定是
             # 「坏单元格变成学校看得见、改得动的一行错误」，而不是三种结果里的
@@ -241,56 +319,149 @@ def preview_student_import(db: Session, rows: list[dict[str, str]]) -> dict:
         # Normalised here, not in `normalize_row`: a bad cell has to become a
         # per-row error the school can see and fix, not an exception that rejects
         # the other 200 rows, and not a value quietly coerced to NULL.
-        parsed: dict[str, str] = {}
+        gender_code = ""
         try:
-            parsed["gender"] = parse_gender(row.get("gender", "")) or ""
+            gender_code = parse_gender(row.get("gender", "")) or ""
         except ValueError as exc:
             errors.append(str(exc))
+        age_value: int | None = None
         try:
-            age = parse_age(row.get("age", ""))
-            # The preview token is a JWT, so the payload stays JSON — numbers travel
-            # as strings and are parsed back at commit time.
-            parsed["age"] = str(age) if age is not None else ""
+            age_value = parse_age(row.get("age", ""))
         except ValueError as exc:
             errors.append(str(exc))
-        item = {**row, "row_no": index, "errors": errors, "conflicts": conflicts}
-        preview_rows.append(item)
-        # 带冲突的行**照样进 token**：选了「覆盖」它们就要被写进去。少这一句，
-        # 「覆盖」这条路根本走不通——token 里没有那几行。而带了错的行不进，
-        # 那是一种没有任何处置方式能救的状态。
-        if not errors:
-            importable_rows.append({**row, **parsed})
-    ready = sum(1 for item in preview_rows if not item["errors"] and not item["conflicts"])
-    conflicted = sum(1 for item in preview_rows if not item["errors"] and item["conflicts"])
-    token = create_preview_token(importable_rows) if importable_rows else None
+        analyzed.append(
+            {
+                **row,
+                "row_no": index,
+                "errors": errors,
+                "conflicts": conflicts,
+                "gender_code": gender_code,
+                "age_value": age_value,
+            }
+        )
+    return analyzed
+
+
+def _summarize(analyzed: list[dict[str, Any]]) -> dict[str, int]:
+    """三个计数，以及「这一批有没有东西可提交」。
+
+    `submittable_count` 是**判据**，不是给眼睛看的派生数：选了「覆盖」时冲突行也要
+    写进去、选了「放弃」时它们被跳过，两种情况下它们都属于「这一批要处理的行」。
+    前端按它禁用「确认导入」，所以在后端算一次、原样发下去——两边各算一次会漂。
+    """
+    ready = sum(1 for item in analyzed if not item["errors"] and not item["conflicts"])
+    conflicted = sum(1 for item in analyzed if not item["errors"] and item["conflicts"])
     return {
-        "total": len(rows),
+        "total": len(analyzed),
         "valid_count": ready,
         "conflict_count": conflicted,
-        "error_count": len(rows) - ready - conflicted,
-        "rows": preview_rows,
-        "preview_token": token,
+        "error_count": len(analyzed) - ready - conflicted,
+        "submittable_count": ready + conflicted,
+    }
+
+
+def start_roster_import(
+    db: Session, *, actor: UserAccount, filename: str, content: bytes
+) -> dict[str, Any]:
+    """上传一份名册文件：解析、逐行校验，**并把这一批落进库**。
+
+    「预览」从这一刻起是一次写操作，这是有意的。批次的 `status` 默认值就是
+    `PREVIEW`（对齐阶段的 DDL），而它要回答的问题在提交之前就已经存在了：
+    **「有人上传过这份文件，他看到的结论是什么」**。预览的结果只活在返回值里的
+    话，操作员上传完被叫走、回来时那一页是空的，他只能重传一次——而重传之后
+    库里的逐行明细与刚才屏幕上那份是不是同一份，就没有任何东西能回答了。
+
+    文件指纹（`file_sha256`）与操作者一起决定**复用哪一行**：同一个人把同一份
+    文件再传一次（改了别处的错、或者只是想再看一眼）不会留下第二行 PREVIEW 批次。
+    这一条是必需的，否则学校每改一次错别字就多一批孤儿行，而批次历史那一页的
+    全部意义就是让人按它找「哪一批真的导进去了」。
+    """
+    rows = parse_student_import(filename, content)
+    school = _ensure_target_school(db)
+    digest = hashlib.sha256(content).hexdigest()
+    batch = db.scalar(
+        select(StudentRosterImportBatch)
+        .where(
+            StudentRosterImportBatch.imported_by == actor.id,
+            StudentRosterImportBatch.file_sha256 == digest,
+            StudentRosterImportBatch.status == BATCH_STATUS_PREVIEW,
+        )
+        .order_by(StudentRosterImportBatch.id.desc())
+    )
+    if batch is None:
+        batch = StudentRosterImportBatch(
+            batch_no=_next_batch_no(db),
+            school_id=school.id,
+            file_name=filename,
+            file_sha256=digest,
+            imported_by=actor.id,
+            status=BATCH_STATUS_PREVIEW,
+        )
+        db.add(batch)
+        db.flush()
+    else:
+        # 复用这一行，但**逐行明细整批重写**：同一份文件重新预览时结论可能已经变了
+        # （这中间名册多了一个学号，那一行就从「新增」变成了「冲突」），留着旧结论
+        # 会让库里那一批说的与实际不符。删行是安全的——`student_roster_import_row`
+        # 是叶子表（没有任何东西引用它，§9 那条「叶子表删了重插是安全的」）。
+        db.execute(
+            delete(StudentRosterImportRow).where(StudentRosterImportRow.batch_id == batch.id)
+        )
+        batch.file_name = filename
+    analyzed = analyze_roster_rows(db, school, rows)
+    for item in analyzed:
+        # ERROR 在**预览**时就定下来（坏单元格没有处置方式能救）；其余行先 PENDING，
+        # 提交时才知道它会变成 CREATED / UPDATED / SKIPPED。
+        #
+        # 这里存的是**这一行落进系统时的值**，不是文件里的原始字节：`gender` 存
+        # `MALE`/`FEMALE`（界面用 `genderLabel` 翻回中文），`age` 存整数。
+        # `age` 是六列里唯一一个**装不下原始写法**的——`student.age` 是 int 列，
+        # 「13岁」那种写法的原文只活在错误文案里，不在这里。
+        db.add(
+            StudentRosterImportRow(
+                batch_id=batch.id,
+                row_no=item["row_no"],
+                student_no=item["student_no"] or None,
+                name=item["name"] or None,
+                grade_name=item["grade"] or None,
+                class_name=item["class_name"] or None,
+                gender=item["gender_code"] or None,
+                age=item["age_value"],
+                processing_status=ROW_STATUS_ERROR if item["errors"] else ROW_STATUS_PENDING,
+                # 冲突码只在**冲突**时有值，与错误分开：冲突要人拍板，错误不用。
+                conflict_code=(
+                    item["conflicts"][0]["type"] if item["conflicts"] else None
+                ),
+                message="；".join(item["errors"]) or None,
+            )
+        )
+    summary = _summarize(analyzed)
+    batch.total_rows = summary["total"]
+    batch.error_rows = summary["error_count"]
+    db.flush()
+    return {
+        "batch_id": batch.id,
+        "batch_no": batch.batch_no,
+        **summary,
+        "rows": [
+            {
+                "row_no": item["row_no"],
+                "student_no": item["student_no"],
+                "name": item["name"],
+                "grade": item["grade"],
+                "class_name": item["class_name"],
+                "gender": item["gender"],
+                "age": item["age"],
+                "errors": item["errors"],
+                "conflicts": item["conflicts"],
+            }
+            for item in analyzed
+        ],
     }
 
 
 def field_label(field: str) -> str:
     return {"student_no": "学号", "name": "姓名", "grade": "年级", "class_name": "班级"}[field]
-
-
-def create_preview_token(rows: list[dict[str, str]]) -> str:
-    settings = get_settings()
-    return jwt.encode({"rows": rows, "kind": "student_import_preview"}, settings.jwt_secret, algorithm=settings.jwt_algorithm)
-
-
-def decode_preview_token(token: str) -> list[dict[str, str]]:
-    settings = get_settings()
-    try:
-        payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
-    except jwt.PyJWTError as exc:
-        raise AppError("VALIDATION_ERROR", "导入预览已失效，请重新预览", 422) from exc
-    if payload.get("kind") != "student_import_preview":
-        raise AppError("VALIDATION_ERROR", "导入预览无效", 422)
-    return payload.get("rows", [])
 
 
 def _grade_and_class(db: Session, school: School, row: dict[str, str]) -> tuple[Grade, ClassGroup]:
@@ -314,7 +485,35 @@ def _grade_and_class(db: Session, school: School, row: dict[str, str]) -> tuple[
     return grade, class_group
 
 
-def _overwrite_student(db: Session, student: Student, row: dict[str, str], grade: Grade, class_group: ClassGroup) -> None:
+def _row_from_storage(row: StudentRosterImportRow) -> dict[str, str]:
+    """把库里那一行还原成「文件里那一行」的形状，好让提交走与预览同一个函数。
+
+    存的是**规范化之后**的值：`gender` 是 `MALE` / `FEMALE`（界面用 `genderLabel`
+    翻回中文），`age` 是整数。所以这里不再解析一遍——`parse_gender("MALE")` 会过、
+    `parse_age("13")` 也会过，但那两次解析只是把「已经定下来的值」重新怀疑一次，
+    而它们与预览时那次解析的**唯一**区别就是多了一次可能失败的机会。
+    """
+    return {
+        "student_no": row.student_no or "",
+        "name": row.name or "",
+        "grade": row.grade_name or "",
+        "class_name": row.class_name or "",
+        "gender": row.gender or "",
+        "age": str(row.age) if row.age is not None else "",
+    }
+
+
+def _overwrite_student(
+    db: Session,
+    student: Student,
+    row: dict[str, str],
+    grade: Grade,
+    class_group: ClassGroup,
+    *,
+    actor: UserAccount,
+    batch: StudentRosterImportBatch,
+    row_no: int,
+) -> None:
     """用文件里那一行更新名册上的这名学生。
 
     **就地改，不删了重建**：`student.id` 被关怀档案、测评会话、风险事件、账号范围
@@ -335,7 +534,7 @@ def _overwrite_student(db: Session, student: Student, row: dict[str, str], grade
     if row.get("gender"):
         student.gender = row["gender"]
     if row.get("age"):
-        student.age = int(row["age"])
+        _set_age(db, student, int(row["age"]), actor=actor, batch=batch, row_no=row_no)
     # 账号的展示名跟着走——它是同一名学生在系统里的另一个「名字」，
     # 名册改了姓名而账号还印着旧名字，两处会各说各话。
     user = db.scalar(select(UserAccount).where(UserAccount.account == student.student_no))
@@ -343,37 +542,113 @@ def _overwrite_student(db: Session, student: Student, row: dict[str, str], grade
         user.display_name = row["name"]
 
 
-def commit_student_import(
-    db: Session, rows: list[dict[str, str]], resolution: str | None = None
-) -> dict:
-    """把预览过的行写进名册，单事务。
+def _set_age(
+    db: Session,
+    student: Student,
+    new_age: int,
+    *,
+    actor: UserAccount,
+    batch: StudentRosterImportBatch,
+    row_no: int,
+) -> None:
+    """改年龄，并留下**两处**痕迹：`student_age_change_log` 一行 + 一条审计。
+
+    两处不是重复。审计页按动作码搜（`更新学生年龄`），它回答的是「谁在什么时候动了
+    这个数」——与 `assessment_import_service._update_roster_age` 写在同一个动作码下，
+    因为对读轨迹的人来说这两件事是同一件事：一次导入改了名册上的年龄。而
+    `student_age_change_log` 是**结构化的那一份**：它把「名册导入批次 N 的第 M 行」
+    记成外键，能回答审计答不出的问题——「这一列到底被改过几次」。
+
+    `reason` 写中文，与审计的 `detail` 同一口径（该列自己的 docstring 记了这条）。
+    """
+    previous = student.age
+    if previous == new_age:
+        # 值没变就不记。一行「12 → 12」在审计与变更记录里都是噪声，
+        # 而它会让「这一列被改过几次」那个问题的答案多出一串假的。
+        return
+    student.age = new_age
+    db.add(
+        StudentAgeChangeLog(
+            student_id=student.id,
+            roster_import_batch_id=batch.id,
+            old_age=previous,
+            new_age=new_age,
+            reason=f"名册导入覆盖年龄（{batch.batch_no} 第 {row_no} 行）",
+            changed_by=actor.id,
+        )
+    )
+    write_audit(
+        db,
+        action="更新学生年龄",
+        resource_type="STUDENT",
+        resource_id=str(student.id),
+        actor=actor,
+        student_id=student.id,
+        detail=f"名册 {previous} → 文件 {new_age}（名册导入 {batch.batch_no}）",
+    )
+
+
+def commit_roster_import(
+    db: Session, *, actor: UserAccount, batch_id: int, resolution: str | None = None
+) -> dict[str, Any]:
+    """把预览过的那一批写进名册，单事务。
 
     `resolution` 只在文件里真的有冲突（学号已在名册上）时才是必需的：`overwrite`
     （用文件里的信息更新这名学生）或 `skip`（这几行不动，其余照导）。没有冲突的
     文件照旧一次提交，不必带它——要求 99% 的正常导入都先回答一个不该问的问题，
     只会让人乱点。
+
+    请求体里带的是 `batch_id` 而不是整份文件或一个签过名的预览令牌：行已经在库里
+    （`start_roster_import` 落下的），提交时读回来。这样「这一批到底导了哪些行」
+    在提交之前就有据可查，而操作员上传完被叫走、回来接着提交时，他提交的正是
+    屏幕上那一批——不是浏览器内存里那份可能已经过期的副本。
     """
     if resolution is not None and resolution not in RESOLUTIONS:
         raise AppError("VALIDATION_ERROR", RESOLUTION_HINT, 422)
-    school = _target_school(db)
-    if not school:
-        # `name` 只写这一次、也**不会显示给任何人**：界面上所有校名都读配置里的
-        # `system_setting.org.school_name`（`auth_service._school_display_names`），
-        # 这一行只是组织表里的一个锚点。所以不必去同步它。
-        school = School(code="QH", name="青禾实验学校")
-        db.add(school)
-        db.flush()
-
+    batch = db.get(StudentRosterImportBatch, batch_id)
+    if batch is None:
+        raise AppError("NOT_FOUND", "导入批次不存在", 404)
+    if batch.status != BATCH_STATUS_PREVIEW:
+        # 已经提交过的批次再点一次「确认导入」会把整份名册写第二遍——第二次遇到
+        # 的每一行都是冲突，而选「覆盖」时它会静默地再覆盖一遍（看起来成功了）。
+        raise AppError(
+            "VALIDATION_ERROR",
+            f"批次 {batch.batch_no} 已经导入过了，要再导一次请重新上传文件",
+            422,
+        )
+    school = _ensure_target_school(db)
+    # `batch_id` 是**客户端传来的 ID**，所以它本身不能成为凭据（§9 那条：取到之后
+    # 校验，否则档案 ID 就是越权凭据）。名册导入今天写死单校（缺口 2），所以这一条
+    # 在现阶段的库上永远成立——正因为如此它才便宜：等哪天多校了，漏掉它不会以
+    # 「报错」的形式出现，而会以「A 校管理员把 B 校的名册导进了 B 校」的形式出现，
+    # 界面上一切正常。
+    #
+    # 回 404 而不是 403，与上面「批次不存在」**同一句话**：`batch_id` 既然来自客户端，
+    # 一句「这一批属于别的学校」就等于确认了那个 id 存在。
+    if batch.school_id != school.id:
+        raise AppError("NOT_FOUND", "导入批次不存在", 404)
+    rows = db.scalars(
+        select(StudentRosterImportRow)
+        .where(StudentRosterImportRow.batch_id == batch.id)
+        .order_by(StudentRosterImportRow.row_no)
+    ).all()
+    # ERROR 行**不参与提交**。「覆盖 / 放弃」这两个回答回答的是冲突，不是在回答
+    # 「这一行的单元格填坏了」——把一条已经报错的行一起写进名册，只会让它凭空
+    # 出现，而屏幕上它明明是红的。
+    planned = [
+        (row, conflicts_for_row(db, school, _row_from_storage(row)))
+        for row in rows
+        if row.processing_status != ROW_STATUS_ERROR
+    ]
     # 冲突**先全部算完再动手**：写了一半才发现「还差一个决定」，用户看到的是导入
-    # 失败，库里却已经躺着一批新学生。所以这一步在任何写入之前。重算而不是信
-    # token 里的那份：预览与提交之间可能又有人导了同一份文件（同测评导入）。
-    planned = [(row, conflicts_for_row(db, school, row)) for row in rows]
+    # 失败，库里却已经躺着一批新学生。所以这一步在任何写入之前。重算而不是信预览
+    # 时那份：预览与提交之间可能又有人导了同一份文件（同测评导入的 `planned`）。
     if resolution is None:
-        pending = [row for row, conflicts in planned if conflicts]
-        if pending:
+        conflicted = [row for row, conflicts in planned if conflicts]
+        if conflicted:
             raise AppError(
                 "VALIDATION_ERROR",
-                f"有 {len(pending)} 条记录的学号已在名册上，请选择覆盖或放弃后重试",
+                f"有 {len(conflicted)} 条记录的学号已在名册上，请选择覆盖或放弃后重试",
                 422,
             )
 
@@ -381,40 +656,52 @@ def commit_student_import(
     default_password_hash = hash_password("123456")
     for row, conflicts in planned:
         if conflicts and resolution == RESOLUTION_SKIP:
+            row.processing_status = ROW_STATUS_SKIPPED
+            # 「放弃」的那一行把原因**留在它自己身上**：这一批导完之后回看，
+            # 「为什么这个人没更新」的唯一答案就在这一格。
+            row.message = conflicts[0]["message"]
             skipped += 1
             continue
-        grade, class_group = _grade_and_class(db, school, row)
+        data = _row_from_storage(row)
+        grade, class_group = _grade_and_class(db, school, data)
         existing = db.scalar(
             select(Student).where(
-                Student.school_id == school.id, Student.student_no == row["student_no"]
+                Student.school_id == school.id, Student.student_no == data["student_no"]
             )
         )
         if existing:
             # 走到这里就是「有冲突 + 选了覆盖」。冲突是**算出来的**，所以不存在
             # 「有冲突却选了覆盖」之外的第三种情况。
-            _overwrite_student(db, existing, row, grade, class_group)
+            _overwrite_student(
+                db,
+                existing,
+                data,
+                grade,
+                class_group,
+                actor=actor,
+                batch=batch,
+                row_no=row.row_no,
+            )
+            row.student_id = existing.id
+            row.processing_status = ROW_STATUS_UPDATED
             updated += 1
             continue
-        # `.get` rather than `[...]`: a preview token minted before the profile
-        # columns existed (an open tab across a deploy) is still validly signed and
-        # simply carries neither key.
-        age = row.get("age")
         student = Student(
-            student_no=row["student_no"],
-            name=row["name"],
-            masked_name=row["name"],
+            student_no=data["student_no"],
+            name=data["name"],
+            masked_name=data["name"],
             school_id=school.id,
             grade_id=grade.id,
             class_id=class_group.id,
-            gender=row.get("gender") or None,
-            age=int(age) if age else None,
+            gender=data["gender"] or None,
+            age=int(data["age"]) if data["age"] else None,
         )
         db.add(student)
         db.flush()
         user = UserAccount(
-            account=row["student_no"],
+            account=data["student_no"],
             account_type=AccountType.STUDENT_NO,
-            display_name=row["name"],
+            display_name=data["name"],
             password_hash=default_password_hash,
             role_code=RoleCode.STUDENT,
             must_change_password=True,
@@ -422,6 +709,121 @@ def commit_student_import(
         db.add(user)
         db.flush()
         db.add(UserScope(user_id=user.id, scope_type=ScopeType.STUDENT, school_id=school.id, student_id=student.id))
+        row.student_id = student.id
+        row.processing_status = ROW_STATUS_CREATED
         created += 1
-    return {"created": created, "updated": updated, "skipped": skipped}
+    # 成功的那两行把 `message` 清掉：它只在「需要解释」时有值（错误与放弃）。
+    # `conflict_code` **留着**——它记的是这一行曾经撞上过什么，而选「覆盖」时
+    # 那件事确实发生过，只是被处置掉了。
+    for row, _ in planned:
+        if row.processing_status in (ROW_STATUS_CREATED, ROW_STATUS_UPDATED):
+            row.message = None
+    batch.created_rows = created
+    batch.updated_rows = updated
+    batch.skipped_rows = skipped
+    batch.error_rows = sum(1 for row in rows if row.processing_status == ROW_STATUS_ERROR)
+    batch.status = BATCH_STATUS_COMMITTED
+    db.flush()
+    return {
+        "batch_id": batch.id,
+        "batch_no": batch.batch_no,
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "error_count": batch.error_rows,
+    }
+
+
+def list_roster_import_batches(db: Session, *, limit: int = 20) -> dict[str, Any]:
+    """最近的几批名册导入，新的在前。
+
+    `limit` 是给眼睛的上限（§10）：这一页要看的是「最近导入过什么」，
+    而一个用了三年的库会有几百批。返回的 `total` 说的是**一共有多少批**，
+    界面据此写「另有 N 批未显示」。
+
+    **按学校过滤**，与 `commit_roster_import` 那条检查同一个理由：名册是组织事实，
+    A 校的管理员不该看见 B 校导过几批、导的是哪个文件。今天写死单校（缺口 2），
+    所以这一条恒真——写在这里是为了多校那一天**读的那一侧不用再想一遍**。
+    """
+    school = _target_school(db)
+    if school is None:
+        # 一所学校都没有 → 一批也没有。走这一支而不是「不过滤」：这是 fail-closed
+        # 的那一侧，而且它与 `_target_school` 的语义一致（那张表里只有一行 `QH`）。
+        return {"items": [], "total": 0, "truncated": False}
+    total = (
+        db.scalar(
+            select(func.count())
+            .select_from(StudentRosterImportBatch)
+            .where(StudentRosterImportBatch.school_id == school.id)
+        )
+        or 0
+    )
+    batches = db.scalars(
+        select(StudentRosterImportBatch)
+        .where(StudentRosterImportBatch.school_id == school.id)
+        .order_by(StudentRosterImportBatch.id.desc())
+        .limit(limit)
+    ).all()
+    return {
+        "items": [
+            {
+                "id": batch.id,
+                "batch_no": batch.batch_no,
+                "file_name": batch.file_name,
+                "status": batch.status,
+                "total_rows": batch.total_rows,
+                "created_rows": batch.created_rows,
+                "updated_rows": batch.updated_rows,
+                "skipped_rows": batch.skipped_rows,
+                "error_rows": batch.error_rows,
+                "created_at": batch.created_at,
+            }
+            for batch in batches
+        ],
+        "total": total,
+        "truncated": total > len(batches),
+    }
+
+
+def list_roster_import_rows(db: Session, *, batch_id: int) -> dict[str, Any]:
+    """某一批的逐行明细。行数有界（一份名册就是一个学校的人），客户端排序分页（§10）。
+
+    批次不存在时 404 而不是空列表：一个空列表会让界面说「这一批没有明细」，
+    而实话是「没有这一批」——§14 那条「空态是一句关于数据的话」在这里的反面。
+
+    「不属于这所学校」也回 404 而不是 403，与「不存在」**同一句话**：`batch_id` 是
+    客户端传来的，回一句「这一批属于别的学校」等于确认了那个 id 存在。上面那条
+    `commit_roster_import` 里的检查同此。
+    """
+    batch = db.get(StudentRosterImportBatch, batch_id)
+    if batch is None:
+        raise AppError("NOT_FOUND", "导入批次不存在", 404)
+    school = _target_school(db)
+    if school is None or batch.school_id != school.id:
+        raise AppError("NOT_FOUND", "导入批次不存在", 404)
+    rows = db.scalars(
+        select(StudentRosterImportRow)
+        .where(StudentRosterImportRow.batch_id == batch.id)
+        .order_by(StudentRosterImportRow.row_no)
+    ).all()
+    return {
+        "batch_id": batch.id,
+        "batch_no": batch.batch_no,
+        "items": [
+            {
+                "row_no": row.row_no,
+                "student_no": row.student_no,
+                "name": row.name,
+                "grade_name": row.grade_name,
+                "class_name": row.class_name,
+                "gender": row.gender,
+                "age": row.age,
+                "processing_status": row.processing_status,
+                "conflict_code": row.conflict_code,
+                "message": row.message,
+                "student_id": row.student_id,
+            }
+            for row in rows
+        ],
+    }
 

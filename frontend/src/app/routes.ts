@@ -14,6 +14,7 @@ import ScalePage from '../features/admin/ScalePage.vue'
 import DataCenterPage from '../features/admin/DataCenterPage.vue'
 import SettingsPage from '../features/admin/SettingsPage.vue'
 import TasksPage from '../features/admin/TasksPage.vue'
+import ExportCenterPage from '../features/admin/ExportCenterPage.vue'
 import AuditPage from '../features/admin/AuditPage.vue'
 import AnalyticsPage from '../features/analytics/AnalyticsPage.vue'
 import StudentHistoryPage from '../features/student/StudentHistoryPage.vue'
@@ -37,6 +38,7 @@ export const routes: RouteRecordRaw[] = [
       { path: 'counselor/data', component: DataCenterPage, meta: { role: 'counselor', title: '数据中心' } },
       { path: 'counselor/analytics', component: AnalyticsPage, meta: { role: 'counselor', title: '统计分析' } },
       { path: 'counselor/audit', component: AuditPage, meta: { role: 'counselor', title: '审计日志' } },
+      { path: 'counselor/exports', component: ExportCenterPage, meta: { role: 'counselor', title: '导出中心' } },
       { path: 'counselor/tasks', component: TasksPage, meta: { role: 'counselor', title: '测评任务' } },
 
       // Leader
@@ -54,6 +56,11 @@ export const routes: RouteRecordRaw[] = [
       { path: 'admin/organization', component: OrganizationPage, meta: { role: 'admin', title: '组织学生' } },
       { path: 'admin/scale', component: ScalePage, meta: { role: 'admin', title: '量表题库' } },
       { path: 'admin/settings', component: SettingsPage, meta: { role: 'admin', title: '系统配置' } },
+      // 导出中心归管理员与心理老师：前者看得到全部人的作业、能替任何人叫停，
+      // **但下载不下来**（他的心理详情能力是 `NONE`，见 `list_export_jobs`）。
+      // 德育领导没有这一页——他的受控导出是 `PROGRESS_SUMMARY`，那是**聚合**，
+      // 而他手上没有一处会建导出作业的入口。
+      { path: 'admin/exports', component: ExportCenterPage, meta: { role: 'admin', title: '导出中心' } },
       { path: 'admin/audit', component: AuditPage, meta: { role: 'admin', title: '审计日志' } },
     ]
   }

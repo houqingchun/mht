@@ -10,9 +10,9 @@
 
 既有行按 `TIMESTAMPDIFF(YEAR, birth_date, CURDATE())` 回填，只精确到整年：原件里的月日就此
 丢掉，downgrade 也只能按整年倒推（`CURDATE() - INTERVAL age YEAR`），回不到真实的生日。
-这两句是 MySQL 方言——本项目的库是 MySQL（README 与 `core/config.py` 都是），而测试
-完全不跑 Alembic（CLAUDE.md 已知缺口 3：内存 sqlite 由 `Base.metadata.create_all` 建表），
-所以这段回填只在真库上生效。**回填不能省**：不加这一步，全库的年龄会一次性变成 NULL。
+这两句是 MySQL 方言——本项目的库是 MySQL，而且 2026-09-19 起**测试也跑在 MySQL 上**
+（`make test` 的库就是 `alembic upgrade head` 建出来的，缺口 3 已关闭），
+所以这段回填在测试里也真的执行。**回填不能省**：不加这一步，全库的年龄会一次性变成 NULL。
 
 Revision ID: 0011_student_age
 Revises: 0010_import_source

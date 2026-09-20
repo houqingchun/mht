@@ -10,9 +10,10 @@
 * `IMPORTED` —— 学校把外部平台的普查结果导进来。
 
 用 `server_default="IN_SYSTEM"` 回填既有行，因此这一列对现有数据是「无改动」的。
-`server_default` 而不是 app 侧 `default`，是因为模型（`Base.metadata.create_all`
-建出的测试库）必须与迁移库给出同一份 DDL——见 CLAUDE.md 已知缺口 3：模型与迁移的
-漂移没有任何测试看得见。模型那边也写了同样的 `server_default`。
+`server_default` 而不是 app 侧 `default`：这个值要由 **MySQL** 补，不是由 ORM 补——
+迁移回填、手写 SQL、以及任何绕过 ORM 的写入都拿得到它。模型那边写了同样的
+`server_default`，而 2026-09-19 起有测试盯着这一致性：表由 `alembic upgrade head`
+建，`test_the_migrated_database_matches_the_models_exactly` 逐列比模型与迁移。
 
 `String(16)` 装得下两个码，留了一点余量给未来可能的第三种来源（如「纸质录入」）。
 

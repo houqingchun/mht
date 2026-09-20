@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, JSON, String, Text, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, Index, JSON, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -37,6 +37,14 @@ class ScaleQuestion(Base):
 
 class ScaleRule(TimestampMixin, Base):
     __tablename__ = "scale_rule"
+    __table_args__ = (
+        # 同一份量表的同一个规则版本只许有一条——`rule_version_for()` 生成的标识
+        # 是唯一的（CLAUDE.md §6），`1.0.0 → 1.0.1` 是**新的一条**，不是改这一条。
+        # 这条唯一键把「生成新版本」从一句约定变成了数据库判据：
+        # 谁要是就地改已发布版本，撞的是这一条。
+        UniqueConstraint("scale_id", "rule_version", name="uq_scale_rule_version"),
+        Index("ix_scale_rule_status", "scale_id", "status"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     scale_id: Mapped[int] = mapped_column(ForeignKey("assessment_scale.id"), nullable=False)

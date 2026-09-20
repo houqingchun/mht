@@ -13,7 +13,19 @@ class ChangePasswordRequest(BaseModel):
 
 
 class ResetPasswordRequest(BaseModel):
-    temporary_password: str | None = Field(default=None, min_length=6, max_length=128)
+    """管理员重置别人的密码。
+
+    三个字段都是必填，而且**密码进得来、出不去**（§16.5「不返回或记录明文密码」）。
+    此前 `temporary_password` 是可选的，服务端在它缺失时用 `token_urlsafe(9)` 造一个
+    并回传——那条路必须回传，否则没人知道临时密码是什么，所以它与规格直接冲突。
+    查过全部调用方（界面表单、安装脚本、测试）都显式传值，于是把这一半删掉不改动
+    任何既有行为，只是让「不给密码就别调这个接口」变成一条能报的错。
+
+    `purpose` 在这一版是**规格里的「原因」**（§16.5「管理员重置密码必须填写原因」）。
+    名字沿用既有的 `purpose`，与其余审计入口一致——审计表上那一列就叫 `purpose`。
+    """
+
+    temporary_password: str = Field(min_length=6, max_length=128)
     purpose: str = Field(min_length=1, max_length=255)
 
 

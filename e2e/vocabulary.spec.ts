@@ -45,11 +45,25 @@ const UNTRANSLATED_CODES = [
   'COMPLETED',
   'IN_PROGRESS',
   'NOT_STARTED',
-  // SCOPE_TYPE_LABELS
+  // SCOPE_TYPE_LABELS。**`STUDENT` 刻意不在这里**，理由有两半，缺一不可：
+  //
+  // ① 它没有任何渲染点。这张表服务的是任务的「对象范围」列，而任务范围今天恒为
+  //    `SCHOOL`（§22：`create_school_assessment_task` 只发全校），年级/班级/单人
+  //    三级从来没有写入方。所以列上它等于一条永远扫不到东西的空覆盖——留着不
+  //    增加任何保护。
+  // ② 而它**有**一个渲染点，只是不属于这张表：审计页的「对象」列直接打印
+  //    `row.resource_type`，取值里就有 `STUDENT`（`导入学生` 那一行）。
+  //    那一列**有意**不翻译，是缺口 7（改了显示而 `q` 还是按编码搜，用户会从
+  //    「看不懂」变成「搜不到」），正解是筛选器 + 显示 + 提示语三件事一起做。
+  //
+  // 两半合起来：把 `STUDENT` 留在这里，等于用一条**没有覆盖的清单项**去换一个
+  // **竞态假阳性**——审计页只看最新 20 条，而 `app.spec.ts` 的导入用例会写一行
+  // `resource_type=STUDENT`，两个文件并发跑（`fullyParallel`），扫到与否取决于
+  // 那一瞬间谁先跑完。2026-09-19 就是这么红的。**会无故变红的守卫很快会被人关掉**，
+  // 而它想守的那件事（审计页有裸编码）本来就写在缺口 7 里。
   'SCHOOL',
   'GRADE',
   'CLASS',
-  'STUDENT',
   // VALIDITY_LABELS
   'VALID',
   'QUESTIONABLE',
@@ -74,6 +88,195 @@ const UNTRANSLATED_CODES = [
   // 导入记录，它会自己开始生效。
   'IN_SYSTEM',
   'IMPORTED',
+  // TARGET_SOURCE_LABELS（V1.2 第 1 期）。这张表与上面那张长得像而**不是同一件事**：
+  // SOURCE_LABELS 说「这份答卷是在哪测的」，这一张说「这个人是怎么进到名单里的」。
+  //
+  // 它落在**弹层里那个页签**上，所以扫描必须点开「查看明细」→「目标学生」才到得了
+  // （本文件末尾那条用例就在做这件事）。演示数据里每一行都是 `TASK_SCOPE`——
+  // 建任务发出去的那些；`SUPPLEMENT` 要等真的补发过一次才会有。与 `IMPORTED` 同理，
+  // 一并列上：哪天演示数据或某个用例带进一条补发的目标行，它会自己开始生效。
+  'TASK_SCOPE',
+  'SUPPLEMENT',
+  // CALCULATION_STATUS_LABELS（V1.2 阶段 2）。`PENDING` 上面已经有了（风险事件状态），
+  // 这里补的是另外三个。
+  //
+  // 它落在**两处不条件渲染的渲染点**上：个案详情的「评分状态」行与学生记录页的
+  // 「处理状态」行——两页都在 `auditPages` 的路径清单里（`/counselor/cases/1` 与
+  // `/student/history`），演示数据里每一场都是 `CALCULATED`，所以这一项真的扫得到东西。
+  // `CALCULATION_FAILED` 要等一次真的计算故障才会有（与 `IMPORTED` / `SUPPLEMENT` 同理，
+  // 一并列上，哪天数据或某个用例带进来它就自己开始生效）。
+  'CALCULATING',
+  'CALCULATED',
+  'CALCULATION_FAILED',
+  // TESTED_AT_SOURCE_LABELS（V1.2 阶段 2）。同一页的「日期来源」行，同样不条件渲染。
+  // `ONLINE_SUBMIT` 是演示数据里每一场的值（它们都走 `submit_session` 交的卷），
+  // 另外两个与上面同理。
+  'ONLINE_SUBMIT',
+  'IMPORT_FILE',
+  'PENDING_VERIFICATION',
+  // ROSTER_BATCH_STATUS_LABELS / ROSTER_ROW_STATUS_LABELS / ROSTER_CONFLICT_LABELS
+  // （V1.2 阶段 3 名册导入批次化）。三张表的渲染点都只在 `/admin/organization` 的
+  // 「导入批次」那一张表与它的明细弹层里，而它们扫得到东西的前提是**库里真的有一批
+  // 导入过**——`make seed-demo` 不产生批次（名册导入不是种子会做的动作）。所以本文件
+  // 末尾那条用例先通过接口传一份文件把批次造出来再扫，理由与 `studentWithRetestPlan`
+  // 完全相同：**先证明有东西可扫，再断言它干净**。
+  //
+  // `PENDING` 上面已经有了（风险事件状态），这里补的是其余七个。演示数据里扫得到的
+  // 是 `PREVIEW`（那一条用例落下的是预览批次）与 `PENDING` / `STUDENT_NO_EXISTS`；
+  // `COMMITTED` / `CREATED` / `UPDATED` / `SKIPPED` / `ERROR` 要等真的提交过一次
+  // （`app.spec.ts` 的学生导入那组会提交一次「放弃」，它俩并行跑，扫到与否不保证），
+  // 与 `IMPORTED` / `SUPPLEMENT` 同理，一并列上：哪天数据到了它会自己开始生效。
+  'PREVIEW',
+  'COMMITTED',
+  'CREATED',
+  'UPDATED',
+  'SKIPPED',
+  'ERROR',
+  'STUDENT_NO_EXISTS',
+  // MATCH_STATUS_LABELS（V1.2 第 4 期 MHT 导入批次化）。九个码唯一的渲染点是
+  // `/counselor/data` 的「导入批次」表点开的那个明细弹层——**不点开就不存在**，
+  // 所以本文件末尾单独有一条用例去点它（`PREVIEW` / `PENDING` 上面已经有了）。
+  //
+  // 演示数据里扫得到的是 `INVALID_ROW` 与 `NOT_FOUND`（那一条用例造的两行：一行空姓名、
+  // 一行查无此人），其余七个要等名册上真的出现「年龄不符 / 同名多候选 / 本月已导过 /
+  // 本场已有在线答卷 / 不在任务名单里」这些情形，与 `IMPORTED` / `SUPPLEMENT` 同理，
+  // 一并列上：哪天数据到了它会自己开始生效。
+  'MATCHED',
+  'AGE_CONFLICT',
+  'AMBIGUOUS',
+  'NOT_FOUND',
+  'OUT_OF_SCOPE',
+  'DUPLICATE',
+  'INVALID_ROW',
+  'CONFLICT',
+  // IMPORT_CONFLICT_LABELS（V1.2 第 4 期）。`DUPLICATE` 上面已经有了（它同时是
+  // 一个 `match_status`），另两个是「这一行为什么要你拍板」那一列的值。
+  'AGE_MISMATCH',
+  'IN_SYSTEM_RESULT',
+  // IMPORT_MODE_LABELS（V1.2 阶段 5）——批次摘要里那格「导入形态」。它与上面那些一样
+  // 在明细弹层里，**不点开就不存在**，所以本文件末尾那两条用例各自点开一次：逐题答卷
+  // 那一份在上一条里，汇总档那一份在下一条里。两种形态在批次列表上长得一模一样
+  // （`source` 都是 `IMPORTED`），所以「有东西可扫」不能靠数据恰好长成某样——
+  // 那两条用例各自断言一次那一格的中文，再扫像素。
+  'EXTERNAL_FULL_ANSWER',
+  'EXTERNAL_SUMMARY',
+  // OUT_OF_SCOPE_REASON_LABELS（V1.2 阶段 5）。`OUT_OF_SCOPE` 上面已经有了（它同时是
+  // 一个 `match_status`），这里补的是把「不在本场任务里」分成两句的那两个码——渲染点
+  // 在逐行明细「匹配结论」那一格下面，只有真的出现一行「匹配上了、但不归这场任务管」
+  // 才存在。
+  //
+  // **e2e 里造不出那一行**，理由与上面那七个 `match_status` 逐字相同（演示名册的班级
+  // 叫 `1班`，而文件那一列按学校编号规则要写 `704`，`_parse_class` 出来的名字在名册上
+  // 必然落空，所以匹配这一步永远走不到「找人」）。与 `AGE_CONFLICT` 等同理，一并列上：
+  // 哪天数据到了它会自己开始生效。
+  'SUPPLEMENT_CANDIDATE',
+  'NOT_IN_TASK_SCOPE',
+  // AGE_RESOLUTION_LABELS（V1.2 阶段 5）。这两个是**小写**的，因为它们是请求体里的
+  // 字面量（`PATCH /assessment-import-rows/{id}/resolve` 收的就是这三个字），后端原样
+  // 存进 `age_resolution` 那一列。唯一能扫到的渲染点是**已提交**那一批里的中文
+  // （`ageResolutionLabel`）——预览时那三个单选按钮的 `value` 不进 `innerText`。
+  // 所以它与上面那些一样：今天扫不到东西，等有一批真的提交过、且里面有一行按某种口径
+  // 处置过年龄时才会生效。
+  //
+  // **`overwrite` 刻意不在这里。** 它与名册导入的处置码是同一个字（后端
+  // `AGE_RESOLUTION_OVERWRITE = RESOLUTION_OVERWRITE`），而那一张表
+  // （`ASSESSMENT_RESOLUTION_LABELS`，第 4 期）从一开始就没有列进本清单：一个普通的
+  // 英文单词在别的文案里出现的可能性，比它换来的那点保护更值钱——**会无故变红的守卫
+  // 很快会被人关掉**。这两个是 `snake_case` 短语，没有这个风险。
+  'keep_roster',
+  'session_only',
+  // CONFLICT_RESOLUTION_LABELS（V1.2 阶段 6 四档处置）。唯一的渲染点是
+  // `/counselor/data` 明细弹层「处置」列里**冲突行专属的那一支**——非冲突行渲染的是
+  // 年龄处置，所以这一列不是「点开就有」，而是「先得有一条冲突行」。
+  //
+  // **e2e 里造不出那一行**，理由与上面那七个 `match_status` 逐字相同：来源冲突的前提
+  // 是这一行**匹配上了某个学生**（`IN_SYSTEM_RESULT` 要那名学生在本场有在线答卷），
+  // 而演示名册的班级叫 `1班`、文件那一列按学校编号规则要写 `704`，匹配这一步永远走
+  // 不到「找人」。要靠 e2e 覆盖它，得先让演示名册长出一个叫 `704` 的班，而那会改动
+  // 共享演示库的名册（跑 e2e 不许改掉数据）。后端那一侧是钉住的
+  // （`test_import_conflict_resolution.py` 十条）。
+  'KEEP_ONLINE',
+  'USE_EXTERNAL',
+  'REJECT_EXTERNAL',
+  'KEEP_BOTH_BUT_ONE_EFFECTIVE',
+  // IMPORT_ROW_STATUS_LABELS 的新码（同一期）：选了「保留系统内作答」或「不采纳外部
+  // 结果」时这一行的处理状态——`PENDING` 上面已经有了（「待导入」，还没提交），
+  // 这一码说的是**提交之后**：人拍过板了，而这一次不写外部那一份。
+  //
+  // 与上面四档走的是同一条路（扫得到它就要先有一条冲突行被处置过），所以今天也是
+  // 零覆盖。一并列上：哪天数据到了它会自己开始生效。
+  'NOT_APPLIED',
+  // CARE_EVENT_LABELS（V1.2 阶段 7 关怀档案事件）。八个码唯一的渲染点是**个案详情页的
+  // 「档案事件」页签**（`CareCaseDetailPage.vue` 的那条时间线）。
+  //
+  // 它与上面那些页签有一处不同：**数据不是切过去才请求的**——`GET /care-cases/{id}`
+  // 一次把 `events` 带回来了，点页签只是切 `v-if`。所以上面 `auditPages` 走
+  // `/counselor/cases/1` 那一趟**扫得到**它。即便如此仍单独留一条用例：`auditPages`
+  // 挑的是它自己那名学生，而「那名学生恰好有事件行」是一件**没被断言过**的事——
+  // 一条没有事件的档案同样会让那一趟全绿，而它扫的是一块空区域罢了。
+  // 单独这一条把「有东西可扫」写成断言（理由同 `studentWithRetestPlan`）。
+  //
+  // 演示数据里扫得到的是 `CASE_OPENED`（任何一份档案的起点，所以必然有）、
+  // `MANUAL_REVIEWED` / `FOLLOW_UP_ADDED` / `RETEST_PLANNED`（`seed_demo` 各建了几条）；
+  // `CASE_CLOSED` / `CASE_REOPENED` / `OWNER_ASSIGNED` 要等真的关过一次、重开过一次、
+  // 转派过一次——与 `IMPORTED` / `SUPPLEMENT` 同理，一并列上：哪天数据到了它会自己开始生效。
+  // （`app.spec.ts` 的「closing a case…」那条会关一次再开一次，但它在另一个文件里、
+  // 与这里并发跑，扫到与否不保证，所以不靠它。）
+  'CASE_OPENED',
+  'MANUAL_REVIEWED',
+  'FOLLOW_UP_ADDED',
+  'FAMILY_CONTACT_ADDED',
+  'RETEST_PLANNED',
+  'CASE_CLOSED',
+  'CASE_REOPENED',
+  'OWNER_ASSIGNED',
+  // PARTICIPATION_DISPOSITION_LABELS（V1.2 阶段 8 / §18.10 应测口径）。四个码说的是
+  // 「这个人该不该做这一场」，与左边那一格「做完没有」（`TARGET_STATUS_LABELS`）是两个
+  // 问题——一名请假的学生在同一行上是「未开始 · 请假」，两句话同时为真。
+  //
+  // 渲染点在**完成明细弹层那一列**上，而且**不条件渲染**：每一行都出一个药丸。所以
+  // 本文件上面那条「测评任务的完成明细弹窗」用例已经扫得到它了（演示数据里每一行都是
+  // `REQUIRED`），不需要为它单开一条。另外三码要等真的标记过一次
+  // （`app.spec.ts` 有一条标记用例会去写一次，而它在另一个文件里、与这里并发跑，
+  // 扫到与否不保证），与 `IMPORTED` / `SUPPLEMENT` 同理，一并列上：数据到了它自己会生效。
+  'REQUIRED',
+  'LEAVE',
+  'EXEMPT',
+  'EXCLUDED',
+  // EXPORT_TYPE_LABELS / MASK_LEVEL_LABELS / EXPORT_JOB_STATUS_LABELS（V1.2 阶段 8 / §16.3）。
+  // 三张表的渲染点全在**导出中心**（`/counselor/exports` 与 `/admin/exports`）那一张
+  // 表上——那是「这份文件是不是实名的、当时按谁的授权范围导的、现在还取不取得到」唯一
+  // 的台账，三列各自读一张表。
+  //
+  // **这一页单靠 `auditPages` 的路径清单守不住**，这一点是量出来的：清单里加上路径之后
+  // 做变异验证（把三个 `xxxLabel(...)` 全换成裸字段），四条角色用例**全绿**——因为
+  // `export_job` 表此刻 0 行，`DataTable` 渲染的是空态那一行，一个格子都没有。清单加成
+  // 功了，覆盖仍然是零。所以末尾单独一条用例**先用接口建一份作业再扫**
+  // （`studentWithRetestPlan` 那一族的第五例）。
+  //
+  // 路径仍然加在两条角色用例里（心理老师与管理员各一条）：它们覆盖的是一页上**不依赖
+  // 数据**的那部分像素，而导出中心是这一期新加的一页，进清单本身要有一句记录。
+  //
+  // 扫得到的是建出来那一份的 `CARE_CASES` / `MASKED` / `READY`（以及撤销之后的
+  // `REVOKED`），`HIGH_RISK_CASES` 由 `app.spec.ts` 那条高度关注导出带进来（并发跑，
+  // 扫到与否不保证）。其余一并列上：数据到了它自己会生效。
+  // **`EXPIRED` 在 e2e 里不可达**——它要等 `expires_at` 走过去，而那是 `job_ttl_hours`
+  // 的函数（把系统时钟拨快不是 e2e 该做的事）。后端那一侧是钉住的
+  // （`test_export_jobs.py` 里按 `now` 现算那几条）。
+  'CARE_CASES',
+  'HIGH_RISK_CASES',
+  'SINGLE_CASE',
+  'TASK_COMPLETION',
+  'NON_PARTICIPANTS',
+  'MASKED',
+  'IDENTIFIED',
+  'READY',
+  // AUTH_SESSION_STATUS_LABELS（V1.2 阶段 8 / §16.5）。`REVOKED` 与 `EXPIRED` 与导出
+  // 作业的状态是**同一批字面量**，所以只在这里列一次；`ACTIVE` 上面已经有了
+  // （任务状态那一组）。三码唯一的渲染点是顶栏「登录设备」那个弹层里的药丸——**不点开
+  // 就不存在**，所以本文件末尾单独有一条用例去点它。
+  'REVOKED',
+  'EXPIRED',
 ];
 
 // 词边界匹配，且 `_` 在 JS 正则里属于 \w，所以 \bSTUDENT\b 不会误伤
@@ -177,6 +380,29 @@ async function studentWithComparison(page: Page): Promise<number> {
   throw new Error('演示数据里没有任何学生带对照数据，这个用例失去了对象');
 }
 
+/**
+ * 挑一个真的有档案事件的学生。
+ *
+ * 与上面两个同一条教训：随便挑一名有档案的学生看起来也行（每条档案都有开档事件），
+ * 但那是**没被断言过的假设**——真正要证明「有东西可扫」的正是它，所以要问接口。
+ * 事件是按 `care_case_id` 过滤的（§16.4：这条时间线只读「这一份」），所以取的是
+ * 当前那一条档案的 `events`。
+ */
+async function studentWithCaseEvents(page: Page): Promise<number> {
+  const login = await page.request.post('/api/v1/auth/login', {
+    data: { account: '13800000001', password: '123456', role: 'counselor' },
+  });
+  const headers = { Authorization: `Bearer ${(await login.json()).data.access_token}` };
+  const cases = await (await page.request.get('/api/v1/care-cases', { headers })).json();
+  for (const item of cases.data.items as { student_id: number }[]) {
+    const detail = await (
+      await page.request.get(`/api/v1/care-cases/${item.student_id}`, { headers })
+    ).json();
+    if (detail.data.events.length > 0) return item.student_id;
+  }
+  throw new Error('演示数据里没有任何档案带事件，这个用例失去了对象');
+}
+
 test.describe('状态词汇：界面上不得出现后端编码', () => {
   /**
    * 「全部学生」页签（2026-09-17 加）。
@@ -216,6 +442,11 @@ test.describe('状态词汇：界面上不得出现后端编码', () => {
       '/counselor/tasks',
       '/counselor/data',
       '/counselor/analytics',
+      // 导出中心（V1.2 阶段 8）。**这条路径守不住那三张词表**——没有作业行时这一页
+      // 是空态，一个格子都不渲染（实测过：把那三处标签函数换成裸字段，四条角色用例
+      // 全绿）。真正的覆盖是本文件末尾那条自成一套的用例，它先用接口建一份作业。
+      // 这一条留在这里，守的是这一页上不依赖数据的那部分像素。
+      '/counselor/exports',
       '/counselor/audit',
     ]);
   });
@@ -238,6 +469,10 @@ test.describe('状态词汇：界面上不得出现后端编码', () => {
       '/admin/organization',
       '/admin/scale',
       '/admin/settings',
+      // 导出中心（V1.2 阶段 8）。管理员看到的是**全部人的**作业、多一列「操作人」，
+      // 而「下载」那一列对他不出现——所以这一趟扫到的像素与心理老师那一趟并不重合。
+      // 与上面同一条：作业表是空的时候它一个格子也扫不到。
+      '/admin/exports',
       '/admin/audit',
     ]);
   });
@@ -280,6 +515,119 @@ test.describe('状态词汇：界面上不得出现后端编码', () => {
       page.locator('.modal-panel tbody tr').first(),
     );
     expect(leaks, '测评完成明细把后端编码原样显示了').toEqual([]);
+
+    // 「目标学生」页签（V1.2 第 1 期）是**同一个弹层里的第二个面**，它多出一列
+    // `target_source`（任务范围 / 补发）。上面那次扫描到不了它——页签内容不点不开，
+    // 而这一列不翻译的话界面上就是 `TASK_SCOPE`。所以先点过去，再扫一遍。
+    const modal = page.locator('.modal-panel').first();
+    await modal.getByRole('button', { name: '目标学生' }).click();
+    // 先证明有东西可扫，再断言它干净：目标行还没渲染时扫的是一块空区域。
+    await expect(modal.locator('tbody tr').first()).toBeVisible();
+    expect(await leakedCodes(modal), '目标学生页签把 target_source 编码原样显示了').toEqual([]);
+  });
+
+  /**
+   * 「登录设备」弹层（V1.2 阶段 8 / §16.5）。
+   *
+   * `AUTH_SESSION_STATUS_LABELS` 三个码唯一的渲染点就是这一层里的药丸，而它在顶栏那个
+   * 按钮后面——**不点开就不存在**。`auditPages` 走页面的那几趟都到不了它（它不属于任何
+   * 一条路由），所以必须单独走一遍。
+   *
+   * 三档里 `EXPIRED` 要等 `expires_at` 走过去（e2e 里等不了，那是 `access_token_expire_minutes`
+   * 的函数），所以这条用例造的是**另一档**：真的撤销一条，`REVOKED` 就有了。两条会话都用
+   * 接口建，**只撤销本用例自己建的那一条**——浏览器里那一台不能撤（撤销它等于当场退出，
+   * 后面的扫描就没法做了）。
+   */
+  test('顶栏的登录设备弹层', async ({ page }) => {
+    const openSession = async () => {
+      const response = await page.request.post('/api/v1/auth/login', {
+        data: { account: '13800000001', password: '123456', role: 'counselor' },
+      });
+      return (await response.json()).data.access_token as string;
+    };
+    const doomed = await openSession();
+    const survivor = await openSession();
+
+    // 每条会话的 `is_current` 是**相对提问的那个 token** 算的，所以这里要问 doomed
+    // 自己那一趟才能拿到它自己的 id（用 survivor 的 token 去问，拿到的会是 survivor）。
+    const mine = (await (await page.request.get('/api/v1/auth/sessions', {
+      headers: { Authorization: `Bearer ${doomed}` },
+    })).json()).data.items.find((item: { is_current: boolean }) => item.is_current);
+    const revoked = await page.request.post(`/api/v1/auth/sessions/${mine.id}/revoke`, {
+      headers: { Authorization: `Bearer ${survivor}` },
+      data: { reason: 'e2e词表用例' },
+    });
+    expect(revoked.ok(), '撤销会话没有成功，这一条就失去了 REVOKED 那一档').toBeTruthy();
+
+    await loginAs(page, 'counselor');
+    await page.getByRole('button', { name: '登录设备' }).click();
+    const modal = page.locator('.modal-panel').first();
+
+    // 先证明有东西可扫：这一台必然在，而刚撤销的那一条也必须在。**两档一起才算数**——
+    // 只有「这一台」时，一个把 `authSessionStatusLabel` 漏掉的实现照样能让上面那句通过。
+    //
+    // 数**条数**不写死：`REVOKED` 的行会随每一次 e2e 攒下来（每一次 `loginAs` 都落一条
+    // 会话，本用例再撤一条），写死数字会红在一个与功能无关的地方。
+    await expect(modal.locator('.session-row').first()).toBeVisible();
+    await expect(modal.locator('.session-row', { hasText: '已撤销' }).first()).toBeVisible();
+    expect(await leakedCodes(modal), '登录设备把后端编码原样显示了').toEqual([]);
+  });
+
+  /**
+   * 导出中心（V1.2 阶段 8 / §16.3）。
+   *
+   * 这一页是 `EXPORT_TYPE_LABELS` / `MASK_LEVEL_LABELS` / `EXPORT_JOB_STATUS_LABELS`
+   * 三张表**唯一**的渲染点，而它同时是这一组里**唯一一页数据不是演示数据给的**：
+   * `seed_demo` 不种导出作业（种子的作用是让页面有东西可看，不是伪造操作记录），
+   * 所以 `auditPages` 走它那一趟扫的是一张空表——清单里加了路径不等于有了覆盖。
+   * 变异验证量过这一点：把三处标签函数换成裸字段，四条角色用例全绿。
+   *
+   * 所以这一条先用接口**造一份作业**再扫，与 `studentWithRetestPlan` 那一族同一条
+   * 规矩（**先证明有东西可扫，再断言它干净**），只是「造」这一步走的是写接口而不是
+   * 挑一条已有的数据。
+   *
+   * 一份作业走完两个状态：先 `READY`（建完就能下），再撤销成 `REVOKED`。两档共用同
+   * 一行——`REVOKED` 与 `READY` 是同一列上的两个取值，各造一行只会让共享库多攒一份
+   * 没人看的记录。`EXPIRED` 到不了（要等 `expires_at`，e2e 里等不了）。
+   */
+  test('导出中心的作业台账', async ({ page }) => {
+    const login = await page.request.post('/api/v1/auth/login', {
+      data: { account: '13800000001', password: '123456', role: 'counselor' },
+    });
+    const headers = { Authorization: `Bearer ${(await login.json()).data.access_token}` };
+
+    // 基线的库里一份关怀档案都没有，而导出照样成功（回一份只有表头的 CSV）——
+    // 这一条要的是**作业行**，不是文件里的行。
+    const created = await page.request.post('/api/v1/care-cases/export', {
+      headers,
+      data: { purpose: 'e2e词表用例' },
+    });
+    expect(created.ok(), '建导出作业没有成功，这一条失去了对象').toBeTruthy();
+    const job = (await created.json()).data;
+    expect(job.job_no).toMatch(/^EXPORT-/);
+
+    await loginAs(page, 'counselor');
+    await page.goto('/counselor/exports');
+    await page.waitForLoadState('networkidle');
+
+    // 先证明有东西可扫：**刚建的那一行**在表里，而且三格各自读了一张表。
+    const row = page.locator('tbody tr', { hasText: job.job_no }).first();
+    await expect(row).toBeVisible();
+    await expect(row).toContainText('关注档案摘要');
+    await expect(row).toContainText('姓名已遮蔽');
+    await expect(row).toContainText('可下载');
+
+    // 撤销（接口层做，界面上那个按钮在别处已经有人管），再刷新看第二档。
+    const revoked = await page.request.post(`/api/v1/export-jobs/${job.id}/revoke`, {
+      headers,
+      data: { reason: 'e2e词表用例' },
+    });
+    expect(revoked.ok(), '撤销导出作业没有成功，这一条就失去了 REVOKED 那一档').toBeTruthy();
+
+    await page.reload();
+    await expect(page.locator('tbody tr', { hasText: job.job_no }).first()).toContainText('已撤销');
+
+    expect(await leakedCodes(page.locator('body')), '导出中心把后端编码原样显示了').toEqual([]);
   });
 
   /**
@@ -322,5 +670,291 @@ test.describe('状态词汇：界面上不得出现后端编码', () => {
     await expect(page.locator('.cmp-row').first()).toBeVisible();
     await expect(page.locator('.cmp-legend')).toBeVisible();
     expect(await leakedCodes(page.locator('body')), '班级对照把后端编码原样显示了').toEqual([]);
+  });
+
+  /**
+   * 「档案事件」页签（V1.2 阶段 7 / §16.4）。
+   *
+   * `CARE_EVENT_LABELS` 的八个码唯一的渲染点就是这条时间线。它与上面两个页签有一处
+   * 结构上的不同：**事件不是切过去才请求的**（`GET /care-cases/{id}` 一次把 `events`
+   * 带回来），所以 `auditPages` 走 `/counselor/cases/1` 那一趟其实也扫得到它。
+   *
+   * 那为什么还要单独一条：**因为那一趟的「有东西可扫」是没被断言过的**——它挑的是
+   * `/counselor/cases/1` 这名学生，而「这名学生恰好有事件行」在那一刻只是碰巧成立。
+   * 一条没有事件的档案同样会让那一趟全绿，而它扫的是一块空区域。这与
+   * `studentWithRetestPlan` / `studentWithComparison` 是同一个坑的第三例。
+   */
+  test('学生档案的档案事件页签', async ({ page }) => {
+    await loginAs(page, 'counselor');
+    const studentId = await studentWithCaseEvents(page);
+
+    await page.goto(`/counselor/cases/${studentId}`);
+    await page.waitForLoadState('networkidle');
+    await page.getByRole('button', { name: '档案事件' }).click();
+
+    // 先证明有东西可扫，再断言它干净。
+    await expect(page.locator('.timeline-item').first()).toBeVisible();
+    // 而且起点那一条必然在：`CASE_OPENED` 是这条生命的开端，任何一份档案都有它——
+    // 这一句让上面那条「有东西可扫」不至于依赖演示数据里恰好有谁被复核过。
+    //
+    // 定位到 `.pill`（那一行事件的名字）而不是整条 `.timeline-item`：`hasText` 是
+    // **子串**匹配，而 `CASE_OPENED` 自己的 `reason` 就写着「系统自动开档」——
+    // 按整条匹配时，一个把名字渲染成 `CASE_OPENED` 的坏实现**照样能命中这一条**
+    // （它命中的是正文里那两个偶然出现的字）。名字与正文分开之后，这一条断的
+    // 才真是「那格药丸上写的是中文」。
+    await expect(page.locator('.timeline-item .pill').filter({ hasText: '开档' })).toHaveCount(1);
+    expect(await leakedCodes(page.locator('body')), '档案事件把后端编码原样显示了').toEqual([]);
+  });
+
+  /**
+   * 名册导入的批次历史与逐行明细（V1.2 阶段 3）。
+   *
+   * `ROSTER_BATCH_STATUS_LABELS` / `ROSTER_ROW_STATUS_LABELS` / `ROSTER_CONFLICT_LABELS`
+   * 三张表的**唯一**渲染点都是这一页上的「导入批次」表与它点开的明细弹层，而这一屏
+   * 扫得到东西的前提是库里真有一批——`make seed-demo` 不产生批次。所以**先通过接口
+   * 传一份文件把批次造出来，再扫**，与 `studentWithRetestPlan` 同一条规矩。
+   *
+   * 用「预览」而不是「提交」是有意的：预览落 `PREVIEW` 批次与逐行明细，但**不改任何
+   * 名册字段**——共享库里「覆盖」会把 S001 挪出种子里的那个班，跑一次就让别的用例看到
+   * 另一份名册（本文件上面那组 e2e 只跑「放弃」就是同一个理由）。文件内容固定，
+   * 于是同一个操作者重复预览会命中服务端的**复用规则**，这一条跑多少次都不会让批次表
+   * 越堆越长。
+   */
+  test('组织学生的导入批次', async ({ page }) => {
+    const csv = 'student_no,name,grade,class_name\nS001,e2e词表预演,初二,801\n';
+    const login = await page.request.post('/api/v1/auth/login', {
+      data: { account: 'admin', password: '123456', role: 'admin' },
+    });
+    const headers = { Authorization: `Bearer ${(await login.json()).data.access_token}` };
+    const preview = await page.request.post('/api/v1/student-roster/import/preview', {
+      headers,
+      multipart: {
+        file: {
+          name: 'e2e-vocabulary.csv',
+          mimeType: 'text/csv',
+          buffer: Buffer.from(csv, 'utf-8'),
+        },
+      },
+    });
+    // 造不出批次就抛，而不是静默退化成一条恒绿的用例——它扫的会是一块空区域。
+    expect(preview.ok(), '名册导入预览没有成功，这一条失去了对象').toBeTruthy();
+
+    await loginAs(page, 'admin');
+    await page.goto('/admin/organization');
+    await page.waitForLoadState('networkidle');
+
+    const batches = page
+      .locator('.card')
+      .filter({ has: page.getByRole('heading', { name: '导入批次' }) });
+    await expect(batches.locator('tbody tr').first()).toBeVisible();
+    expect(await leakedCodes(batches), '导入批次把后端编码原样显示了').toEqual([]);
+
+    // 逐行明细在弹层里，只有点开才存在——同工作台档案弹层那条的理由。
+    await batches
+      .locator('tbody tr', { hasText: 'e2e-vocabulary.csv' })
+      .first()
+      .getByRole('button', { name: '查看明细' })
+      .click();
+    const modal = page.locator('.modal-panel').first();
+    await expect(modal.locator('tbody tr').first()).toBeVisible();
+    expect(await leakedCodes(modal), '导入明细把后端编码原样显示了').toEqual([]);
+  });
+
+  /**
+   * MHT 测评记录导入的批次历史与逐行明细（V1.2 第 4 期）。
+   *
+   * `MATCH_STATUS_LABELS`（九个码）与 `IMPORT_CONFLICT_LABELS`（三个码）唯一的渲染点是
+   * `/counselor/data` 的「导入批次」表与点开它才存在的明细弹层，而这一屏扫得到东西的前提
+   * 是库里真有一批——`make seed-demo` 不产生批次（导入不是种子会做的动作）。所以与上面
+   * 那条名册用例同一条规矩：**先通过接口传一份文件把批次造出来，再扫**。
+   *
+   * 用「预览」而不是「提交」：预览只落批次与逐行明细，**一行测评会话都不写**。文件内容
+   * 固定，于是同一个操作员重传同一份文件会命中服务端的复用规则（`_reusable_batch`：同一
+   * 个人 + 同一份 sha256 + 仍是 `PREVIEW`），这一条跑多少次都不会让批次表越堆越长。
+   *
+   * 两行的取值是**确定的**，不依赖名册此刻长什么样：第一行空姓名必然落到 `INVALID_ROW`
+   * （第 2 步就返回，还没走到查名册），第二行是个名册上不存在的姓名、必然落到 `NOT_FOUND`。
+   * 写死一个「年龄不符」或「本月已导过」的行做不到这一点——那要看库里有没有这个人。
+   */
+  test('MHT导入的批次明细', async ({ page }) => {
+    // 一百个题号列一个都不能少：少了的话整份文件在**列级**就被 422 挡下来，批次根本不会
+    // 建出来，而这一条会退化成一个「表格是空的 → 没有裸编码 → 绿」的空转用例。
+    const header = [
+      '姓名', '性别', '年龄', '年级', '班级', '所用时间',
+      ...Array.from({ length: 100 }, (_, i) => `${i + 1}.题干`)
+    ].join(',');
+    const cell = (name: string) =>
+      [name, '1', '12', '1', '4', '3600秒', ...Array(100).fill('0')].join(',');
+    const csv = `${header}\n${cell('')}\n${cell('e2e词表查无此人')}\n`;
+
+    const login = await page.request.post('/api/v1/auth/login', {
+      data: { account: '13800000001', password: '123456', role: 'counselor' },
+    });
+    const headers = { Authorization: `Bearer ${(await login.json()).data.access_token}` };
+    const preview = await page.request.post('/api/v1/assessment-imports/preview', {
+      headers,
+      multipart: {
+        file: {
+          name: 'e2e-vocabulary-assessment.csv',
+          mimeType: 'text/csv',
+          buffer: Buffer.from(csv, 'utf-8'),
+        },
+        batch_name: 'e2e词表预演',
+        tested_on: '2026-09-19',
+      },
+    });
+    // 造不出批次就抛，而不是静默退化成一条恒绿的用例——它扫的会是一块空区域。
+    expect(preview.ok(), 'MHT 导入预览没有成功，这一条失去了对象').toBeTruthy();
+
+    await loginAs(page, 'counselor');
+    await page.goto('/counselor/data');
+    await page.waitForLoadState('networkidle');
+
+    const batches = page
+      .locator('.card')
+      .filter({ has: page.getByRole('heading', { name: '导入批次' }) });
+    // 按批次名称定位这一批（批次号按天编号，写死会红在一个与功能无关的地方）。
+    const row = batches.locator('tbody tr', { hasText: 'e2e词表预演' }).first();
+    await expect(row).toBeVisible();
+    // 批次列表那一列的状态药丸走 `importBatchStatusLabel`（`PREVIEW` → 预览中）。
+    expect(await leakedCodes(batches), '导入批次把后端编码原样显示了').toEqual([]);
+
+    // 逐行明细只有点开才存在——同工作台档案弹层那条的理由。`match_status` 与
+    // `conflict_code` 两列都在这个弹层里，而它们**只看得到像素**（第一面管不到视图）。
+    await row.getByRole('button', { name: '查看明细' }).click();
+    const modal = page.locator('.modal-panel').first();
+    // 先证明有东西可扫（两行都在），再断言它干净。
+    await expect(modal.locator('tbody tr')).toHaveCount(2);
+    // 「导入形态」那一格是 `EXTERNAL_FULL_ANSWER` 唯一的渲染点，而它与汇总档在批次
+    // 列表上长得一样——所以这一句是那条清单项的「有东西可扫」证明，不是重复。
+    await expect(modal.locator('.detail-row', { hasText: '导入形态' })).toContainText('逐题答卷');
+    expect(await leakedCodes(modal), 'MHT导入明细把后端编码原样显示了').toEqual([]);
+  });
+
+  /**
+   * 汇总档（`EXTERNAL_SUMMARY`，V1.2 阶段 5 / §18.9）。
+   *
+   * 与上一条同一条规矩：**先通过接口把批次造出来再扫**，而且只「预览」——预览一行测评
+   * 记录都不写。差别全在文件里：这一份**没有题号列**，只有「总分」与维度分，于是后端
+   * 判出来的是 `EXTERNAL_SUMMARY`，界面上那一格读作「只有分数」。
+   *
+   * 这一档在**别的每一页上**都是隐形的（`assessment_result` 上没有这一场的结果，
+   * 所以个案详情、重点学生、关注率都看不到它），所以这一格是操作员唯一能知道
+   * 「这一批只有分数」的地方——它不翻译就等于没有。
+   *
+   * 两行仍取**确定**的取值（空姓名 → `INVALID_ROW`、查无此人 → `NOT_FOUND`），
+   * 与上一条同一条理由：与名册此刻长什么样无关。汇总档也走同一套匹配（§18.4 的六步），
+   * 它只是**匹配上之后**不写 100 条答卷而已。
+   */
+  test('MHT导入的汇总档', async ({ page }) => {
+    // 六个身份列 + 总分与维度分，**一个题号列都没有**——少了题号列正是这一档的判据。
+    const header = ['姓名', '性别', '年龄', '年级', '班级', '所用时间', '总分', '学习焦虑'].join(',');
+    const cell = (name: string) => [name, '1', '12', '1', '4', '3600秒', '60', '55'].join(',');
+    const csv = `${header}\n${cell('')}\n${cell('e2e词表查无此人')}\n`;
+
+    const login = await page.request.post('/api/v1/auth/login', {
+      data: { account: '13800000001', password: '123456', role: 'counselor' },
+    });
+    const headers = { Authorization: `Bearer ${(await login.json()).data.access_token}` };
+    const preview = await page.request.post('/api/v1/assessment-imports/preview', {
+      headers,
+      multipart: {
+        file: {
+          name: 'e2e-vocabulary-summary.csv',
+          mimeType: 'text/csv',
+          buffer: Buffer.from(csv, 'utf-8'),
+        },
+        batch_name: 'e2e词表汇总',
+        tested_on: '2026-09-19',
+      },
+    });
+    expect(preview.ok(), '汇总档预览没有成功，这一条失去了对象').toBeTruthy();
+
+    await loginAs(page, 'counselor');
+    await page.goto('/counselor/data');
+    await page.waitForLoadState('networkidle');
+
+    const row = page
+      .locator('.card')
+      .filter({ has: page.getByRole('heading', { name: '导入批次' }) })
+      .locator('tbody tr', { hasText: 'e2e词表汇总' })
+      .first();
+    await expect(row).toBeVisible();
+    await row.getByRole('button', { name: '查看明细' }).click();
+    const modal = page.locator('.modal-panel').first();
+    await expect(modal.locator('tbody tr')).toHaveCount(2);
+    await expect(modal.locator('.detail-row', { hasText: '导入形态' })).toContainText('只有分数');
+    expect(await leakedCodes(modal), '汇总档的明细把后端编码原样显示了').toEqual([]);
+  });
+
+  /**
+   * 任务详情页的「未匹配行」页签（V1.2 阶段 5）。
+   *
+   * `UNMATCHED_REASON_LABELS` 的码与 `MATCH_STATUS_LABELS` 是同一批（那张表只改了
+   * `MATCHED` 一条），所以这一条要证明的**不是**「词表认得这些码」——`/counselor/data`
+   * 那一条已经证明过了——而是这一屏有没有接上标签函数。同一个编码的第二个渲染点，
+   * 在 §3 那张契约里是与「后端发的码认不认得」**分开的另一面**：后端发的完全正确，
+   * 组件写 `{{ row.match_status }}` 时那边照样全绿。
+   *
+   * 数据同样先通过接口造，但这一批要**绑在这场任务上**（上一条绑的是空）——这一屏的
+   * 判据是 `assessment_import_batch.task_id`，绑不上去它就一行都不显示。绑上去只是
+   * 落一个 `PREVIEW` 批次与两行明细，**一行测评记录都不写**；文件内容固定，所以重跑
+   * 命中服务端的复用规则，批次表不会越堆越长。
+   *
+   * 挑哪一场任务不写死：列表是接口给的，按「发放人数最多」挑（与 `app.spec.ts` 的
+   * `openLargestTaskModal` 同一个判据），挑不到就抛——写死任务名会红在一个与功能
+   * 无关的地方（任务名是种子数据的一部分）。
+   */
+  test('测评任务的未匹配行页签', async ({ page }) => {
+    const login = await page.request.post('/api/v1/auth/login', {
+      data: { account: '13800000001', password: '123456', role: 'counselor' },
+    });
+    const headers = { Authorization: `Bearer ${(await login.json()).data.access_token}` };
+    const tasks = (await (await page.request.get('/api/v1/assessment-tasks', { headers })).json())
+      .data.items as { id: number; name: string; total_targets: number }[];
+    expect(tasks.length, '演示数据里应当至少有一场任务').toBeGreaterThan(0);
+    const task = tasks.reduce((best, item) => (item.total_targets > best.total_targets ? item : best));
+    expect(task.total_targets, '演示数据里应当至少有一个带目标行的任务').toBeGreaterThan(0);
+
+    const header = [
+      '姓名', '性别', '年龄', '年级', '班级', '所用时间',
+      ...Array.from({ length: 100 }, (_, i) => `${i + 1}.题干`)
+    ].join(',');
+    const cell = (name: string) =>
+      [name, '1', '12', '1', '4', '3600秒', ...Array(100).fill('0')].join(',');
+    const csv = `${header}\n${cell('')}\n${cell('e2e词表未匹配查无此人')}\n`;
+
+    const preview = await page.request.post('/api/v1/assessment-imports/preview', {
+      headers,
+      multipart: {
+        file: {
+          name: 'e2e-vocabulary-unmatched.csv',
+          mimeType: 'text/csv',
+          buffer: Buffer.from(csv, 'utf-8'),
+        },
+        batch_name: 'e2e词表未匹配',
+        tested_on: '2026-09-19',
+        task_id: String(task.id),
+      },
+    });
+    expect(preview.ok(), '绑定任务的预览没有成功，这一条失去了对象').toBeTruthy();
+
+    await loginAs(page, 'counselor');
+    await page.goto('/counselor/tasks');
+    const row = page.locator('tbody tr', { hasText: task.name }).first();
+    await expect(row).toBeVisible();
+    await row.getByRole('button', { name: '查看明细' }).click();
+    const modal = page.locator('.modal-panel').first();
+    await modal.getByRole('button', { name: '未匹配行' }).click();
+
+    // 先证明有东西可扫。两行的结论都是**确定**的（空姓名在第 2 步就返回 `INVALID_ROW`，
+    // 还没走到查名册；另一个名字名册上必然没有），所以按那一格的中文找得到它们。
+    const rows = modal.locator('tbody tr');
+    await expect(rows.first()).toBeVisible();
+    await expect(rows.filter({ hasText: '这一行有错误' })).toHaveCount(1);
+    await expect(rows.filter({ hasText: '名册上没有' })).toHaveCount(1);
+    // 口径那一句（§9）：整场任务与「你看得见」是两个数，两个都要在。
+    await expect(modal.getByText(/整场共 \d+ 行没进得去/)).toBeVisible();
+    expect(await leakedCodes(modal), '未匹配行把后端编码原样显示了').toEqual([]);
   });
 });

@@ -7,8 +7,11 @@
 **退出码 1 = 非空**这件事必须是一条能被断言的事实（安装器用 `-AllowFailure` 收下它再
 自己说一句 WARN，见 `install.ps1`），所以这里两条用例各钉一个方向。
 
-用**文件型**的临时 sqlite，不是内存库：`main()` 自己建引擎，而 `sqlite://` 换一条连接
-就是另一个库，探针会对着一个空库说话。
+探针面对的是**真的 MySQL**（`mysql_support.throwaway_database`），不再是临时 sqlite 文件。
+这不是为了整齐：`main()` 自己建引擎、自己去问 `information_schema`，而
+`test_a_database_with_no_tables_at_all_says_so_in_words` 要挡的那句话
+（`ProgrammingError (1146, "Table 'x.school' doesn't exist")`）**只有 MySQL 会说**
+——sqlite 上「表不存在」是另一句话，那条用例此前守的其实是另一个东西。
 """
 
 from __future__ import annotations
@@ -19,68 +22,68 @@ from app.core.config import Settings
 from app.db import check_empty
 from app.db.base import Base
 from app.models import School
+from app.tests.mysql_support import throwaway_database
 
 ROOT_TABLES = ("school", "user_account", "student")
 
 
-def _probe_url(tmp_path) -> str:
-    """一个真的建了表、但一行数据都没有的 sqlite 文件。"""
-    url = f"sqlite:///{tmp_path / 'probe.db'}"
-    engine = create_engine(url)
-    try:
-        Base.metadata.create_all(engine)
-    finally:
-        engine.dispose()
-    return url
+def _point_at(monkeypatch, url) -> None:
+    """把 `check_empty` 指到那个一次性库上。
+
+    口令**不能遮**（`render_as_string(hide_password=False)`）：`make_url` 默认会把
+    口令换成 `***`，而这里要把这个串真的交给驱动去连。
+    """
+    monkeypatch.setattr(
+        check_empty,
+        "get_settings",
+        lambda: Settings(database_url=url.render_as_string(hide_password=False)),
+    )
 
 
-def _point_at(monkeypatch, url: str) -> None:
-    monkeypatch.setattr(check_empty, "get_settings", lambda: Settings(database_url=url))
+def test_count_rows_counts_each_root_table_separately(monkeypatch):
+    with throwaway_database() as url:
+        engine = create_engine(url)
+        try:
+            assert check_empty.count_rows(engine) == {"school": 0, "user_account": 0, "student": 0}
+            with engine.begin() as connection:
+                connection.execute(School.__table__.insert(), [{"code": "QH", "name": "青禾实验学校"}])
+            assert check_empty.count_rows(engine) == {"school": 1, "user_account": 0, "student": 0}, (
+                "`school` 有行不该让另外两张表也报非零——报出来的那几个数是要给人对名册用的"
+            )
+        finally:
+            engine.dispose()
 
 
-def test_count_rows_counts_each_root_table_separately(tmp_path):
-    url = _probe_url(tmp_path)
-    engine = create_engine(url)
-    try:
-        assert check_empty.count_rows(engine) == {"school": 0, "user_account": 0, "student": 0}
-        with engine.begin() as connection:
-            connection.execute(School.__table__.insert(), [{"code": "QH", "name": "青禾实验学校"}])
-        assert check_empty.count_rows(engine) == {"school": 1, "user_account": 0, "student": 0}, (
-            "`school` 有行不该让另外两张表也报非零——报出来的那几个数是要给人对名册用的"
-        )
-    finally:
-        engine.dispose()
+def test_an_empty_database_says_so_and_exits_zero(monkeypatch, capsys):
+    with throwaway_database() as url:
+        _point_at(monkeypatch, url)
+        assert check_empty.main([]) == 0
+        output = capsys.readouterr().out
+        assert "[OK]" in output
+        assert "空" in output
 
 
-def test_an_empty_database_says_so_and_exits_zero(tmp_path, monkeypatch, capsys):
-    _point_at(monkeypatch, _probe_url(tmp_path))
-    assert check_empty.main([]) == 0
-    output = capsys.readouterr().out
-    assert "[OK]" in output
-    assert "空" in output
-
-
-def test_a_database_with_any_row_is_reported_as_occupied(tmp_path, monkeypatch, capsys):
+def test_a_database_with_any_row_is_reported_as_occupied(monkeypatch, capsys):
     """★ 这条就是那次「别把正在用的库清掉」的全部机制。
 
     断言的是一个**非零**退出码，不是某句文案：安装器判的是退出码（`-AllowFailure` 收下它
     再自己说一句）。文案改一个字不该让保护失效，判据改一个数应该让它失效。
     """
-    url = _probe_url(tmp_path)
-    engine = create_engine(url)
-    try:
-        with engine.begin() as connection:
-            connection.execute(School.__table__.insert(), [{"code": "QH", "name": "青禾实验学校"}])
-    finally:
-        engine.dispose()
+    with throwaway_database() as url:
+        engine = create_engine(url)
+        try:
+            with engine.begin() as connection:
+                connection.execute(School.__table__.insert(), [{"code": "QH", "name": "青禾实验学校"}])
+        finally:
+            engine.dispose()
 
-    _point_at(monkeypatch, url)
-    assert check_empty.main([]) == 1
-    output = capsys.readouterr().out
-    assert "school：1 行" in output, "非空时要把**是哪张表、有多少行**念出来，不然那句提醒没法核对"
+        _point_at(monkeypatch, url)
+        assert check_empty.main([]) == 1
+        output = capsys.readouterr().out
+        assert "school：1 行" in output, "非空时要把**是哪张表、有多少行**念出来，不然那句提醒没法核对"
 
 
-def test_a_database_with_no_tables_at_all_says_so_in_words(tmp_path, monkeypatch, capsys):
+def test_a_database_with_no_tables_at_all_says_so_in_words(monkeypatch, capsys):
     """一个**连表都没有**的库。
 
     安装流程里这一步排在 `ensure_schema` 与迁移之后，所以它不该发生；但
@@ -91,18 +94,19 @@ def test_a_database_with_no_tables_at_all_says_so_in_words(tmp_path, monkeypatch
 
     判据是「有没有说出表结构没建出来」，不是某句文案：这一条要挡的是
     「把一句能照着办的话换成一段英文 traceback」这件事本身。
+
+    `with_schema=False`：库建出来，但一条迁移都不跑——这正是 1146 的那个形状。
     """
-    url = f"sqlite:///{tmp_path / 'bare.db'}"
-    create_engine(url).dispose()  # 建出那个文件，但一张表都不建
-    _point_at(monkeypatch, url)
+    with throwaway_database(with_schema=False) as url:
+        _point_at(monkeypatch, url)
 
-    assert check_empty.main([]) == 1
-    output = capsys.readouterr().out
-    assert "school" in output and "表结构" in output
-    assert "读不动这个库" not in output, "这不是「读不动」，是这个库还没有表"
+        assert check_empty.main([]) == 1
+        output = capsys.readouterr().out
+        assert "school" in output and "表结构" in output
+        assert "读不动这个库" not in output, "这不是「读不动」，是这个库还没有表"
 
 
-def test_the_table_list_stays_the_three_roots(tmp_path):
+def test_the_table_list_stays_the_three_roots():
     """`ROOT_TABLES` 是这一层唯一的判据面。
 
     三张「根」表够用的理由是**其余每一张表都直接或间接指着它们**（全库没有 `ondelete=`，

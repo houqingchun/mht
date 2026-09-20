@@ -188,6 +188,48 @@ class RiskEventResult:
     question_no: int
 
 
+# `risk_type`（怎么触发的）→ `signal_type`（这件事归谁办）。V1.2 把这两个粒度拆开，
+# 而 `risk_event.signal_type` 是一个**没有默认值**的 NOT NULL 列，所以写风险事件的人
+# 必须回答它 —— 这个映射就是那个答案。
+#
+# 它住在引擎里而不是服务层：`maybe_raise_risk_events` 的既有约定是「什么情况下算重点学生
+# 只由 `calculation.risk_events` 回答」，而这一层正是 `risk_events` 的生产者。
+# 表的内容**照抄迁移 0013 的回填 CASE 与 DDL 第 539-557 行**——那边是数据里实际存在的
+# 那三支，不是我编的业务码（需求说明书 §15）。
+SIGNAL_TYPE_BY_RISK_TYPE = {
+    "MANUAL_REVIEW_REQUIRED": "MANUAL_REVIEW_REQUIRED",
+    "KEY_QUESTION_TRIGGERED": "MANUAL_REVIEW_REQUIRED",
+    "RETEST_RECOMMENDED": "RETEST_RECOMMENDED",
+    "HIGH_TOTAL_SCORE": "SCREENING_SIGNAL",
+    "HIGH_DIMENSION_SCORE": "SCREENING_SIGNAL",
+    "SCREENING_SIGNAL": "SCREENING_SIGNAL",
+}
+
+# 「这条信号要不要人去看一眼」是 `signal_type` 的函数（DDL 里存成一列是为了让
+# 「待复核」走得了索引）。目前只有人工复核那一类要。
+SIGNAL_TYPES_REQUIRING_MANUAL_REVIEW = frozenset({"MANUAL_REVIEW_REQUIRED"})
+
+
+def signal_type_for(risk_type: str) -> str:
+    """认不出的 `risk_type` **当场报错**，不猜一个默认值。
+
+    猜的代价是静默的：`signal_type` 写错一档，那条待办就会落进另一类人的队列，
+    或者干脆不进任何人的队列——而界面上一切正常。迁移 0013 的 precheck 对
+    「认不出的 risk_type」也是中止，这里与它一致。
+    """
+    try:
+        return SIGNAL_TYPE_BY_RISK_TYPE[risk_type]
+    except KeyError:
+        raise ValueError(
+            f"认不出的 risk_type：{risk_type!r}——`SIGNAL_TYPE_BY_RISK_TYPE` 里没有它，"
+            f"`risk_event.signal_type` 填不出来（新加 risk_type 时这张表要一起加）"
+        ) from None
+
+
+def requires_manual_review(signal_type: str) -> bool:
+    return signal_type in SIGNAL_TYPES_REQUIRING_MANUAL_REVIEW
+
+
 @dataclass(frozen=True)
 class ScaleCalculation:
     scale_version: str

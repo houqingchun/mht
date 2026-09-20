@@ -78,12 +78,12 @@ def batch_assign(
     current_user: PsychDetailReader,
     db: Annotated[Session, Depends(get_db)],
 ):
-    result = batch_assign_owner(db, current_user, payload.case_ids, payload.owner_id)
+    result = batch_assign_owner(db, current_user, payload.assignments, payload.owner_id)
     write_audit(
         db,
         action="批量分配负责人",
         resource_type="STUDENT_CARE_CASE",
-        resource_id=",".join(str(case_id) for case_id in payload.case_ids),
+        resource_id=",".join(str(item.case_id) for item in payload.assignments),
         actor=current_user,
         request=request,
         detail=f"负责人账号 {payload.owner_id}",

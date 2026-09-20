@@ -6,6 +6,7 @@ import { useSettings } from '../composables/useSettings'
 import Toast from '../components/Toast.vue'
 import ErrorState from '../components/ErrorState.vue'
 import ChangePasswordDialog from '../components/ChangePasswordDialog.vue'
+import SessionListDialog from '../components/SessionListDialog.vue'
 import { showToast } from '../services/toast'
 
 const router = useRouter()
@@ -29,6 +30,7 @@ const navConfig: Record<string, { name: string; avatar: string; nav: NavItem[] }
       { key: 'cases', label: '重点学生', icon: '⚑', path: '/counselor/cases' },
       { key: 'tasks', label: '测评任务', icon: '▣', path: '/counselor/tasks' },
       { key: 'dataCenter', label: '数据中心', icon: '⇅', path: '/counselor/data' },
+      { key: 'exports', label: '导出中心', icon: '↧', path: '/counselor/exports' },
       { key: 'analytics', label: '统计分析', icon: '▥', path: '/counselor/analytics' },
       { key: 'audit', label: '审计日志', icon: '◷', path: '/counselor/audit' }
     ]
@@ -51,6 +53,7 @@ const navConfig: Record<string, { name: string; avatar: string; nav: NavItem[] }
       { key: 'admin/system', label: '账号与权限', icon: '⚙', path: '/admin/system' },
       { key: 'organization', label: '组织学生', icon: '♙', path: '/admin/organization' },
       { key: 'scale', label: '量表题库', icon: '≡', path: '/admin/scale' },
+      { key: 'exports', label: '导出中心', icon: '↧', path: '/admin/exports' },
       { key: 'settings', label: '系统配置', icon: '⚒', path: '/admin/settings' },
       { key: 'audit', label: '审计日志', icon: '◷', path: '/admin/audit' }
     ]
@@ -82,6 +85,7 @@ const activeNav = computed(() => {
 const { settings, loadSettings } = useSettings()
 
 const showChangePassword = ref(false)
+const showSessions = ref(false)
 const mustRotate = ref(false)
 
 async function load() {
@@ -154,6 +158,11 @@ load()
           <div class="avatar" :title="currentNav?.name" :aria-label="currentNav?.name">
             {{ currentNav?.avatar || '用' }}
           </div>
+          <!-- 「登录设备」排在「修改密码」旁边：这两件事在用户的脑子里是同一类
+               （我的账号安全），而会话那个弹层正是「我在别的电脑上忘了退出」的出路。
+               学生不需要它——学生账号共享一台机房电脑是常态，逐台踢既踢不过来也
+               不该由学生做（他们的会话本来就短）。 -->
+          <button v-if="!isStudent" class="btn small" @click="showSessions = true">登录设备</button>
           <button class="btn small" @click="showChangePassword = true">修改密码</button>
           <button class="btn small" @click="signOut">退出</button>
         </div>
@@ -183,6 +192,8 @@ load()
       @changed="onPasswordChanged"
       @update:open="showChangePassword = $event"
     />
+
+    <SessionListDialog :open="showSessions" @update:open="showSessions = $event" />
 
     <Toast />
   </div>

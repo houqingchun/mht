@@ -1,10 +1,20 @@
+import asyncio
+import io
 from typing import Any
 
-from sqlalchemy import select
+from fastapi import UploadFile
+from sqlalchemy import delete, select
+from sqlalchemy.orm import Session
 
+from app.api.v1.student_roster import roster_import_preview
 from app.models.account import UserAccount
 from app.models.audit import AuditLog
-from app.models.organization import Student
+from app.models.importing import (
+    StudentAgeChangeLog,
+    StudentRosterImportBatch,
+    StudentRosterImportRow,
+)
+from app.models.organization import School, Student
 from app.services.student_import_service import OVERWRITABLE_FIELDS
 from app.tests.conftest import auth_headers
 
@@ -13,7 +23,7 @@ def test_admin_can_preview_and_commit_student_csv_import(client, db_session):
     headers = auth_headers(client, "admin", "admin")
     csv_content = "student_no,name,grade,class_name\nS002,王同学,初一,702\n,缺号,初一,701\nS001,重复,初一,701\n"
     preview = client.post(
-        "/api/v1/students/import/preview",
+        "/api/v1/student-roster/import/preview",
         headers=headers,
         files={"file": ("students.csv", csv_content, "text/csv")},
     )
@@ -25,12 +35,12 @@ def test_admin_can_preview_and_commit_student_csv_import(client, db_session):
     # 不再是「错误」（2026-09-17）。另外两行才是错误——`缺号` 缺学号。
     assert data["conflict_count"] == 1
     assert data["error_count"] == 1
-    assert data["preview_token"]
+    assert data["batch_id"]
 
     commit = client.post(
-        "/api/v1/students/import/commit",
+        "/api/v1/student-roster/import/commit",
         headers=headers,
-        json={"preview_token": data["preview_token"], "resolution": "skip"},
+        json={"batch_id": data["batch_id"], "resolution": "skip"},
     )
     assert commit.status_code == 200
     assert commit.json()["data"]["created"] == 1
@@ -50,7 +60,7 @@ def test_admin_can_preview_student_json_import(client):
     headers = auth_headers(client, "admin", "admin")
     payload = '[{"student_no":"S003","name":"赵同学","grade":"初二","class_name":"801"}]'
     response = client.post(
-        "/api/v1/students/import/preview",
+        "/api/v1/student-roster/import/preview",
         headers=headers,
         files={"file": ("students.json", payload, "application/json")},
     )
@@ -61,7 +71,7 @@ def test_admin_can_preview_student_json_import(client):
 def test_non_admin_cannot_import_students(client):
     headers = auth_headers(client, "counselor", "13800000001")
     response = client.post(
-        "/api/v1/students/import/preview",
+        "/api/v1/student-roster/import/preview",
         headers=headers,
         files={"file": ("students.csv", "student_no,name,grade,class_name\nS004,钱同学,初一,701\n", "text/csv")},
     )
@@ -77,7 +87,7 @@ def test_non_admin_cannot_import_students(client):
 
 def _preview(client, headers, csv_content: str) -> dict:
     return client.post(
-        "/api/v1/students/import/preview",
+        "/api/v1/student-roster/import/preview",
         headers=headers,
         files={"file": ("students.csv", csv_content, "text/csv")},
     ).json()["data"]
@@ -86,7 +96,7 @@ def _preview(client, headers, csv_content: str) -> dict:
 def test_class_code_must_match_its_grade(client):
     """「初二,701」必须报错。
 
-    这是选择保留年级列的全部理由：`commit_student_import` 只会拿字符串去
+    这是选择保留年级列的全部理由：`commit_roster_import` 只会拿字符串去
     `Grade.name` 里找、找不到就新建，所以不拦的话这一行会被静默挂到初二下面。
     录错的人看不见任何异常，等到年级统计对不上时已经无从查起。
     """
@@ -156,14 +166,14 @@ def test_the_missing_field_message_is_not_doubled(client):
 def test_imported_student_gets_the_default_password_and_must_change_it(client):
     """导入的学生账号，密码就是 `123456`，而且 `must_change_password` 为 True。
 
-    这两条都不是新行为（`student_import_service.commit_student_import` 一直这么写），
+    这两条都不是新行为（`student_import_service.commit_roster_import` 一直这么写），
     但此前**没有任何测试钉住它们**：把密码换成随机串、或把 `must_change_password`
     翻成 False，全套测试照样全绿。学校要的是「新学生拿学号 + 123456 先登得进去、
     进去之后被要求改密」，这条契约得有人守——它是导入唯一一处直接决定别人能否登录的地方。
     """
     headers = auth_headers(client, "admin", "admin")
     preview = client.post(
-        "/api/v1/students/import/preview",
+        "/api/v1/student-roster/import/preview",
         headers=headers,
         files={
             "file": (
@@ -174,9 +184,9 @@ def test_imported_student_gets_the_default_password_and_must_change_it(client):
         },
     ).json()["data"]
     committed = client.post(
-        "/api/v1/students/import/commit",
+        "/api/v1/student-roster/import/commit",
         headers=headers,
-        json={"preview_token": preview["preview_token"]},
+        json={"batch_id": preview["batch_id"]},
     )
     assert committed.status_code == 200, committed.text
     assert committed.json()["data"]["created"] == 1
@@ -211,11 +221,22 @@ def test_imported_student_gets_the_default_password_and_must_change_it(client):
 # --------------------------------------------------------------------------
 
 
-def _commit(client, headers, token: str, resolution: str | None = None):
-    payload: dict[str, str] = {"preview_token": token}
+def _commit(client, headers, batch_id: int, resolution: str | None = None):
+    payload: dict[str, Any] = {"batch_id": batch_id}
     if resolution is not None:
         payload["resolution"] = resolution
-    return client.post("/api/v1/students/import/commit", headers=headers, json=payload)
+    return client.post("/api/v1/student-roster/import/commit", headers=headers, json=payload)
+
+
+def _counts(response) -> dict[str, int]:
+    """提交响应里的三个数。
+
+    单独一个函数，因为响应体上还有 `batch_id` / `batch_no` / `error_count`——
+    直接断言整个 `data` 相等会把「这一批是哪一批」也钉进每一条用例里，
+    而那些数在这一层不承载用例要说的事。
+    """
+    data = response.json()["data"]
+    return {key: data[key] for key in ("created", "updated", "skipped")}
 
 
 def test_a_roster_entry_already_holding_the_number_is_a_conflict_not_an_error(client):
@@ -274,7 +295,7 @@ def test_commit_refuses_before_writing_when_the_choice_was_not_made(client, db_s
     assert data["conflict_count"] == 1
     assert data["valid_count"] == 1
 
-    refused = _commit(client, headers, data["preview_token"])
+    refused = _commit(client, headers, data["batch_id"])
     assert refused.status_code == 422
     assert refused.json()["error"]["code"] == "VALIDATION_ERROR"
     assert "覆盖或放弃" in refused.json()["error"]["message"]
@@ -307,9 +328,9 @@ def test_overwrite_updates_the_roster_entry_in_place(client, db_session):
     )
     assert data["conflict_count"] == 1
 
-    committed = _commit(client, headers, data["preview_token"], resolution="overwrite")
+    committed = _commit(client, headers, data["batch_id"], resolution="overwrite")
     assert committed.status_code == 200, committed.text
-    assert committed.json()["data"] == {"created": 0, "updated": 1, "skipped": 0}
+    assert _counts(committed) == {"created": 0, "updated": 1, "skipped": 0}
 
     db_session.expire_all()
     after = db_session.scalar(select(Student).where(Student.student_no == "S001"))
@@ -380,7 +401,7 @@ def test_overwrite_touches_exactly_the_columns_it_promises(client, db_session):
     data = _preview(
         client, headers, "student_no,name,grade,class_name,gender,age\nS001,林同学改,初二,801,女,14\n"
     )
-    committed = _commit(client, headers, data["preview_token"], resolution="overwrite")
+    committed = _commit(client, headers, data["batch_id"], resolution="overwrite")
     assert committed.status_code == 200, committed.text
     db_session.expire_all()
     after = snapshot()
@@ -409,13 +430,13 @@ def test_overwrite_does_not_blank_optional_columns_the_file_omits(client, db_ses
     seeded = _preview(
         client, headers, "student_no,name,grade,class_name,gender,age\nS001,林同学,初一,701,女,13\n"
     )
-    assert _commit(client, headers, seeded["preview_token"], resolution="overwrite").status_code == 200
+    assert _commit(client, headers, seeded["batch_id"], resolution="overwrite").status_code == 200
 
     # 再导一份只有四列的文件（改名换班，不带性别年龄）
     four_columns = _preview(
         client, headers, "student_no,name,grade,class_name\nS001,林同学,初二,801\n"
     )
-    assert _commit(client, headers, four_columns["preview_token"], resolution="overwrite").status_code == 200
+    assert _commit(client, headers, four_columns["batch_id"], resolution="overwrite").status_code == 200
 
     db_session.expire_all()
     after = db_session.scalar(select(Student).where(Student.student_no == "S001"))
@@ -433,9 +454,9 @@ def test_skip_leaves_the_conflicting_rows_alone_and_imports_the_rest(client, db_
         "student_no,name,grade,class_name\nS903,甲同学,初一,701\nS001,林同学改,初二,801\n",
     )
 
-    committed = _commit(client, headers, data["preview_token"], resolution="skip")
+    committed = _commit(client, headers, data["batch_id"], resolution="skip")
     assert committed.status_code == 200, committed.text
-    assert committed.json()["data"] == {"created": 1, "updated": 0, "skipped": 1}
+    assert _counts(committed) == {"created": 1, "updated": 0, "skipped": 1}
 
     db_session.expire_all()
     # 冲突那一条原样不动
@@ -452,7 +473,7 @@ def test_an_unknown_resolution_is_rejected(client):
     headers = auth_headers(client, "admin", "admin")
     data = _preview(client, headers, "student_no,name,grade,class_name\nS001,林同学改,初二,801\n")
 
-    response = _commit(client, headers, data["preview_token"], resolution="Overwrite")
+    response = _commit(client, headers, data["batch_id"], resolution="Overwrite")
     assert response.status_code == 422
     assert response.json()["error"]["message"] == "处置方式应为覆盖（overwrite）或放弃（skip）"
 
@@ -466,7 +487,7 @@ def test_a_file_without_conflicts_commits_without_being_asked(client, db_session
     data = _preview(client, headers, "student_no,name,grade,class_name\nS904,乙同学,初一,701\n")
     assert data["conflict_count"] == 0
 
-    committed = _commit(client, headers, data["preview_token"])
+    committed = _commit(client, headers, data["batch_id"])
     assert committed.status_code == 200, committed.text
     assert committed.json()["data"]["created"] == 1
 
@@ -476,3 +497,338 @@ def test_a_file_without_conflicts_commits_without_being_asked(client, db_session
     assert audit is not None
     # 没问过 ≠ 问了选放弃。审计里要分得开。
     assert "未涉及（无冲突）" in audit.detail
+
+
+# --------------------------------------------------------------------------
+# 名册导入批次化（V1.2 第 3 期）：上传留下批次与逐行明细
+# --------------------------------------------------------------------------
+
+
+def _batches(client, headers) -> dict:
+    response = client.get("/api/v1/student-roster/import/batches", headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()["data"]
+
+
+def test_a_preview_leaves_a_batch_and_its_rows_behind(client, db_session):
+    """预览产出的是**一批行**：一行批次 + 每一行一条明细。
+
+    V1.0 里预览的结果只活在返回值里，操作员上传完被叫走、回来时那一页是空的，
+    只能重传一次——而重传的那一份与刚才屏幕上那份是不是同一份，没有任何东西能
+    回答。这条钉的是**这一批的内容**：批次行与逐行明细在会话里已经成型，坏行的
+    结论（`ERROR`）在上传那一刻就定下来了。
+
+    **它证明不了这批真的落了库。** 夹具把 `get_db` 覆盖成共享的 `db_session`，
+    而它在请求结束后不关闭也不回滚，所以「写了但没提交」的行在这里照样查得到——
+    这一条在真库 0 行时依然绿着。落库那一句由
+    `test_the_preview_survives_the_request_that_made_it` 钉（它换掉那一层覆盖）。
+    """
+    headers = auth_headers(client, "admin", "admin")
+    data = _preview(
+        client,
+        headers,
+        "student_no,name,grade,class_name\nS811,郑同学,初一,701\nS001,林同学改,初二,801\n,缺号,初一,701\n",
+    )
+
+    batch = db_session.get(StudentRosterImportBatch, data["batch_id"])
+    assert batch is not None
+    assert batch.status == "PREVIEW"
+    assert batch.batch_no.startswith("ROSTER-")
+    assert (batch.total_rows, batch.error_rows) == (3, 1)
+
+    rows = db_session.scalars(
+        select(StudentRosterImportRow)
+        .where(StudentRosterImportRow.batch_id == batch.id)
+        .order_by(StudentRosterImportRow.row_no)
+    ).all()
+    # `row_no` 从 **2** 数起：第 1 行是表头。报错说的「第 N 行」要能被老师拿去
+    # 回 Excel 里数，所以这一列存的是**文件里的行号**，不是记录序号。
+    assert [row.row_no for row in rows] == [2, 3, 4]
+    assert rows[0].processing_status == "PENDING"
+    assert rows[0].conflict_code is None
+    # 冲突码只在**冲突**时有值——学号已在名册上（S001）。
+    assert rows[1].conflict_code == "STUDENT_NO_EXISTS"
+    # 坏单元格（缺学号）在上传那一刻就是 ERROR，它不会因为后面选了覆盖而改变。
+    assert rows[2].processing_status == "ERROR"
+    assert rows[2].message == "缺少学号"
+    # 这一行还没落到任何学生身上：提交之前没人知道它会新建还是更新。
+    assert all(row.student_id is None for row in rows)
+
+
+def test_re_uploading_the_same_file_reuses_the_preview_batch(client, db_session):
+    """同一个人把同一份文件再传一次，**不留下第二行 PREVIEW 批次**。
+
+    学校改正一处错别字再导一次是常态。每传一次就多一批孤儿行的话，批次历史那一页
+    的全部意义（按它找「哪一批真的导进去了」）就被淹掉了。判据是文件指纹 + 操作者。
+    """
+    headers = auth_headers(client, "admin", "admin")
+    content = "student_no,name,grade,class_name\nS812,冯同学,初一,701\n"
+    first = _preview(client, headers, content)
+    second = _preview(client, headers, content)
+
+    assert first["batch_id"] == second["batch_id"]
+    assert (
+        len(
+            db_session.scalars(
+                select(StudentRosterImportRow).where(
+                    StudentRosterImportRow.batch_id == first["batch_id"]
+                )
+            ).all()
+        )
+        == 1
+    )
+
+
+def test_commit_marks_the_batch_committed_and_every_row_its_outcome(client, db_session):
+    """提交之后，逐行明细说得出「这一行落成了什么」。
+
+    这是这两张表存在的最后一个理由：导完之后回看，「为什么这个人没更新」的答案
+    必须在行上——选「放弃」的那一行留着原因，成功的那两行不留（`message` 只在
+    需要解释时有值）。而 `conflict_code` **留着**：撞上过就是撞上过，只是被处置掉了。
+    """
+    headers = auth_headers(client, "admin", "admin")
+    data = _preview(
+        client,
+        headers,
+        "student_no,name,grade,class_name\nS813,陈同学,初一,701\nS001,林同学改,初二,801\n,缺号,初一,701\n",
+    )
+    committed = _commit(client, headers, data["batch_id"], resolution="skip")
+    assert committed.status_code == 200, committed.text
+
+    db_session.expire_all()
+    batch = db_session.get(StudentRosterImportBatch, data["batch_id"])
+    assert batch.status == "COMMITTED"
+    assert (batch.created_rows, batch.updated_rows, batch.skipped_rows, batch.error_rows) == (1, 0, 1, 1)
+
+    rows = db_session.scalars(
+        select(StudentRosterImportRow)
+        .where(StudentRosterImportRow.batch_id == batch.id)
+        .order_by(StudentRosterImportRow.row_no)
+    ).all()
+    created, skipped, errored = rows
+    assert created.processing_status == "CREATED"
+    assert created.message is None
+    assert created.student_id is not None
+    assert skipped.processing_status == "SKIPPED"
+    assert "已在名册上" in skipped.message
+    assert skipped.conflict_code == "STUDENT_NO_EXISTS"
+    assert skipped.student_id is None
+    assert errored.processing_status == "ERROR"
+    assert errored.message == "缺少学号"
+
+
+def test_a_committed_batch_cannot_be_committed_again(client, db_session):
+    """同一批点两次「确认导入」→ 422，而不是把整份名册写第二遍。
+
+    第二次遇到的每一行都会变成冲突，「覆盖」时它会静默地再覆盖一遍——看起来像是
+    成功了，而屏幕上没有任何东西说明刚才那一下又动了一次名册。
+    """
+    headers = auth_headers(client, "admin", "admin")
+    data = _preview(client, headers, "student_no,name,grade,class_name\nS814,褚同学,初一,701\n")
+    assert _commit(client, headers, data["batch_id"]).status_code == 200
+
+    again = _commit(client, headers, data["batch_id"])
+    assert again.status_code == 422
+    assert data["batch_no"] in again.json()["error"]["message"]
+    assert db_session.scalar(select(Student).where(Student.student_no == "S814")) is not None
+
+
+def test_the_audit_line_names_the_batch(client, db_session):
+    """审计的 `detail` 带批次号。
+
+    名册导入是反复发生的动作（每学期一次普查、转学插班），而审计页搜索匹配的正是
+    `action` 与这几个字段。不记批次号时「去年那批初一的名册是谁导的」只能靠时间猜，
+    而同一分钟里可能有两批。
+    """
+    headers = auth_headers(client, "admin", "admin")
+    data = _preview(client, headers, "student_no,name,grade,class_name\nS815,卫同学,初一,701\n")
+    assert _commit(client, headers, data["batch_id"]).status_code == 200
+
+    audit = db_session.scalar(select(AuditLog).where(AuditLog.action == "导入学生"))
+    assert audit is not None
+    assert f"batch={data['batch_no']}" in audit.detail
+
+
+def test_overwriting_an_age_leaves_a_change_log(client, db_session):
+    """覆盖年龄时 `student_age_change_log` 留一行，并且审计也留下。
+
+    两处不是重复：审计用动作码 `更新学生年龄`（与测评导入那条链路共用），
+    回答「谁在什么时候动了这个数」；变更记录是**结构化的那一份**，把「名册导入
+    批次 N 第 M 行」记成外键，回答审计答不出的「这一列被改过几次」。
+
+    先导一次把年龄定成 13，再导一次改成 14——那样这一行必然是从 13 到 14，
+    与种子里那个学生原本是多少岁无关。
+    """
+    headers = auth_headers(client, "admin", "admin")
+    first = _preview(
+        client, headers, "student_no,name,grade,class_name,gender,age\nS001,林同学,初一,701,女,13\n"
+    )
+    assert _commit(client, headers, first["batch_id"], resolution="overwrite").status_code == 200
+    # 第一次那一行不留记录：名册上原来是多少岁不该由这次导入来断言。
+    assert db_session.scalar(select(StudentAgeChangeLog)) is None
+
+    second = _preview(
+        client, headers, "student_no,name,grade,class_name,gender,age\nS001,林同学,初一,701,女,14\n"
+    )
+    assert _commit(client, headers, second["batch_id"], resolution="overwrite").status_code == 200
+
+    db_session.expire_all()
+    student = db_session.scalar(select(Student).where(Student.student_no == "S001"))
+    assert student.age == 14
+    log = db_session.scalar(select(StudentAgeChangeLog))
+    assert log is not None
+    assert (log.old_age, log.new_age) == (13, 14)
+    assert log.student_id == student.id
+    assert log.roster_import_batch_id == second["batch_id"]
+    # `reason` 存**中文原因**（与审计的 `detail` 同一口径）：读它的人正是要判断
+    # 「这次导入该不该改这一列」的人，写 `ROSTER_IMPORT` 等于没写。
+    assert "名册导入覆盖年龄" in log.reason
+    assert second["batch_no"] in log.reason
+
+    age_audit = db_session.scalar(select(AuditLog).where(AuditLog.action == "更新学生年龄"))
+    assert age_audit is not None
+    assert "名册 13 → 文件 14" in age_audit.detail
+
+
+def test_the_batch_history_and_the_row_detail_are_readable(client, db_session):
+    """批次历史与逐行明细各有一个读者。
+
+    不给这两张表读者等于没落库：导完之后，「这一行是谁导进来的、为什么没落上」
+    在界面上就没有任何落点。
+    """
+    headers = auth_headers(client, "admin", "admin")
+    data = _preview(
+        client, headers, "student_no,name,grade,class_name\nS816,蒋同学,初一,701\n,缺号,初一,701\n"
+    )
+
+    history = _batches(client, headers)
+    entry = next(item for item in history["items"] if item["id"] == data["batch_id"])
+    assert entry["batch_no"] == data["batch_no"]
+    assert entry["status"] == "PREVIEW"
+    assert (entry["total_rows"], entry["error_rows"]) == (2, 1)
+    # 「凡是截断，都要自己说出来」（§10）：界面据此写「另有 N 批未显示」。
+    assert history["total"] >= len(history["items"])
+    assert isinstance(history["truncated"], bool)
+
+    detail = client.get(
+        f"/api/v1/student-roster/import/batches/{data['batch_id']}/rows", headers=headers
+    )
+    assert detail.status_code == 200, detail.text
+    items = detail.json()["data"]["items"]
+    assert [item["row_no"] for item in items] == [2, 3]
+    assert items[0]["processing_status"] == "PENDING"
+    # 性别是**编码**（`MALE` / `FEMALE`），中文由 `labels.ts` 那一层现算。
+    assert items[1]["message"] == "缺少学号"
+
+
+def test_the_row_detail_of_an_unknown_batch_is_a_404_not_an_empty_list(client):
+    """没有这一批时 404，不是空列表。
+
+    空列表会让界面说「这一批没有明细」，而实话是「没有这一批」——§14 那条
+    「空态是一句关于数据的话」在这里的反面。
+    """
+    headers = auth_headers(client, "admin", "admin")
+    response = client.get("/api/v1/student-roster/import/batches/99999999/rows", headers=headers)
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "NOT_FOUND"
+
+
+def test_a_batch_from_another_school_is_not_readable_nor_committable(client, db_session):
+    """`batch_id` 是客户端传来的，所以它本身不能成为凭据（§9）。
+
+    三个入口（读明细 / 读历史 / 提交）都要按学校挡一次。今天名册导入写死单校
+    （缺口 2），所以**这一条在正常链路上永远走不到**——正因为如此才要专门造一行
+    别的学校的批次来钉它：等哪天多校了，漏掉这道检查不会以「报错」的形式出现，
+    而会以「A 校管理员把 B 校的名册导进了 B 校」的形式出现，界面上一切正常。
+
+    回 **404 而不是 403**，与「批次不存在」**同一句话**：一句「这一批属于别的学校」
+    等于替客户端确认了那个 id 存在。
+    """
+    other = School(code="YH", name="云海中学")
+    db_session.add(other)
+    db_session.flush()
+    foreign = StudentRosterImportBatch(
+        batch_no="ROSTER-OTHER-1",
+        school_id=other.id,
+        file_name="别的学校的名册.csv",
+        file_sha256="0" * 64,
+        imported_by=db_session.scalar(select(UserAccount.id).where(UserAccount.account == "admin")),
+        status="PREVIEW",
+        total_rows=1,
+    )
+    db_session.add(foreign)
+    db_session.flush()
+
+    headers = auth_headers(client, "admin", "admin")
+    rows = client.get(
+        f"/api/v1/student-roster/import/batches/{foreign.id}/rows", headers=headers
+    )
+    assert rows.status_code == 404
+    assert rows.json()["error"]["code"] == "NOT_FOUND"
+
+    commit = client.post(
+        "/api/v1/student-roster/import/commit",
+        headers=headers,
+        json={"batch_id": foreign.id},
+    )
+    assert commit.status_code == 404
+    assert commit.json()["error"]["code"] == "NOT_FOUND"
+    # 「被拒的读取不写审计」（§9）与写入侧同此：这一行不该出现在历史里。
+    history = _batches(client, headers)
+    assert all(item["id"] != foreign.id for item in history["items"])
+
+
+def test_the_preview_survives_the_request_that_made_it(seeded_engine):
+    """预览必须**真的落库**——而这一条只有本用例看得见。
+
+    `get_db` 只管开与关、从不提交（`db/session.py` 的 `finally: db.close()`），
+    所以预览路由里那句 `db.commit()` 是整条链路的前提：客户端拿到的 `batch_id`
+    要能被下一次提交查回来。但 `client` 夹具把 `get_db` 覆盖成那个共享的
+    `db_session`，而它在请求结束后**不关闭也不回滚**——于是「写了但没提交」的行
+    对测试照样查得到，整个后端套件在这一类洞上是全绿的。这不是假设：V1.2 第 3 期
+    的预览正好少过这一句，`test_a_preview_leaves_a_batch_and_its_rows_behind`
+    在真库里明明 0 行的情况下一直绿着。
+
+    所以这里换掉那一层覆盖：请求走一个**与生产逐字同形**的会话（用完就关），
+    请求之后再另开一个会话去查——没有提交的行在 `close()` 那一刻就没了。
+
+    走的是**路由函数本身**而不是 `TestClient`：要断言的就是那个函数体里有没有
+    提交，而绕过的是依赖注入那一层（那里没有逻辑），换来的是不必为了拿一个 token
+    而往这个共享库里真写一行登录会话。
+    """
+    csv_content = "student_no,name,grade,class_name\nS900,快照同学,初一,701\n"
+
+    with Session(seeded_engine) as db:
+        admin = db.scalar(select(UserAccount).where(UserAccount.account == "admin"))
+        body = asyncio.run(
+            roster_import_preview(
+                current_user=admin,
+                db=db,
+                file=UploadFile(
+                    io.BytesIO(csv_content.encode("utf-8")), filename="roster.csv"
+                ),
+            )
+        )
+    batch_id = body["data"]["batch_id"]
+
+    # 另一条连接——也就是另一个会话——去看它在不在。
+    with Session(seeded_engine) as db:
+        batch = db.get(StudentRosterImportBatch, batch_id)
+        assert batch is not None, "预览那一批没有落库：路由少了 db.commit()"
+        assert batch.status == "PREVIEW"
+        rows = db.scalars(
+            select(StudentRosterImportRow).where(
+                StudentRosterImportRow.batch_id == batch_id
+            )
+        ).all()
+        assert len(rows) == 1, "逐行明细没有落库：路由少了 db.commit()"
+
+        # 用完清掉。这个库是 session 级共享的，留着这批会让别的用例看到一份
+        # 它没造过的导入历史（那正是「不为断言去改共享数据」的反面）。
+        db.execute(
+            delete(StudentRosterImportRow).where(
+                StudentRosterImportRow.batch_id == batch_id
+            )
+        )
+        db.delete(batch)
+        db.commit()

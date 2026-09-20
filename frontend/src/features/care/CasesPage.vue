@@ -44,6 +44,23 @@ const error = ref('')
 const query = ref('')
 const riskFilter = ref('all')
 const queueFilter = ref('all')
+/**
+ * 选中的行 —— **装的是 `case_id`，不是 `student_id`**。
+ *
+ * 这一列 2026-09-19 之前装的是学号，于是「批量分配」把学号当档案 id 发了出去
+ * （请求字段叫 `case_ids`）：`where(id.in_(学生 id))` 命中 0 行，返回 404
+ * 「未找到可分配的关注档案」——这个按钮在真实数据上从来没能成功过。
+ * 开发库上实测过两者的交集是空的（`case_id` 49–60，`student_id` 是另一批数）。
+ *
+ * 而且学号也**不该**是这一列的值：`list_care_cases` 刻意不过滤 CLOSED（§1），
+ * 所以一名学生可以同时有已关闭的旧档案与在办的新档案（秋季关档、春季再开），
+ * 按学号去重会让那两行**一起**被勾上——而「分配负责人」对一条已关闭的档案
+ * 没有任何意义。行的身份就是档案，勾选也该按档案。
+ *
+ * 两个消费者各有各的取法：转派要 `{case_id, case_version}`（逐行），
+ * 受控导出要 `student_id`（后端按**人**写行）——所以后者由 `selectedStudentIds`
+ * 从这一列派生，而不是直接用它。
+ */
 const selected = ref<Set<number>>(new Set())
 
 // The workbench metric tiles deep-link here with ?filter=<queue-tab key>.
@@ -327,11 +344,11 @@ function openDetail(studentId: number) {
   router.push(`/counselor/cases/${studentId}`)
 }
 
-function toggleSelect(studentId: number) {
-  if (selected.value.has(studentId)) {
-    selected.value.delete(studentId)
+function toggleSelect(caseId: number) {
+  if (selected.value.has(caseId)) {
+    selected.value.delete(caseId)
   } else {
-    selected.value.add(studentId)
+    selected.value.add(caseId)
   }
 }
 
@@ -339,9 +356,22 @@ function toggleSelectAll() {
   if (selected.value.size === filtered.value.length) {
     selected.value.clear()
   } else {
-    filtered.value.forEach(c => selected.value.add(c.student_id))
+    filtered.value.forEach(c => selected.value.add(c.case_id))
   }
 }
+
+/** 选中的那些档案，按 `case_id` 找回来（顺序照列表，与页面上的次序一致）。 */
+const selectedCases = computed(() => cases.value.filter(c => selected.value.has(c.case_id)))
+
+/**
+ * 选中的学生，**按人去重**。
+ *
+ * 受控导出按人写行（`export_service` 的 `seen_students`），所以同一个人的两条档案
+ * 只能算一个：「导出 N 人」那一格与实际导出的行数必须同源（§11）。
+ */
+const selectedStudentIds = computed(() => [
+  ...new Set(selectedCases.value.map(c => c.student_id))
+])
 
 function clearSelection() {
   selected.value.clear()
@@ -368,12 +398,21 @@ async function batchAssign() {
   if (!ownerId) return
 
   try {
-    const result = await batchAssignOwner([...selected.value], ownerId)
-    showToast('success', `负责人已更新（${result.updated} 人）`)
+    // 逐行带版本号（§16.4）。这份载荷**必须来自列表行本身**：版本号是服务端
+    // 上一次读出来的，客户端手上只有 `cases` 里那一份。任何一行在别处被改过
+    // （复核 / 跟进 / 关档 / 重开都会 +1）时服务端回 409 并且一行都不写。
+    const result = await batchAssignOwner(
+      selectedCases.value.map(c => ({ case_id: c.case_id, case_version: c.case_version })),
+      ownerId
+    )
+    showToast('success', `负责人已更新（${result.updated} 份档案）`)
     selected.value.clear()
     await load()
   } catch (err) {
+    // 409 那句原文是写给用户看的（§2）。重取一次：手上这些版本号可能已经过期，
+    // 不刷新的话再点一次还是同一句话。
     showToast('error', err instanceof Error ? err.message : '批量分配失败')
+    await load()
   }
 }
 
@@ -407,7 +446,7 @@ const exportCount = computed(() =>
     ? new Set(
         cases.value.filter(c => c.total_level === 'KEY_ATTENTION').map(c => c.student_id)
       ).size
-    : selected.value.size
+    : selectedStudentIds.value.length
 )
 
 async function confirmExport() {
@@ -428,7 +467,7 @@ async function confirmExport() {
     if (exportHighRisk.value) {
       await exportHighRiskCareCases(options)
     } else {
-      await exportCareCases({ ...options, studentIds: [...selected.value] })
+      await exportCareCases({ ...options, studentIds: selectedStudentIds.value })
     }
     showToast('success', '受控导出已完成并记录审计')
     showExportModal.value = false
@@ -465,7 +504,11 @@ onMounted(load)
            the student list has no selection and no export. -->
       <div v-if="activeTab === 'cases'" class="actions">
         <div v-if="selected.size > 0" class="selection-actions">
-          <span class="selection-count">已选 {{ selected.size }} 人</span>
+          <!-- 单位是**份档案**，不是人：一名学生可以同时有已关闭的旧档案与在办的
+               新档案（§1 那条时序），而这一列选中的正是档案。写「N 人」会让
+               「选了 3 份」看起来像「选了 3 个人」，而转派与导出在这一点上口径不同
+               （转派按档案、导出按人去重）。 -->
+          <span class="selection-count">已选 {{ selected.size }} 份档案</span>
           <button class="btn" @click="batchAssign">批量分配</button>
           <button class="btn" @click="batchExport">导出选中</button>
           <button class="btn small" @click="clearSelection">清除</button>
@@ -520,7 +563,7 @@ onMounted(load)
               :indeterminate.prop="selected.size > 0 && selected.size < filtered.length"
               @change="toggleSelectAll"
             />
-            <span class="muted tiny">{{ filtered.length }} 人 · 已选 {{ selected.size }} 人</span>
+            <span class="muted tiny">{{ filtered.length }} 人 · 已选 {{ selected.size }} 份档案</span>
           </label>
         </div>
       </div>
@@ -538,8 +581,8 @@ onMounted(load)
               <label class="row-select">
                 <input
                   type="checkbox"
-                  :checked="selected.has(row.student_id)"
-                  @change="toggleSelect(row.student_id)"
+                  :checked="selected.has(row.case_id)"
+                  @change="toggleSelect(row.case_id)"
                 />
                 <span class="student-cell">
                   <span class="student-avatar" aria-hidden="true">{{ row.student_name[0] }}</span>
@@ -691,6 +734,18 @@ onMounted(load)
           <div class="field">
             <label>导出人数</label>
             <input :value="`${exportCount}人`" disabled />
+            <!-- 这一格与上面那颗「已选 N 份档案」**不是同一个数**，所以两个口径要在
+                 同一屏上各自说明（§9）——一名学生可以同时有已关闭的旧档案与在办的新档案
+                 （§1 那条「秋季关档、春季再开」的时序），按档案数会把这个数字报大。
+                 真正会被导出去的是这一格：后端逐**学生**写行
+                 （`export_service.py` 的 `seen_students`，CLAUDE.md §11 那条）。 -->
+            <p v-if="exportHighRisk" class="muted tiny" style="margin:6px 0 0">
+              全校该等级的学生数，按人去重。
+            </p>
+            <p v-else class="muted tiny" style="margin:6px 0 0">
+              你勾选的学生数，<b>按人去重</b>：一名学生若有两条档案，这里只算一个人
+              ——上面那颗「已选 N 份档案」数的是档案。
+            </p>
           </div>
           <div class="field">
             <label>导出用途 <span class="required">*</span></label>

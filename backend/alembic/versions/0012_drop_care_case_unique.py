@@ -11,11 +11,15 @@
 「同一时间只有一条在办」由写入侧保证，不靠数据库约束：
 `assessment_service.open_or_reuse_care_case` 先找该生非 CLOSED 的那条，找不到才新建。
 
-为什么这条迁移必须在真库上跑一遍才算数：`make test` 用内存 sqlite + `Base.metadata.create_all`
-建表，**完全不跑 Alembic**（CLAUDE.md 已知缺口 3）。模型改了、迁移没改，测试照样全绿，
-而真库上的约束还在——那个 500 一点没变。downgrade 只是把约束加回去，所以它**只在库里
-没有重复 (student_id, status) 对时能成功**：一旦关过两次档，回退就会撞 UNIQUE。
-这是有意的取舍——回退是给「刚迁上去、还没产生新数据」那几分钟用的。
+**这条迁移 2026-09-19 之前只能在真库上验**：`make test` 当时用内存 sqlite +
+`Base.metadata.create_all` 建表、完全不跑 Alembic（CLAUDE.md 已知缺口 3），于是模型改了、
+迁移没改，测试照样全绿，而真库上的约束还在——那个 500 一点没变。缺口 3 关闭之后
+`make test` 自己就把这条迁移跑一遍（`mysql_support.run_migrations`），这一条现在是
+有信号的了。
+
+downgrade 只是把约束加回去，所以它**只在库里没有重复 (student_id, status) 对时能成功**：
+一旦关过两次档，回退就会撞 UNIQUE。这是有意的取舍——回退是给「刚迁上去、还没产生新数据」
+那几分钟用的。
 
 Revision ID: 0012_drop_care_case_unique
 Revises: 0011_student_age
@@ -38,8 +42,9 @@ CONSTRAINT = "uq_care_case_student_status"
 # 所以 MySQL 会拿它去满足外键，然后拒绝删除它：
 #   (1553, "Cannot drop index 'uq_care_case_student_status': needed in a foreign key constraint")
 # 先建一条普通索引顶上，再去删唯一约束。顺序不能反。
-# 这个错误只有真库会报——内存 sqlite 既没有这条外键检查，也根本不跑 Alembic
-# （CLAUDE.md 已知缺口 3），所以「模型改了、迁移没改」在测试里是全绿的。
+# 这个错误只有 MySQL 会报——2026-09-19 之前测试跑在内存 sqlite 上（它既没有这条外键检查，
+# 也根本不跑 Alembic，CLAUDE.md 已知缺口 3），所以「模型改了、迁移没改」在测试里是全绿的。
+# 缺口 3 关闭之后，这条路径由 `make test` 每一次都真的走一遍。
 FK_INDEX = "ix_student_care_case_student_id"
 
 

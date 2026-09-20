@@ -2,6 +2,7 @@
 
 心晴 · 中学生心理测评与关怀平台。本文件记录项目的**不可破坏约定**与已知缺口，改动代码前请先读。
 
+
 ## 产品边界（最重要）
 
 这是**心理健康筛查与学校关怀管理系统，不是医疗诊断系统**。任何页面文案、接口、提示词、AI 输出
@@ -20,7 +21,7 @@
 |---|---|
 | `make install` | 安装前后端依赖 |
 | `make dev` / `make backend` / `make frontend` | 启动服务（后端 8000，前端 5173） |
-| `make test` | 后端 pytest（523 个测试） |
+| `make test` | 后端 pytest（542 个测试）。**跑在真 MySQL 上**：建一个 `<库名>_test`、`alembic upgrade head` 建表、用完即弃。库名不以 `_test` 结尾会拒绝运行。见 §20 |
 | `make e2e` | Playwright（113 个测试，需两个服务都在跑） |
 | `make migrate` / `make seed` | Alembic 迁移 / 初始化数据 |
 | `make seed-demo` | 填入演示数据（多年级班级、各分数段测评、各阶段档案），可重复执行 |
@@ -41,7 +42,9 @@
 - `api/v1/` 只做路由、参数校验、权限依赖注入；业务逻辑在 `services/`；SQLAlchemy ORM 在 `models/`。
 - `scale_engine/engine.py` 是**纯函数模块，不碰数据库**：输入题目配置 + 答案，输出 `ScaleCalculation`。
 - `core/errors.py` 的 `ok()` / `error_response()` 负责统一响应封装。
-- 迁移在 `alembic/versions/`，当前 0001–0012。
+- 迁移在 `alembic/versions/`，当前 0001–0018（0013/0014 是 V1.2 对齐，0015 是阶段 2 的
+  `calculation_status` 回填，0016 是导入批次加 `batch_name` 列，0017 是 JSON null 归一化
+  这条**数据**变更，0018 是导入行加 `conflict_resolution` 列；见 §21 / §23 / §25 / §27）。
   **revision id 必须 ≤ 32 字符**（`alembic_version.version_num` 是 VARCHAR(32)）：超长不会在
   ADD COLUMN 处报错，DDL 先提交、版本戳的 UPDATE 才失败（MySQL 的 DDL 不在事务里），
   库变成"已迁移但仍记在上一个版本"，下次 upgrade 撞 Duplicate column。
@@ -101,8 +104,9 @@ CPython、Windows 版的 wheel、构建好的前端，所以目标机上**不需
   每年都会遇到的时序。现在「只有一条在办」由写入侧保证
   （`assessment_service.open_or_reuse_care_case` 先找非 CLOSED 的那条，找不到才新建）。
   删除那条唯一索引前必须先建 `ix_student_care_case_student_id`：它兼作 `student_id` 外键的
-  索引，MySQL 会以 **1553** 拒绝删一条外键正在用的索引，而**这条错误只有真库会报**
-  （内存 sqlite 不跑 Alembic，见缺口 3）。
+  索引，MySQL 会以 **1553** 拒绝删一条外键正在用的索引。**2026-09-19 之前这条错误只有
+  真库会报**——当时测试跑在内存 sqlite 上，它既不检查外键也不跑 Alembic（缺口 3，
+  现已关闭）；现在 `make test` 每一次都真的走这条迁移。
 - **`care_service.get_care_case` 不再过滤 `CLOSED`**，同一条学生的档案有多条时取 **id 最大**
   的那条（与 `open_or_reuse_care_case` 选「当前档案」的口径一致）。此前它 `where(status != CLOSED)`
   的写法让「关闭」这个动作把自己脚下的页面抽掉了：`closeCase()` 成功之后紧接着重新拉详情，
@@ -291,6 +295,10 @@ CPython、Windows 版的 wheel、构建好的前端，所以目标机上**不需
   该能力在**两处**各查一次（`students.py` 的路由依赖 + `analytics_service.ensure_student_result_reader`，
   与 `care.py` / `care_service` 的既有形状一致），所以单独拆掉任何一处都不会让测试变红——
   两处一起拆才会。别把「拆了一处仍然全绿」读成守卫失效。
+- **`GET /assessment-tasks/{id}/targets`（2026-09-19 第 1 期）是上面这一条的镜像**：
+  同样两道门槛（任务读者 + `ORG_ACCOUNT: {MANAGE, READ_BASIC, READ_SUMMARY}`），
+  拦的是同一个形状——那边的心理详情，这边的任务读者，都不得成为**读名册**的旁路。
+  详细理由见 §22。
 - **测评任务不是一个能力，是角色**（2026-09-17 裁决）：它是学校业务而不是系统级配置，
   所以**系统管理员读写都不包含它**——写归心理老师（业务闭环的负责人），读归心理老师 +
   德育领导。`docs/phase0_rule_freeze.md` §7 记了这次重裁，被推翻的 2026-09-16 版也留在那里。
@@ -512,12 +520,15 @@ CPython、Windows 版的 wheel、构建好的前端，所以目标机上**不需
   都写「20 项」。工作台据此写「另有 N 项未显示」。
   两个来源各封各的上限（不是一个共享的上限），否则这周 40 条跟进会把复测计划整个挤掉。
   **计数与取数共用同一个 `where`**，所以 `total` 与 `items` 不可能各说各话。
-- **凡是截断，都要自己说出来。** 全站现在有五处上限，每一处都有一句「还有多少没显示」
+- **凡是截断，都要自己说出来。** 全站现在有六处上限，每一处都有一句「还有多少没显示」
   加一条出路：工作台提醒（`另有 N 项未显示，请到「重点学生」逐条处理`）、工作台队列
   （`另有 N 份一般观察档案`）、题库导入预览的前 20 题、学生导入预览的前 20 行、
-  任务完成明细的前 200 条（那一处还指着「导出CSV」）。
+  任务完成明细的前 200 条（那一处还指着「导出CSV」）、补发预览的前 200 人（§22）。
   静默丢数据与「这里就只有这么多」在屏幕上长得一模一样，而读者会照那个数安排工作。
   §9 的「范围数字必须写明口径」是同一条道理换了个维度。
+  **截断只许影响「显示」，绝不许影响「写入」**——补发那一处的确认分支为此刻意**重新取一遍、
+  不带 `limit`**：拿那 200 条样本去插会把另外的人静默丢掉，而屏幕上正写着「将新增 350 人」。
+  上限住在渲染的那一侧（`SUPPLEMENT_CANDIDATE_LIMIT` 是给眼睛的），落库的那一侧不许有它。
 - 提交答卷带 `Idempotency-Key: submit-<id>` 头；重复提交返回既有结果，不产生重复风险事件。
 - 审计日志的筛选 / 排序 / 分页**全部在服务端**（`limit` / `offset` / `sort` / `order` / `q` / `actor_role`），
   返回的 `total` 描述的是**筛选后**集合，因此翻页结果始终一致。其余列表数据量有界，用客户端排序分页。
@@ -698,6 +709,7 @@ CPython、Windows 版的 wheel、构建好的前端，所以目标机上**不需
 |---|---|---|
 | 弹窗焦点陷阱 + `aria-modal="true"` + 焦点归还 | `components/Modal.vue` | Tab 一路走到弹窗背后，用户看不见焦点，回车按的是背后那个按钮 |
 | **面板在打开状态下被卸载也要解锁**（`onUnmounted(deactivate)`） | 同上 | `body{overflow:hidden}` 留在原地，**这一页之后再也滚不动** |
+| **`deactivate()` 同时要 `dropModal`**（2026-09-19 第 1 期加，`composables/modalStack.ts`） | 同上 | 那一层**永久占着「打开中」那一叠**，后面每开一个弹层都被顶高一层。它与上一行在同一个函数里，理由同源：卸载这条路径不走 `watch` |
 | `aria-sort` **只给可排序的列** | `components/DataTable.vue` | `"none"` 的规范含义是「这一列**是**可排序的，当前未排序」，给不可排序列加上去是在说谎 |
 | 可排序表头可聚焦、Enter/Space 可点 | 同上 | 排序功能只有鼠标到得了 |
 | 全站 `:focus-visible` | `assets/styles.css` | 键盘用户不知道焦点在哪。用 `:focus-visible` 而非 `:focus`：鼠标点过的按钮不该留一个环 |
@@ -759,7 +771,8 @@ TABLES / COLUMNS / STATISTICS / REFERENTIAL_CONSTRAINTS——24 张表 / 214 列
 （`ensure_schema` 认账补版本戳 → `alembic upgrade head` 无事可做）。**开着外键检查跑不是一道
 工序，是唯一抓得住那次错误的办法**：第一版把 `risk_event` 排在了 `assessment_session` 前面，
 真库报 `1824 Failed to open the referenced table`，而当时那份守卫测试里除了次序那条以外**全绿**
-——内存 sqlite 更看不见（缺口 3）。这也是「次序」那一条存在的原因，它不是排版要求。
+——测试库更看不见（那天的测试跑在内存 sqlite 上，缺口 3，2026-09-19 已关闭）。
+这也是「次序」那一条存在的原因，它不是排版要求。
 
 **约束名照抄 MySQL 自动生成的 `<表>_ibfk_<N>`，不要改成有意义的名字。** 迁移是按名字引用约束的
 （`0012` 已经在 `op.drop_constraint("uq_care_case_student_status", …)`），一个更好读的名字会让
@@ -770,8 +783,8 @@ TABLES / COLUMNS / STATISTICS / REFERENTIAL_CONSTRAINTS——24 张表 / 214 列
 1. **覆盖面与 `purge.py` 对齐**：`ASSESSMENT_TABLES` 里的表，SQL 里必须都出现。同一件事在
    Python 与 SQL 各写一份，比一次是唯一能让它们不漂的办法。
 2. **子先父后，或那条出处列先被置空**，二者认一个。全库没有 `ondelete=`，父行先删在 MySQL 上
-   是必然的 1451——而内存 sqlite 不检查外键（缺口 3），**这个错只有真库会报**，第一版就是把
-   `student` 排在了 `user_scope` 前面。两条出路各有各的用处：调顺序解决得了
+   是必然的 1451——2026-09-19 之前**这个错只有真库会报**（当时的测试库是内存 sqlite，
+   默认不检查外键，缺口 3），第一版就是把 `student` 排在了 `user_scope` 前面。两条出路各有各的用处：调顺序解决得了
    `user_scope.student_id → student`（两张都删），解决不了 `role_permission.updated_by →
    user_account`（前者整表保留，只能置 NULL）。**`role_permission` / `system_setting` /
    `assessment_scale` 上那三列是全脚本唯一被改动的保留内容**，改的是「谁动过它」的出处，
@@ -1902,6 +1915,2286 @@ VERSION_LABEL = "V" + ".".join(__version__.split(".")[:2]) # 显示串 → V1.0
 因为操作员会照着它报故障。**前端绝不写死版本**：部署包里 `frontend/dist` 是预构建的，
 写死会造出「后端升了、界面还说旧版本」的分岔，而那正是这一行要回答的问题。
 
+### 20. 测试基线：真 MySQL，表由迁移建出来（2026-09-19）
+
+**这一节是缺口 3 关闭的全部记录。** 用户 2026-09-19 的指令是「后续所有的开发均要基于
+mysql，不再考虑 sqlite」，这条改动就是那句话的落地。
+
+#### 它为什么非改不可（不是"更好"，是"唯一的信号"）
+
+用户把 V1.2 的 DDL 手工导进了开发库，库里变成 35 张表（34 张应用表 + `alembic_version`），
+而 `alembic_version` 还停在 `0012`，代码与 ORM 停在 V1.0。三个新列是 **NOT NULL 且没有
+默认值**，V1.0 的写入路径一个都不知道它们：
+
+| 列 | 类型 | 谁该写它 |
+|---|---|---|
+| `assessment_session.school_id` | `int NOT NULL` | `create_or_get_session` / `assessment_import_service` |
+| `assessment_target.school_id_snapshot` | `int NOT NULL` | `task_service` / `seed.py` / 导入链路 |
+| `risk_event.signal_type` | `varchar(64) NOT NULL` | `maybe_raise_risk_events` |
+
+**登录能进、页面能开，但学生一开卷子就是 MySQL 1364**——而 523 个测试一个都没红。
+原因不是测试写得不好，是**表由模型建出来的**：模型少三列，它就建一张少三列的表，
+于是「模型和自己一致」这条命题永远成立，而它跟真库没有任何关系。
+
+（那段状态**已经不在了**：2026-09-19 当天先把开发库 `DROP DATABASE` 重建成 0012 的
+V1.0 结构（24 张应用表）——这是上面那个描述里唯一一处「现在不成立」的地方。
+V1.2 的表会在阶段 2 由迁移**建出来**，而不是靠人手工导入。）
+
+#### 现在的形状（`app/tests/mysql_support.py` + `conftest.py`）
+
+```python
+test_engine (session 级)  → resolve_test_database_url()   # 库名必须以 _test 结尾，否则拒绝跑
+                          → ensure_database(url)          # DROP DATABASE + CREATE，显式 utf8mb4_0900_ai_ci
+                          → run_migrations(url)           # 子进程 `alembic upgrade head`
+seeded_engine (session 级) → seed_development_data 一次并 commit
+db_session   (每个用例)    → 外层事务 + join_transaction_mode="create_savepoint"
+```
+
+四条约定，每一条都是踩出来的：
+
+- **`run_migrations` 走子进程 + 环境变量，不调 `alembic.command`。**
+  `alembic/env.py:18` **无条件**拿 `get_settings().database_url` 覆盖 `sqlalchemy.url`，
+  所以进程内调用会去迁移**开发库**——而 `ensure_database` 刚刚 DROP 的是测试库。
+- **库名不以 `_test` 结尾就拒绝运行。** 这套 fixture 会 `DROP DATABASE`，指错库就是销毁
+  生产数据。与 `reset_to_baseline.sql` 的「找不到 admin 时一条都不删」是同一条口径：
+  宁可拦住。
+- **种子只在 session 级提交一次。** 「每个用例各 `seed_development_data` 一次」这条最直觉
+  的写法在 MySQL 上是错的：**`AUTO_INCREMENT` 计数器不参与回滚**，于是用例 1 拿到
+  `school.id = 1`、用例 2 拿到 2——而测试里到处是 `{"scope_type": "SCHOOL", "scope_id": 1}`
+  这种硬编码。症状是**同一个文件里第一个用例通过、其余全挂**，看起来像接口坏了。
+  提交一次之后种子行的 id 就钉死了。（这也意味着 `seeded_engine` 与 `db_session` 不是
+  同一个东西，别把前者塞进后者。）
+- **每个用例的隔离靠 `join_transaction_mode="create_savepoint"`。** 服务层大量
+  `db.commit()`，这个模式下每次 commit 变成释放一个 savepoint，外层事务兜底回滚。
+  不需要 truncate，也不需要知道有哪些表。
+
+**要一个"自己的库"时用 `throwaway_database()`**：建一个 `<测试库>_x<n>`、跑迁移
+（或 `with_schema=False` 不跑）、yield URL、用完 DROP。`test_check_empty.py` 与
+`test_ensure_schema.py` 走的就是它——那两个模块在生产上都是「拿一个连接串进门、自己建
+引擎」的独立命令，罩在事务里测不了。
+
+#### 阶段 1 的产出：一条新的守卫
+
+`test_ensure_schema.py::test_the_migrated_database_matches_the_models_exactly`
+——空库跑完迁移，逐表逐列与 `Base.metadata` 比。**给模型加一列而不给迁移加，它当场红。**
+
+变异验证做了两次，两条路都验过：往 `Student` 加一个 `drift_probe` 列不给迁移加，
+①这条守卫以 `{'student': ['drift_probe']}` 红；②任意一个用 `db_session` 的用例以
+`pymysql.err.OperationalError (1054, "Unknown column 'drift_probe' in 'field list'")` 红。
+两次都逐字节还原（`cmp` 比对过）。
+
+#### 阶段 2 的产出：四条守卫，各自补上一个看得见的盲区
+
+上面那一条只比**表名与列名**（`compare_schema` 的判据，见 `ensure_schema.py` 开头）。
+阶段 2 的 V1.2 改动里有一半不是列名：生成列、复合外键、唯一键、以及 `sql/` 下那份
+快照。四条新守卫都在 `test_migrations_build_the_models.py`，判据是
+`alembic.autogenerate.compare_metadata`——它比表/列/可空性/类型/索引/唯一约束/**外键的
+列对**，比 `compare_schema` 严一档：
+
+| 守卫 | 钉住什么 | 它比 `compare_metadata` 多出来的那一层 |
+|---|---|---|
+| `test_an_empty_database_migrated_to_head_matches_the_models` | 空库 `alembic upgrade head` 之后 `compare_metadata` 无差 | ——（这条是 `compare_schema` 的加强版：同一件事，判据换成能看见索引与外键的那种） |
+| `test_the_snapshot_file_builds_a_database_matching_the_models` | `sql/schema_mysql8.sql` **真的执行一遍**（`FOREIGN_KEY_CHECKS=1`）建出来的库，同样无差 | 快照那份文件此前只有静态文本比对（§16），**表达式改了但它仍然「长得像」时静态比对看不出来** |
+| `test_exactly_the_computed_columns_are_generated_in_the_database` | 库里的 `GENERATION_EXPRESSION` 集合与模型声明的一一对应 | `compare_metadata` **看不见 `Computed`**：两边都少声明时它一样是绿的 |
+| `test_the_databases_foreign_key_names_are_the_models_ones` | 库里每条外键的**名字**与模型给的一致 | `compare_metadata` 比的是外键的**列对**，**名字不在判据里**——重命名一条外键它能一路放行 |
+
+两条刻意的不比，理由写在那个模块的 docstring 里，别当成漏了：
+
+- **`server_default` 不比**（`compare_server_default=True` 会多出 20 条假差异：MySQL 反射
+  时把默认值外面的引号剥掉了，两边永远对不上）。
+- **外键的名字要单独一条守卫**——它不在 `compare_metadata` 的判据里，见上表最后一行。
+
+**六条变异全部变红**（`/tmp/xlp_ref/mutate_db_guards.py`，与纯文本那份分开是因为这一组
+每条都要重建一次测试库）：模型加一列 / 快照把 `student_no` 改窄 / 快照少一条唯一键 /
+模型不再声明 `Computed` / 模型把 `student_ibfk_4` 改名 / 迁移把 `student_ibfk_4` 改名。
+基准一律取 `shutil.copy2` 出来的落盘备份，改完逐字节比回去——§18 那条「变异验证的复原
+校验必须拿落盘的原始字节当基准」。**这一组不能与全量套件同时跑**：它们抢同一个
+`xinliceping_test`，而 session 级的 `test_engine` 进门就 DROP DATABASE。
+
+**2026-09-20 补：这条比它原来写的宽——`pytest` 的任意两个进程都不能同时跑，不只是这一组。**
+同一天在跑全量套件（后台）的同时又跑了一个**单文件**（`pytest app/tests/test_sensitive_reads.py`），
+两边都指着 `xinliceping_test`：后起的那个 `ensure_database` 把库 DROP 掉重建，
+先起的那一个于是拿到 `88 failed, 582 passed, 26 errors`——**报告里没有任何一句话说得出
+「另一个 pytest 正在跑」**，看起来就是一次大面积回归。判据是那句 `DROP DATABASE` 落在
+`test_engine` 这个 session 级 fixture 里，而它**每一个 pytest 进程都会执行一次**。
+所以「等前一个跑完」不是习惯问题：变异验证、单文件复跑与全量套件三者之间必须串行。
+（开发库 `xinliceping` 不受影响——测试库是独立的一个。）
+
+#### 真库上实测到的四处差异（**一条都没靠放宽断言过**）
+
+结果是 **524 passed / 0 failed / 210.35s**（阶段 1 当时的数），中间只红过一次，就是下面
+第一行那个。阶段 2 加完 18 条用例之后是 **542 passed / 0 failed / 219.14s**，见下。
+计划里预估「会打到一批用例」，实际只打到一条——但这四条差异**在生产上都是真的**，
+所以逐条记下来：知道它们为什么没咬到人，比知道它们存在更有用。
+
+| 差异 | SQLite（当年） | MySQL 8.4.4（实测） | 处置 |
+|---|---|---|---|
+| `datetime` 精度 | 保留微秒 | `DATETIME(0)` **四舍五入** | **改生产代码**：`now_utc_naive()` 截断到整秒，见下。**这是本次唯一一处生产缺陷** |
+| `func.now()` 的时区 | 与 Python 的 UTC 相同 | `now()` = UTC+8，`utc_timestamp()` = UTC，**差 8 小时** | **没有一条用例真的撞上，所以一行都没改**——理由见下 |
+| `utf8mb4_0900_ai_ci` | `'ABC'='abc'` → 0 | **→ 1**，不区分大小写 | 同上：没有用例依赖大小写敏感，测试跟着生产走 |
+| 同秒内两行的顺序 | 微秒能分开 | 截断到整秒后**并列** | 由既有的 `id` 兜底，`latest_session_order()` 的口径不变 |
+
+**另外两条为什么没咬到人，值得记清楚**（不然下次会以为它们不重要）：
+
+- **时区**：全库有两个时钟，而它们**从不碰面**。`assessment_session.started_at` /
+  `submitted_at` 由 `now_utc_naive()` 写（UTC 朴素），而 `task_service.effective_task_status`
+  的窗口比较用的是 `datetime.now()`（**本地**朴素，`:90`，理由写在 `:84-86`：
+  `start_at`/`end_at` 是操作员填的墙钟时间）。少了任何一边的注释都看不出来，
+  而生产上它们真的差 8 小时——**别把它们统一起来**，那是两个问题：
+  「这一刻是几点」（内网时间戳）与「学校的窗口开了没有」（墙上那口钟）。
+- **大小写**：没有一条用例靠 `'ABC' <> 'abc'` 成立。唯一相关的是
+  `test_deploy_bootstrap.py::test_the_account_lookup_is_case_insensitive`，而那个
+  「不敏感」是代码自己折的（`func.lower()`），不是靠数据库的排序规则。
+
+**`now_utc_naive()` 的截断是一次真的生产改动**（`services/assessment_service.py:25`），
+理由是两条同时成立：
+
+- **写进去的值必须等于读回来的值。** `POST /submit` 立刻回的是内存里那个对象（带微秒），
+  同一份数据下一次 `GET` 回来是库里的值——同一个字段两个值，客户端没有办法知道哪个算数。
+  `test_assessment_api.py` 那条「同一个 Idempotency-Key 重放回来的 payload 与第一次逐字
+  相同」就是被这个打破的（实测报 `'04:19:20' != '04:19:20.320185'`）。
+- **MySQL 是四舍五入，不是截断**：`.7` 进到下一秒，存下来的 `submitted_at` 可能比真实
+  时刻**晚**半秒，而 `latest_session_order()` 按它排序。截断是向下取整——并列仍然可能
+  （由 `id` 兜底），但**顺序不会被颠倒**。
+
+没有损失任何精度：**全库没有一列是 `DATETIME(6)`**。
+
+**顺带否掉了一个疑似缺陷**：曾怀疑「答题用时差 8 小时」，因为 `assessment.py:88` 调
+`save_answer` 时没传 `answered_at`（走 Python UTC），而 `submit_session` 算时长时可能用了
+别的口径。写了个一次性探针（`throwaway_database` + 100 次 `save_answer` + 睡 2 秒 +
+`submit_session`）实测：`answered_at` 与 `submitted_at` 都是 Python-UTC，
+`duration_seconds: 2` 正确。**没有这个缺陷**，不用改。
+
+#### 耗时：**比内存 sqlite 还快**（实测，与直觉相反）
+
+```
+524 passed, 5 warnings in 210.35s (0:03:30)   # 阶段 1 当时的数
+542 passed, 5 warnings in 219.14s (0:03:39)   # 阶段 2 收尾时的数
+```
+
+**从零建库也验过**（计划里的验证第 6 条）：先 `DROP DATABASE xinliceping_test`、
+确认 `SHOW DATABASES` 里数不到它，再跑一遍——`524 passed, 5 warnings in 208.74s (0:03:28)`。
+这一步其实每次运行都做了（`ensure_database` 进门就 DROP+CREATE），单独跑一次是为了
+把「它不是靠上一次留下的库才绿的」变成一条有出处的记录。
+
+**阶段 2 的 18 条新用例只多花 8.8 秒**，因为它们大多是静态比对或复用同一个 session 级的
+`test_engine`（只有 `test_migrations_build_the_models.py` 那两类各自建一次性库）。
+
+旧的 sqlite 基线是 **238s**。搬过来**更快**了，原因是种子只跑一次：
+旧写法每个用例各 `seed_development_data` 一遍（一所学校 + 年级 + 班级 + 名册 +
+100 道题的量表 + 评分规则 + 任务与目标行），现在 session 级一次，每个用例只开一个
+savepoint。省下的那 524 遍种子比网络往返贵得多。
+
+计划里预估过「10–20 分钟」，**那个估计是错的**，错在它假设种子还是每个用例一次。
+代价不是零（每次 `connect` 与每条 SQL 都真的走一次 socket），但它没有变成主要项。
+
+**不要靠减少用例把耗时压回去**——那会把这次迁移唯一的产出（真实的差异清单）扔掉。
+
+**e2e 没被波及**：`make seed-demo` + `npx playwright test` → `113 passed (24.2s)`。
+测试链搬家动的是后端那一侧（`conftest.py` / `mysql_support.py`），前端与 API 的形状
+一个字没改，所以这一条是确认而不是修复。
+
+### 21. V1.2 对齐：两条迁移，一条判据（2026-09-19）
+
+V1.2 是一次**纯对齐**（用户口径：先只做对齐，不加服务 / 端点 / 前端）。产物是
+`0013_v12_expand` + `0014_v12_enforce` 两条迁移、十张新表、既有表上的 54 条新列、
+ORM 模型、两份 SQL 快照、以及上面那六条守卫。
+
+#### 为什么是两条，判据只有一句
+
+**「这条 DDL 在只读过 V1.0 数据的库上会不会失败。会失败的都归 0014。」**
+
+这句话不是分类学，是操作上的分界：0013 是**只加不改**（新表、可空的新列、按规则回填），
+所以它在一份有真实数据的旧库上**不可能失败**；0014 全是**收紧**（`NOT NULL`、生成列、
+唯一键、复合外键），每一条都在断言「旧数据里没有反例」——而它能不能成功，取决于那所
+学校真实数据的形状，不取决于我们的代码。分开之后，出问题时永远知道是「加」坏了还是
+「收」坏了：
+
+| | 0013_v12_expand | 0014_v12_enforce |
+|---|---|---|
+| 做什么 | 十张新表 + 54 条新列 + 回填 | `NOT NULL` / 生成列 / 唯一键 / 复合外键 |
+| 在旧库上会失败吗 | 不会 | **会，而且一定会有一部分学校失败** |
+| 失败了怎么办 | 那是 bug | 那是**数据里真有反例**，人工处置，不是改代码 |
+
+失败的形状是 `1062`（重复）或 `1452`（外键找不到父行）。
+
+#### 前置校验全部排在 DDL 之前——这是 0014 的全部结构
+
+**MySQL 的 DDL 不在事务里。** 0014 里十二条校验挤在文件开头、任何一条 `ALTER` 之前，
+不是排版偏好：中途撞 `1062` 会留下一个**一半收紧、一半没收**的库，而报出来的是一句
+英文 MySQL 错，离真正的原因很远。校验失败时改不动任何东西，重跑一次还是同一个结果。
+
+十二条里真正会在真实数据上失败的是这四类（其余是「由既有约束保证、但换了约束就没人
+保证」的便宜断言）：
+
+- 同一名学生有**多份在办档案**——`uq_care_case_one_active_per_student` 装不上去；
+- `retest_plan` / `manual_review` / `follow_up_record` / `family_contact_record` /
+  `care_case_event` 上 `care_case_id` 与 `student_id` 指着**不同的学生**；
+- 学生的年级 / 班级不属于他所在的那所学校；
+- `risk_event` 的 `(session_id, trigger_rule, rule_version)` 重复。
+
+**`uq_session_task_student` 与 `uq_session_task_student_attempt` 必须在同一步里换**
+（先删后加会开出「一场任务里谁都能开第二份卷子」的一段窗口，并发的
+`create_or_get_session` 正好在那个窗口里重复插入）。
+
+#### 升级预演：在一个忠实的克隆上真跑过（2026-09-19）
+
+**这是本次唯一一条只有真数据能给答案的验证**，所以做法是造一份真的：把开发库
+（24 张表 / 4879 行，`alembic_version = 0012`）逐表拷进 `xlp_upgrade_test`，**逐表核对
+行数相等**，然后
+
+```
+XLP_DATABASE_URL=mysql+pymysql://…/xlp_upgrade_test  alembic upgrade head
+# → 0012 → 0013 → 0014，EXIT=0
+```
+
+两处拷贝上的细节各自都有原因：**`alembic_version` 那一行不能拷**（同
+`mysqldump --ignore-table=….alembic_version`，拷了就是 `1062 Duplicate entry
+'0012_drop_care_case_unique'`）；**不能改用「当前代码 + `seed`」造一份 V1.0 的库**——
+当前代码的 `seed` 会往 V1.2 才有的列里写值（`school_id_snapshot` 一伙），造出来的
+不是 V1.0 的库。这一点本身就是这条验证的意义：**只有真数据能回答「0013/0014 在它上面
+过不过得去」**，而真数据只能来自开发库。
+
+#### 回填是**按规则**填的，不是留空（唯一例外见缺口 9）
+
+`assessment_session.school_id` / `assessment_target.school_id_snapshot` 是
+`NOT NULL` 且**无 `server_default`**（DDL 里是先可空、回填、再 `MODIFY`）。所以
+V1.0 的写入路径必须自己给值——落点是 `task_service` 发放目标行、`assessment_service`
+开卷、`assessment_import_service` 与 `seed` / `seed_demo`。回填取的是**学生名册上
+的学校**（`student.school_id`），不是「当前登录用户在哪所学校」。
+
+`risk_event.signal_type` 走 `SIGNAL_TYPE_BY_RISK_TYPE`（`scale_engine/engine.py`）：
+六档 `risk_type` 映到三档 `signal_type`，**认不出的当场报错、不猜默认值**——猜的代价
+是静默的（那条待办会落进另一类人的队列，或者干脆不进任何人的队列，而界面上一切正常）。
+0013 的 precheck 对认不出的 `risk_type` 同样是中止，两处口径一致。
+
+`tested_at` **刻意不回填**：历史行没人知道真实测评日，用 `created_at` 填上是给它编一个
+看起来像事实的值。所以 `tested_at_source` 的默认值 `PENDING_VERIFICATION` 是**诚实的
+默认值**——而它现在是恒定的，见缺口 9。
+
+#### 复合外键编码的不变量，以及为什么约束名照抄 MySQL
+
+`(task_id, school_id_snapshot) → assessment_task (id, school_id)` 与
+`(school_id_snapshot, student_id) → student (school_id, id)` **一起**说的是：
+一个任务的目标行，必须是**这个任务自己那所学校**的学生。两条分开都拦不住跨校。
+
+`student_ibfk_4` / `student_ibfk_5` / `class_group_ibfk_3` 这些名字是**故意**照抄
+MySQL 自动命名的形状的，不是没起好名字：一份手写的 DDL 与一份迁移建出来的库要逐字
+相同（§16 那次真机比对），而 MySQL 自动命名的序号在两边必须对得上。改成一个更好读的
+名字会让两个库在**未来某条迁移上**分岔，而分岔得看不出来。这条有守卫：
+`test_the_databases_foreign_key_names_are_the_models_ones`（`compare_metadata` 看不见
+外键名字，所以它得单独一条）。
+
+#### 快照文件：`sql/schema_mysql8.sql` 跟着长到 34 张表
+
+它是**快照，不是来源**（§16），这一条没有变。V1.2 之后它有 34 张应用表，
+并且多了一条守卫——`test_the_snapshot_file_builds_a_database_matching_the_models`
+**真的执行它一遍**（`FOREIGN_KEY_CHECKS=1`），再拿 `compare_metadata` 比。
+此前只有静态文本比对，而「表达式改了但它仍然长得像」那种漂移，静态比对是看不见的。
+
+#### 开发库从那之后就是 V1.2 的（2026-09-19）
+
+预演在同一份数据的**克隆**上通过之后，开发库本身也升了。库里的数据是种子 +
+`seed_demo`（25 张表 / 4880 行），升级前后**逐表核过行数**：一张不少、一行不多。
+三个 `NOT NULL` 新列全部回填到 0 个 NULL（`signal_type` 那 13 行全是
+`MANUAL_REVIEW_REQUIRED`——它们本来就是人工复核那一类）。
+
+**e2e 在这个升级后的库上重跑过：`113 passed (25.6s)`。** 这一条是**新信息**，不是重复
+§20 里那次：那一次跑在 V1.0 的库上，这一次跑在**走过 0013/0014 的库**上，而 e2e 会真的
+开卷、真的交卷、真的关档案——它第一次在 V1.2 的表结构上走了一遍完整闭环。前端一个字没改
+（这一阶段不含前端改动），所以这两次都绿恰好说明「表结构变了、前端不受影响」。
+
+### 22. V1.2 第 1 期：任务范围与目标快照（2026-09-19）
+
+对齐阶段把表和列加齐了，紧接着的第 1 期给它们接上写入方与读者。
+`make test` 542 → **561 passed**、`make e2e` 113 → **115 passed**。
+
+#### 「打算发给谁」与「实际发给了谁」是两张表、两个问题
+
+| 表 | 回答 | 谁写 |
+|---|---|---|
+| `assessment_task_scope` | 建这场任务时**按什么范围**发的 | `create_school_assessment_task` 写一行 |
+| `assessment_target` | **实际发给了哪些人** | 同上，逐行；补发再加行 |
+
+两者**本来就该不同**：发放之后名册上转进来一个学生，目标行会补、范围不会变。所以只留
+目标行的话，「这场普查当初打算测谁」就永远没有答案了。今天 `scope_type` 恒为 `SCHOOL`
+（这个端点还不收范围参数），将来能选年级/班级时换的只是 `scope_type` 与对应的 `*_id`，
+**读的那一侧不吃惊**——`list_task_targets` 是照着有范围参数的样子写的。
+
+**`get_targets` 的 `scope_type` 可以是 `null`，界面必须跟着分岔，不许 `?? 'SCHOOL'` 抹平。**
+「没有范围行」就是**没有记录**，不回退到 `assessment_task.scope_type`：
+
+- 外部导入的批次任务那一列写着 `SCHOOL`，而它**从来不是**「发给全校」——这一批是照着一份
+  文件建的，文件里有谁就是谁。回退会把「不知道」变成一句言之凿凿的「全校」，而同一屏
+  下方那几十行正是反例。
+- 2026-09-19 之前建的校内任务**确实**是按全校发的，但它没有那一行记录。给它补一行是
+  替历史编一个「当时选的是全校」的裁决——与 §21 那条「`tested_at` 刻意不回填」同一个道理。
+  今天显示「未记录发放范围」恰好是实话。
+
+#### 七个快照列：一处定义，四个写入方
+
+`services/target_snapshot.py::target_snapshot(student, *, grade_name, class_name)` 是
+**唯一的定义**（`school_id_snapshot` / `student_no_snapshot` / `student_name_snapshot` /
+`grade_name_snapshot` / `class_name_snapshot` / `gender_snapshot` / `age_snapshot`），
+四个写入方都走它：`create_school_assessment_task`（发放）、`supplement_targets`（补发）、
+`assessment_import_service._mark_target_completed`（导入收行）、`db/seed.py`。
+各写一份 `AssessmentTarget(...)` 就是四种「快照是什么」的定义，而它们漂移了**不会有任何
+东西看得见**——直到有人真的按快照对账。写法照 `tests/factories.py`：只补齐快照列，
+`status` / `completed_at` / `target_source` 仍归调用方。
+
+三点容易改错：
+
+- **`student_name_snapshot` 存 `student.name`，不是 `masked_name`。** 快照是身份事实，
+  而 `masked_name` 只是一列叫这个名字的展示名（§1：它在生产里和 `name` 一样实）。
+  遮蔽是**读**的时候的事，由读的那一侧现算。
+- **`grade_name` / `class_name` 是可选的预先取好的值。** 批量发放一场全校普查是一千行，
+  调用方已经 join 过 `grade` / `class_group`；再让这里逐行走 relationship 就是两千次
+  额外的 SELECT。用 `is not None` 而不是真值判断：「调用方没取」与「取到空串」是两件事。
+- **读的那一侧快照优先、名册兜底**（`list_task_targets`）。V1.2 之前发出去的目标行那六列
+  是 NULL，所以兜底不是「两条口径打架」，是历史行没有快照。这一页回答的是「**发放那一刻**
+  学校看到的是谁」——学生转班、改名、毕业之后，一份去年的完成率报表仍该按当时的名册解释
+  （§1 的四层事实模型）。
+
+#### 补发是两步，而且预览与落库是**两个查询**
+
+`POST /assessment-tasks/{id}/targets/supplement`，体里带 `confirm`：
+
+- `confirm=false` → 只回答「会补哪些人」，**一行都不写、不写审计**（没有改变任何东西）；
+- `confirm=true` → 落行 + 路由写一行审计 `补发目标学生`（服务层不写审计，与全库一致）。
+
+§20#9 要的正是这个形状（「补发**确认后**才新增目标行」），所以这不是界面上的体贴，
+是一条验收判据——`e2e` 那条用例的**判据是「取消之后一行都没多」**：一个把预览做成隐式
+副作用的实现在那里变红。
+
+**确认那一支重新取一遍、不带 `limit`。** 预览那 200 条是给人看的样本（
+`SUPPLEMENT_CANDIDATE_LIMIT`），要补的是**全部**候选：拿样本去插会把「另外 150 人」静默
+丢掉，而屏幕上写着「将新增 350 人」。这是 §10「凡是截断都要自己说出来」的镜像——
+**截断只许影响显示，绝不许影响写入**。
+
+另外三条：
+
+- `target_source` 记 `SUPPLEMENT`（§18.2）。一份完成率报表里，「这场普查本来该测的人」与
+  「后来补进来的人」是两个数。
+- **任务已结束（`effective_task_status` 说 `CLOSED`）就不补**，422 且指出出路（先编辑这场
+  测评把截止日期改到将来）。理由：补出来的是一行**谁也点不开**的目标行（§12 那道门），
+  那比不补更糟——它看起来像已经补好了。
+- 发放目标行按**创建者的数据范围**过滤（§9 的写侧，2026-09-17 写权从 ADMIN 转到 COUNSELOR
+  时加的）。写权还在管理员手上时「发放全体」与「发放创建者可见的全体」是同一件事，
+  所以少了它也不出错；一落到心理老师身上就分岔了。
+
+#### 目标学生名单：两道门槛，形状照抄 `ensure_student_result_reader`
+
+读这一页要**任务读者 + `ORG_ACCOUNT: {MANAGE, READ_BASIC, READ_SUMMARY}`**。它逐行给出
+学号与姓名——那是**组织与账号**那一档的数据，不是任务本身的数据；而它又是任务内部的，
+所以要同时是任务读者。与 `GET /students/results`（§4）是同一个形状的镜像：那边是
+「心理详情不得成为读名册的旁路」，这边是「任务读者不得成为读名册的旁路」。
+
+admin 挡在**任务那一层**（`ensure_task_reader` 本来就不放行它，§4：测评任务不是能力、
+是角色）。该能力在**两处**各查一次（`tasks.py` 的路由依赖 `TaskTargetReader` +
+`task_service.ensure_task_target_reader`），所以单独拆掉任何一处都不会让测试变红——
+两处一起拆才会。**别把「拆了一处仍然全绿」读成守卫失效。**
+
+#### `TARGET_SOURCE_LABELS` 只有**第二面**保护
+
+新增码 `TASK_SCOPE` / `SUPPLEMENT`（`labels.ts`）。四个面里：
+
+| 面 | 有没有 |
+|---|---|
+| ①后端发的码 `labels.ts` 认不认 | 有（词条在） |
+| ②视图有没有**调用**标签函数（`e2e/vocabulary.spec.ts` 扫像素） | **有，而且是唯一真正跑得到的那一面** |
+| ③服务端生成的导出文件认不认 | **不适用**——完成明细 CSV **刻意不带** `target_source`：那一页只要身份列（§4 的双门槛），带上它就要把同一张响应里塞进等级列 |
+| ④枚举列的排序 `Column.order` | **不适用**——目标学生那一屏是普通 `<table>`，没有可排序列 |
+
+所以 `vocabulary.spec.ts` 那条**必须点进「目标学生」页签再扫一遍**：页签内容不点不开，
+而这一列不翻译的话界面上就是 `TASK_SCOPE`。演示数据里每一行都是 `TASK_SCOPE`，
+`SUPPLEMENT` 要等真的补发过一次才会有（与 `IMPORTED` 同理，见 §3）。
+`TARGET_SOURCE_LABELS` 的键序是有意义的（先任务范围、后补发），但**这张表没有
+`TARGET_SOURCE_ORDER`**：没有可排序列就没有读者，而「表在 `labels.ts` 里没人从那儿取」
+也算没接上（§3 第四面那条教训）。哪天那一屏可排序了，照键序加回去就行。
+
+#### 预览的空态与「将新增 N 名」必须互斥
+
+这两句话此前共用一支模板，于是 `N=0` 时屏幕上写着「将新增 **0** 名学生」，紧接着下面
+再跟一句「没有可补发的人」——**同一屏两句话各说各的**，而第一句读起来像一件真会发生的
+事（§14：空态是一句关于数据的话，不是一次变更的占位）。现在按 `candidates.length` 分成
+两支，且 e2e 两边都钉：`/将新增\s*0\s*名/` 的 `toHaveCount(0)`，以及
+「『一个人都没有』与『确认按钮能不能按』是同一件事的两个说法」（两个方向各断言一次）。
+
+**正则里那两条分支不能省成一条。** 第一版的守卫写成
+`getByText(/将新增|没有可补发的人/).toBeVisible()`——`|` 让**恢复旧模板**也照样匹配到
+「将新增」，于是变异验证是绿的。加一条「那个数必须是正的」才真正钉住**这两句互斥**，
+与演示数据此刻有几个人无关。变异验证时它单独变红（`toHaveCount` 收到 `1`），
+不是搭了前一条严格模式冲突的便车。
+
+#### 弹层次序按**打开**算，不按 DOM 次序（`composables/modalStack.ts`）
+
+第 1 期唯一一处共享组件的改动，但它修的是一个**会让整类弹窗不可用**的缺陷。
+
+所有 `.modal-backdrop` 都写着 `z-index: 1000`（`styles.css`），同层里由 DOM 先后决定遮挡；
+而 DOM 先后由 **Teleport 锚点的建立次序**决定——那等于**模板里的声明次序**，与打开次序
+**无关**（弹层组件都是常挂着的，`v-if` 在其内部那层）。`TasksPage.vue` 里 `<FormDialog>`
+声明在详情弹层**前面**，于是从详情弹层里点「补发学生」开出来的表单**永远压在它下面**：
+视觉上被那层半透明遮罩压暗，点击则被遮罩接走——而遮罩的处理是「关掉详情弹层」。
+用户点一次提交，得到的是详情弹层消失了、表单还浮在一片空页面上。
+
+**这个 bug 是量出来的，不是推出来的**：修之前两层遮罩的 `getComputedStyle().zIndex` 都是
+`1000`。所以次序改成按**打开**算——谁后打开谁在上面。
+
+- **状态必须住在模块里**（`composables/modalStack.ts`，与 `useSettings.ts` 同为模块级单例）。
+  第一版写在 `Modal.vue` 的 `<script setup>` 里，而那里每个绑定都是**每个组件实例各一份**
+  的——两层弹层各自看到一叠只有自己的数组、序号都是 0，实测仍是两个 `1000`。
+- **是一叠实例，不是一个递增的计数器**：计数器在「先开的先关」时会算错——关掉的那个把号
+  让出来，新开的那一个反而排在那之前就开着的**下面**。每个弹层的号都是 `computed`、读的
+  就是这叠数组，所以任何一层进出都会让**所有**弹层重算，不会有谁的号停留在过期值上。
+- **只开一层时第一个拿到 1000**，与 `styles.css` 那条基础规则同值，所以**单弹窗的渲染结果
+  与从前逐像素相同**——这一条是这个改动的安全边界，也是它能一次改全站的理由。
+- `deactivate()` 里必须 `dropModal`（§15 那条「面板在打开状态下被卸载也要解锁」的同一处）：
+  漏了的话那一层会**永久占着栈**，后面每开一个弹层都被顶高一层。
+
+**收尾话术**：这是「DOM 次序不等于视觉次序」在 Teleport 上的第一次发作。同一个机制下
+还有一处**没动**且是对的：全站其余页面都只开一层弹窗，所以那十几处不受影响。
+
+### 23. V1.2 阶段 2：计算幂等与答卷哈希（2026-09-19）
+
+对齐阶段加的三列（`answer_snapshot_hash` / `answer_hash_algorithm` / `calculation_status`）
+与 0013 那条 `tested_at_source` 此前**都没有写入方**——`calculation_status` 恒 `PENDING`、
+`tested_at_source` 恒 `PENDING_VERIFICATION`、哈希两列恒 NULL，「算出来了没有」在库里
+没有任何东西能回答。这一期给它们接上写入方、读者，以及一个并发上的门。
+
+#### 答卷哈希：一个纯函数模块，规范化规则写成逐字断言
+
+`services/answer_snapshot.py` **不碰数据库**（与 `scale_engine/engine.py` 同一条：
+引擎与规范化都不该知道库长什么样）。`canonical_answer_snapshot` 输出「一行一题、
+四列一行」的字节串：`量表编码 ␟ 量表版本 ␟ 题号 ␟ 答案`，行间 `\n`，字段间 `\x1f`，
+题号**升序**，`answer_snapshot_hash` 是它的 SHA-256。
+
+四条不能动的：
+
+- **必须按题号升序**。`save_answer` 是按学生点哪道题存哪道题的，而 `submit_session`
+  从库里读回来时那个次序**由执行计划决定**——不排序的话，同一份答卷在两个进程里会
+  算出两个哈希，而那个哈希的全部用途就是「比对两次是不是同一份」。
+- **`\x1f` 与 `\n` 出现在答案里就抛，不替换**。替换会把两份不同的答卷映射到同一串
+  字节——它不报错，只是让两条记录看起来是同一份。题号不是整数同样抛：字符串键下
+  `sorted` 排的是字典序，第 10 题会跑到第 2 题前面。
+- **算法名与哈希一起存**（`answer_hash_algorithm`）。换算法之后历史哈希无从解释，
+  而那一列就是解释它的东西。当前唯一的值是 `SHA256_CANONICAL_V1`。
+- **学生、会话、时间戳都不进哈希**（这是「这份答卷」的摘要，不是「这一次测评」的摘要）。
+
+守卫是 `test_answer_snapshot.py`，其中 `test_the_snapshot_golden_value` 钉的是
+**那一串字节与那个十六进制摘要本身**——别的用例（比如「两份不同答卷哈希不同」）
+在规范化规则被改宽/改窄之后全都还是会绿，只有它能红。
+
+#### 状态机与失败：**不伪造成功**，也不让一个评分 bug 吃掉学生的答卷
+
+`score_session`（`assessment_service.py`）是唯一的落点，两条评分路径共用它
+（学生交卷 / 外部记录导入）。三步 `PENDING → CALCULATING → CALCULATED`，
+失败走 `CALCULATING → CALCULATION_FAILED`：
+
+- **失败时返回 `False` 而不是抛出**，方向是刻意的：在线路径上那份答卷是学生花二十分钟
+  做出来的事实，评分里的一个 bug 不该把它一起丢掉（抛出去 = 路由的 commit 不会发生 =
+  答卷回滚 = 学生重做一遍）。所以 `submit_session` 照旧 200，只是 `result` 是 null，
+  而 `calculation_status` 说为什么。失败原因进 `calculation_error`（截断到 1000 字），
+  **只放「为什么算不出来」，不放答卷内容**（§8 那条的另一处）。
+- **「前提不成立」不在此列**：`ANSWERS_INCOMPLETE` / `ANSWER_INVALID`
+  （`CALCULATION_NOT_READY_CODES`）照原样抛出，并把状态**退回原值**。它们说的是
+  「这份答卷还不该算」，不是「这一版程序算不了」——那是学生页要弹 422 的那一条。
+  **其余任何一种失败都记账**，包括另一个 `AppError`（`SCALE_INVALID`：规则版本要 100
+  道题而题库里只有 60）与所有认不出的异常。分界线是「这句话说给谁听」：`NOT_READY`
+  那两条是说给**学生**的（你没答完），别的都是说给**下一个人**的——所以后者落进
+  `calculation_error`，而不是弹回浏览器。导入路径是例外的例外：那条要求整批要么都进、
+  要么都不进，调用方自己看返回值决定。
+- **`CALCULATING` 不是一次认领**：三步写在同一个事务里，并发的第二个请求根本读不到
+  它（它在锁上等着），进程崩溃时它跟着事务回滚。真正保证「同一场只算一次」的是行锁。
+  写成一次提交过的认领要连**租约与回收**一起写进来，这个项目没有那一层。
+
+#### 并发互斥选了 `SELECT … FOR UPDATE`，理由写在这里
+
+`lock_session(db, session_id)` 是 `with_for_update()`。**没有选 CAS**：CAS 要一个
+版本列，而这个项目当时没有任何乐观锁设施（`student_care_case.case_version` 是阶段 7
+才接上的，见缺口 9），为一场测评单独造一个版本列会让「同一件事两种并发写法」在库里
+并存。行锁是 MySQL 已经有的东西，代价是锁住一行、收益是**不需要第二套设施**。
+
+两个入口共用它：`submit_session`（学生交卷）与 `retry_calculation`（心理老师点重算）。
+次序是「先上锁，再判有没有算过」——判断与写入之间那一段是临界区，而这两个入口可以
+同时到达（老师正在点重算，学生的提交刚好到）。
+
+#### `tested_at` 与 `submitted_at` 今天总是一样，而趋势按后者排
+
+两条写入路径都让它们相等：在线交卷写 `tested_at = submitted_at = 交卷那一刻`
+（`tested_at_source = ONLINE_SUBMIT`），导入写 `tested_at = submitted_at = 文件里的测评日期`
+（`tested_at_source = IMPORT_FILE`）。**刻意没有把排序键改成
+`coalesce(tested_at, submitted_at)`**：那在今天是**行为完全相同**的一次改动（历史行的
+`tested_at` 是 NULL，兜底回落到 `submitted_at`），换不来任何东西。所以不变量的位置是
+两处测试而不是一行代码：在线路径由
+`test_calculation_idempotency.py::test_an_online_sitting_says_where_its_test_date_came_from`
+钉住，导入路径由 `test_assessment_import_api.py` 逐场断言。
+
+**哪天真有一条路径写出 `tested_at ≠ submitted_at`，那一天要一起把排序键挪过去**
+（`latest_session_order` / `session_history_order`），而
+`test_the_trend_lists_sittings_by_real_test_date_not_by_when_they_arrived` 会先把这件事
+喊出来：它把三场按「真实测评日」与「id 大小」故意排成相反的顺序，谁把排序换成
+`created_at` / `id` 就红。
+
+#### 重算是心理老师的动作，每一次都写审计
+
+`POST /assessment-sessions/{id}/calculate`（`require_role(COUNSELOR)`）。**归心理老师、
+不归管理员**——与 §4 那条「测评任务不是一个能力，是角色」同源：测评这条线是学校业务，
+写侧归业务负责人；管理员也没有个案详情页可去。
+
+- 它是一次**敏感读取**（重算要读满整份答卷，重点题也在里面），所以审计写在返回数据
+  之前，并带上 `student_id`——那一列才让这一次重算出现在这名学生的敏感访问记录里。
+- **`recalculated: false` 不是失败**，它说的是「已经有结果了，这一次什么都没写」
+  （两个人同时点，或者页面停在旧状态）。审计的 `detail` 把这两种情况分开写：
+  「重算完成，已写入结果」与「未重算：会话仍是 X」——`action` 一模一样
+  （「**重算测评评分**」，`resource_type` = `ASSESSMENT_SESSION`），只有 `detail`
+  答得上「这一次到底动了什么」。
+- **按钮上的词与审计动作码共用「重算」这两个字**（按钮写「重算评分」，审计写
+  「重算测评评分」）。这不是巧合，是缺口 7 那一族的第四次位置——审计页的搜索匹配
+  `action`，而操作员能想起来的是他刚点的那个按钮。第一版按钮写的是「重试计算」，
+  两串字没有一个共同的词，照着按钮搜一条都搜不到。**码还是新的、还没有历史落库时
+  对齐它是最便宜的**；等落了库就只剩 §3「高度关注」那条出路（两边一字不改，在用户
+  要动手的那一处写出等号）。
+- 没交过卷的场次给 422（「这份答卷还没有交卷，没有可重算的评分」），并且**不留下失败
+  记录**：那不是一次故障。
+- 被数据范围拒绝时**不写审计**（§9）。
+
+#### 0015 只回填 `calculation_status`，另两样**刻意留空**
+
+`0015_calc_status_backfill` 一条 UPDATE：有 `assessment_result` 的场次标成
+`CALCULATED`（这是一个**能从既有事实推出来的**派生事实——结果那一行就在那里）。
+另外两样不回填，各有各的理由，都写在迁移的 docstring 里：
+
+- **哈希不回填**：我们不知道历史上算过的那份答卷是不是今天库里这一份
+  （`/reset` 会清答案，学生可以重答）。补一个哈希上去，等于替那行结果**担保**它算的
+  是当前这份答卷——而那正是这一列唯一要说的话。
+- **`tested_at` / `tested_at_source` 不回填**：与 §21 那条同一条道理，历史行没人知道
+  真实测评日。`PENDING_VERIFICATION` 是**诚实的默认值**，界面上照实显示「待核实」。
+  （缺口 9 里「两个诚实的默认值现在是恒定的」那一条仍然成立，只是现在多了一条写入口。）
+
+downgrade 的判据是 `answer_snapshot_hash IS NULL`：新代码**每一次成功计算都写哈希**，
+所以有哈希的行一定是它算过的，没有的才是它回填的。
+
+#### 前端：四张表、两个渲染点，重试按钮**没有 e2e 覆盖**
+
+`labels.ts` 加了 `CALCULATION_STATUS_LABELS`（待计算 / 计算中 / 已计算 / 计算失败）
+与 `TESTED_AT_SOURCE_LABELS`（学生交卷时间 / 导入文件的测评日期 / 待核实）＋
+`calculationStatusLabel` / `calculationStatusTone` / `testedAtSourceLabel`。
+两张表都**没有 `*_ORDER`**：读者是描述性的一行字，不是 `DataTable` 的可排序列
+（§3 第四面；`TARGET_SOURCE_LABELS` 那条「表在 `labels.ts` 里而没人从那儿取也算没接上」
+是同一件事）。
+
+两个渲染点**都不条件渲染**，这是为了第二面能真的扫到东西：
+
+| 渲染点 | 位置 | 演示数据里扫得到吗 |
+|---|---|---|
+| 「评分状态」行 | `CareCaseDetailPage.vue` 测评概览卡 | 是（每一场都是 `CALCULATED`） |
+| 「日期来源」行 | 同上 | 是（`ONLINE_SUBMIT` / `PENDING_VERIFICATION` 都有行） |
+| 「处理状态」行 | `StudentHistoryPage.vue` 每一张记录卡 | 是 |
+
+`UNTRANSLATED_CODES` 随之加上那六个码。**变异验证 3/3**：把任一处换成裸字段渲染，
+`e2e/vocabulary.spec.ts` 的对应角色用例变红——这同时证明了那几行**真的被扫到了**
+（扫不到的空区域在变异下永远是绿的）。
+
+顺带动的两处（都不是新功能）：
+
+- **「提交时间」改名「测评日期」**。对外部导入的那一场，原来的标签是错的：那一场没有人
+  在本系统里提交过任何东西，`submitted_at` 存的是文件里的测评日期，而同一张卡上面就有
+  一行「来源：外部导入」。历史行（`tested_at` 为 NULL）按 `submitted_at` 兜底。
+- **`StudentHistoryPage.vue` 那份自己的 `statusLabel` 删掉**，改用 `targetStatusLabel`。
+  那是 §3 第一面的反面同一个形状：一张表两个定义（`ScalePage.vue` 那次），改中文时
+  改一处、漏一处，而漏的那处界面上照旧显示旧词。
+
+**学生的记录页现在下发 `calculation_status`（分数仍然不下发）。** 这不是放松 §「学生端
+只给完成状态」那条：这一列不是分数，它是**「已完成」与「已算出来」的区别**——一名交完卷
+的学生看到「已完成」而这一场因为一次计算故障根本没算出来，他会以为一切都好。交卷那一刻
+的 toast 同样分成两句（答卷提交成功 / 成绩处理还需要老师再看一下），并写明**他不需要
+重新作答**——**失败原因不下发给学生**：那是一段给维护者看的文本。
+
+**「重算评分」按钮没有 e2e 用例，这是有意的取舍，不是忘了。** 要让它出现在屏幕上，得先
+让一场测评**真的算不出来**，而这件事在浏览器里做不到：唯一现实的失败注入是
+`monkeypatch`（`rule_config_from_json` 读不认识的规则时会静默回落默认值，不会抛）。
+后端那一侧是钉住的（`test_a_failed_calculation_is_recorded_and_leaves_the_answers_alone`
+与 `test_a_failed_calculation_can_be_retried_by_the_counselor`），漏的是「视图有没有把
+那个按钮渲染出来」——与 `IMPORT_CONFLICT_LABELS` 那次（§3）是同一类取舍。
+
+#### 跑数
+
+`make test` 561 → **590 passed / 0 failed / 271.18s**（新增 `test_answer_snapshot.py` 与
+`test_calculation_idempotency.py`，另有 §3 那两条词表用例）；`make e2e` 115 passed
+（全量两遍）。开发库与 e2e 库都已升到 0015。
+
+**顺带记一个不属于本期、也没有修的告警——已经查清是误报，不要再花时间**：`make test` 的
+5 条 warning 里那条 `analytics_service.py:523`（`GET /students/results` 的查询）说
+「cartesian product between FROM element(s) … and FROM element …」。**它报错了**，证据是
+它自己编译出来的 SQL：
+
+```sql
+FROM student INNER JOIN grade ON grade.id = student.grade_id
+INNER JOIN class_group ON class_group.id = student.class_id
+LEFT OUTER JOIN assessment_session ON assessment_session.id = (SELECT … WHERE …student_id = student.id …)
+LEFT OUTER JOIN assessment_result  ON assessment_result.session_id = assessment_session.id
+LEFT OUTER JOIN student_care_case  ON student_care_case.id = (SELECT … WHERE …student_id = student.id …)
+```
+
+三个外连接**各有各的 ON**，两个标量子查询都 `correlate(Student)` 到了外层的 `student.id`。
+所以 `:521-522` 那条「不会乘行、不需要去重」的注释是对的，别去改它。
+
+三点值得记，免得下一个人重查一遍：
+
+- **触发它的是 ORM 那条编译路径，不是编译本身。** 同一个 `select(...)` 直接
+  `Select.compile(dialect=mysql.dialect())` 一条告警都没有；是 `Session.execute()` 那层的
+  ORM 编译状态才报的。所以「编出来看看」这个最直觉的复现办法会**得出相反的结论**。
+- **同一条语句，两次运行报的 FROM 分组不一样**（一次是 `assessment_result` /
+  `student_care_case` / `assessment_session` 对 `student`，另一次是 `grade` / `student` /
+  `class_group` / `student_care_case` 对 `assessment_session`）——那个分组是拿集合拼的，
+  而字符串哈希每次运行不同。**别把两次不同的措辞读成两条不同的告警**。
+- 真正的判据是**行数**：这张表带着「列表条数与名册行数相等」的断言，而它一直是绿的。
+  一条真的笛卡尔积在那里是过不去的。
+
+**2026-09-20 补：同一个形状有第二处，`export_service.py:117`（档案导出那条查询）。**
+它是本次跑数时才第一次被记下来的（那两行 `analytics_service` 的那一处行号也随之漂到
+`:533`——阶段 4～8 往那个模块里加过东西，**行号不是判据，形状是**）。判据照上面那一套原样成立：那条语句的五个
+FROM 元素**各有各的 ON**（三个 `join` 加两个 `outerjoin`），而 `latest_session_id` 是
+`correlate(Student)` 的标量子查询，`outerjoin(AssessmentSession, AssessmentSession.id ==
+latest_session_id)` 的 ON 里出现的是一个子查询——这正是 SQLAlchemy 那个启发式读不懂的形状。
+**别去改它**，理由同上。
+
+这一处还多一层「报错了也看不出来」：这条路径逐**学生**写行、`seen_students` 按人去重
+（§11），所以即使真有乘积，写出来的文件**仍然是每人一行**——代价是白扫的行数，不是错的
+数据。也就是说这一处的行数判据比上一条更弱（文件看不出来），而它的形状与上一条逐字相同，
+所以仍然按误报处理。
+
+### 24. V1.2 阶段 3：名册导入批次化（2026-09-19）
+
+对齐阶段给名册导入留了「批次 + 逐行明细」两张表，这一期给它们接上写入方与读者。
+`make test` 590 → **600 passed**，`make e2e` 115 → **116 passed**。
+
+#### 这一期真正的改动是「预览从**只读**变成了**写**」
+
+V1.0 的名册导入是「预览校验 → 返回一份 `preview_token` → 提交时把 token 连文件一起带回来」。
+那时预览**一行都不写库**，所以那个路由从来没有 `db.commit()` 也没有任何问题。这一期把它
+改成落一个 `PREVIEW` 批次加逐行明细，**于是同一个路由从只读变成了写**——而那一行
+`db.commit()` 一开始漏了。
+
+漏掉的后果不是「预览看不到」，是整条链路断在第一跳：客户端拿着 `batch_id` 去提交，
+`commit_roster_import` 按 id 查库，那里什么都没有，回一句 404「导入批次不存在」——
+而屏幕上刚才还写着「共 1 条，可导入 1 条」。**它只在 e2e 上看得见**（真服务、真连接）。
+
+所以那一处的注释不是解释代码，是在挡下一次「这个路由以前不需要 commit」的推理：
+**路由从只读变成写的那一刻，`db.commit()` 是这次改动的一部分**，不是顺手加的。
+
+#### ★ 后端套件看不见「路由写了但没提交」这一类洞
+
+这是这一期最值钱的一条，因为它是**整个夹具的盲点**，不是某一条用例的疏忽：
+
+| 夹具 | 性质 | 后果 |
+|---|---|---|
+| `conftest.py` 的 `override_get_db` | `yield db_session`——**从不关闭也不回滚** | 请求结束时没提交的行照样留在会话里 |
+| `db_session` | `join_transaction_mode="create_savepoint"`，外层事务到**用例收尾**才回滚 | 未提交的写入对同一个用例里的后续查询**完全可见** |
+
+两条叠起来：**「路由写了但没提交」在生产上是 500 / 404，在测试里是全绿**。
+这不是假设——`test_a_preview_leaves_a_batch_and_its_rows_behind`（一个断言「批次行与逐行
+明细已经成型」的用例）在整个后端套件里一直是绿的，而真库里那个批次 0 行。
+
+唯一的网眼是 `test_student_import_api.py::test_the_preview_survives_the_request_that_made_it`：
+它**换掉那一层覆盖**，用 `Session(seeded_engine)`（用完就关，与生产同形）直接调路由函数，
+出了 `with` 再另开一个会话去查。走路由函数本身而不是 `TestClient`，是因为要断言的就是那个
+函数体里有没有提交，而绕过的是依赖注入那一层（那里没有逻辑）——换来的是不必为了拿一个 token
+往这个共享库里真写一行登录会话。**它用完把自己造的批次删干净**：这个库是 session 级共享的，
+留一批会让别的用例看到一份它没造过的导入历史。
+
+那条老用例的 docstring 也据此改了，明写「**它证明不了这批真的落了库**」并指向新的这一条——
+一条断言写得像在证明完整性、实际只证明了内存状态的用例，比没有它更糟。
+
+#### 提交带的是**批次 id**，不是一份凭据
+
+**`preview_token` 这条机制整个去掉了。** 从前它是「预览时算一份凭据、提交时带回来」，
+所以预览必须无状态；现在批次行本身就是那份凭据，而且比它多得多：文件指纹、操作者、
+五个计数、逐行结论，全在同一页上可查。带 id 回来还顺手消掉了一个旧机制答不上的问题——
+「刚才屏幕上那份预览与我手上这份文件是不是同一份」。
+
+- **重用而不是重建**：同一个操作者、同一个文件指纹（`file_sha256`）、仍是 `PREVIEW` 的
+  那一批会被复用（`start_roster_import`）。同一份文件传两遍是**操作员刷新了一次**，
+  不是两次导入——建两批会让「最近导入」那一列出现两条一模一样的记录。
+- **提交只认 `PREVIEW`**：已提交过的那一批不再是预览，再提交一次是 422 而不是把一份
+  已经改过名册的文件再改一遍。
+- **`RESOLUTIONS` 与 `student_resolution_label` 从 `assessment_import_service` import 来**，
+  不在这个模块里再写一份字面量：两套字面量会长出第三种写法，而它只在前端提交时变成
+  一句 422。`student_resolution_label` 是那个模块里已有的中文映射，审计的 `detail` 用它
+  （`resolution=None` → 「未涉及（无冲突）」而不是留空——**留空与「没问过」分不开**）。
+
+#### 旧路由整批退役，不留并存期
+
+`students.py` 里那三个 `/students/import/*`（preview / commit / template）与它们的
+`OrgAccountManager` 别名一起删掉了，**同一次改动**里删：留一个并存期就要回答「两个端点
+的口径为什么不一样」，而那个问题的唯一答案总是「因为其中一个还没删」。
+
+- 前两个被新端点替换，前端 `OrganizationPage.vue` 同批切过去；
+- **`GET /students/import/template` 是直接删掉、没有替代物的**——零调用者、零测试，
+  前端自己有一份模板的副本（那个函数的 docstring 记录着「两边要保持一致」这个有意决策）。
+  也就是说它从写下那天起就没有人取过，而「模板」这个功能一直在（在前端）。
+  这是缺口 7 那一族在**后端**的第一次：一个没有任何读者的端点，改它不会红、删它也不会红。
+
+#### 批次不属于这所学校时回 404，不回 403
+
+三个入口各查一次（`start_roster_import` / `commit_roster_import` / `list_roster_import_rows`），
+判据与「批次不存在」**共用同一句话**（`导入批次不存在`）。理由与 §9 那条同源：
+`batch_id` 是客户端传来的，它本身就是一份越权凭据——若「存在但不归你」回 403、
+「不存在」回 404，那么 403 就成了一句「这个 id 存在」的确认，把另一所学校的导入批次号
+变成了可枚举的事实。**「不属于你」与「不存在」在响应上必须不可分辨。**
+
+#### 学生首页：`target_status` 与 `status` 是两个问题
+
+这一期顺手修的产品缺陷（不是新功能）：`StudentHomePage.vue` 此前拿 `target_status`
+（**这名学生在这场比赛里做完没有**）当唯一的门禁，于是任务列表按 id 倒序的第一张是
+演示数据里那场「还没开始」的复测（`seed_demo` 按 today+20 算窗口 → `NOT_STARTED`），
+它长着一个点得动的「开始作答」——而后端 `create_or_get_session` 判的是
+`effective_task_status != "ACTIVE"` → 404（§12）。
+
+**这正是 §12 那句「界面说已结束时那个端点就真的开不了」的同一句话的另一面**：后端已经
+在 `list_student_tasks` 里发着现算出来的 `status` 了（那一行的注释甚至写着「学生端现在不
+显示这一项」），只是**没有读者**。修法是只认 `ACTIVE`（`canAnswer`，与后端那道门逐字对齐，
+不另写一套「什么算开着」），文案取 `labels.ts` 的 `taskStatusLabel`，不在视图里另写中文。
+
+`TASK_STATUS_LABELS` 于是有了第二个读者——`TasksPage.vue` 此前**自己抄了一份**（本地
+`statusLabel` + 就地 `labelOf`），随这次一起改用 `labels.ts` 的导出函数。这是 §3 那条
+「表在 `labels.ts` 里而没人从那儿取也算没接上」的第**三**次发作（前两次：`ScalePage.vue`
+的 `STATUS_LABELS`、`StudentHistoryPage.vue` 的 `statusLabel`）。
+
+**e2e 的定位器必须跟着改，而且这一条本身值得记**：`app.spec.ts` 里 9 处
+`.task-card').first()` 都换成了 `startableTask(page)`，它按
+`button:not([disabled])` 定位。旧写法之所以坏，是因为它假设「第一张卡就是能点的那张」——
+一个**数据依赖的假设**，与「断言 28 名学生」是同一类（测试注意里那条）。按「可点」定位
+才是那些用例真正要说的事（它们断的是「学生能开始答题」）。
+
+#### `STUDENT`：一条零覆盖的清单项换来的竞态假阳性
+
+`vocabulary.spec.ts` 的 `UNTRANSLATED_CODES` 里移除了 `STUDENT`，**不是放松**，是那条
+清单项在换一个不稳定的测试：
+
+- 它**没有渲染点**——「对象范围」列今天恒为 `SCHOOL`（§22），`STUDENT` 根本不出现在界面上，
+  所以它一条东西都守不住；
+- 它唯一的真实渲染点是审计页**有意**不翻译的 `resource_type` 列（缺口 7），而那一列就是
+  等着与「服务端筛选器 + 提示语」一起改的；
+- 而它**会让测试无故变红**：审计页只显示最新 20 行，`app.spec.ts` 的学生导入用例确实写进
+  `resource_type=STUDENT` 的审计，两个文件通过 `fullyParallel` **并发**运行——于是
+  「词汇用例扫到那 20 行时，导入用例有没有已经把它写进去」决定了它红不红。2026-09-19 实测
+  红了一次，查审计表确认那一行 `导入学生` 就写在那次运行的时间窗里，**与代码无关**。
+
+**一条会无故变红的守卫很快会被人关掉**（§18 那条），所以留一条零覆盖的清单项在这里是
+纯粹的负收益。要恢复它，得先把缺口 7 那三件事做完（那时 `resource_type` 有中文映射，
+`STUDENT` 不再裸着）——而在那之前，它在清单里守不住任何东西。
+
+#### 缺口 7 的连带更新
+
+缺口 7 那条「审计页的 `resource_type` 是裸编码」现在有了**唯一的已知活体**：全站的裸枚举
+渲染只剩那一处（`DataCenterPage.vue` 的「近期数据任务」2026-09-16 起不再打印它）。
+而它的**成因今天更清楚了**——除了「改中文会让搜索失灵」之外，它还会与 `fullyParallel`
+下的其它 spec 抢同一条时间线，所以它是「不能顺手改」与「改了会踩到别的用例」两件事叠在
+一起的一处。
+
+### 25. V1.2 第 4 期：MHT 测评记录导入批次化（2026-09-19）
+
+阶段 3 把**名册导入**从「预览 + 令牌」改成了「批次 + 逐行明细」；这一期把**测评记录导入**
+（MHT 外部文件）走同一条路：两段式（预览 → 提交）变成三段式
+（建批次 `PREVIEW` → 逐行匹配落 `assessment_import_row` → 逐行处置 → `commit`）。
+
+`make test` 600 → **608 passed**，`make e2e` 116 → **117 passed**。
+
+两者的形状现在一致，但**不是同一条链路的两次实现**——名册那一侧匹配的是「这一行说的是
+哪个学生」，这一侧匹配的是「这一行是哪一场测评」，所以下面记的是这一侧独有的东西。
+
+#### 预览从「一个令牌」变成「一批落库的事实」（与阶段 3 同源，代价不同）
+
+V1.0 的测评导入预览把结论签进 `preview_token`（一个 JWT），**库对这批数据一无所知**。
+两个问题因此没有答案：
+
+- **这一批里的 W 行当时为什么匹配不上？** 令牌是一次性的，没人再打开它；
+- **补完名册之后能不能重来一遍？** 不能。令牌是死的，重新上传要么改文件、要么再跑一遍
+  并且看不出差别。
+
+§18.4 那条出路——「找不到学生时应先补充名册，**再重新匹配**」——在后一种形状下**写不出来**。
+现在预览就是写：批次行与逐行明细都落库，`match_status` 是这一行**此刻**的结论；
+补完名册之后重传同一个文件，`_reusable_batch` 复用这个批次，逐行结论整批重算。
+
+#### 「没有一条『只重跑匹配、不重传文件』的路径，也不该有」
+
+这是这一期**唯一一处「看起来该做而刻意没做」**，所以它写在函数 docstring 里而不是
+留在缺口清单里：
+
+> 匹配的输入不止是名册：答案（100 题）与用时**只在文件里**，
+> `assessment_external_result` 只给**匹配成功的那些行**存了它们，而匹配结论本身要由
+> 答案之外的那五列决定。
+
+所以**不做 `POST /assessment-imports/{batch_id}/preview` 这种「就地重跑」**。重跑必然缺答案，
+而缺答案的行一旦提交就是**一份空答卷**——它在库里与真实作答长得一模一样，事后没有任何
+办法分辨。重传文件是这条路上唯一能把「名册 + 答案」两样一起带回来的动作。
+
+#### `_reusable_batch` 的四条判据，少一条都有话说
+
+| 判据 | 少了它会怎样 |
+|---|---|
+| `imported_by` | 别人传的同一份文件被我的重传覆盖掉——那是两个人的两次工作 |
+| `file_sha256` | 改过一个字就不算同一个文件 |
+| `status == PREVIEW` | **已提交的批次绝不复用**：重传时删了重建等于把一批已生效的事实从记录里抹掉（会话还在，但「它是从哪一行来的」这条线索没了） |
+| `task_id` | 同一份文件「先不绑任务传一次、再绑着任务传一次」是**两次口径不同**的导入（一层按自然月、一层按任务内有效结果），复用会把第一批的匹配结论按新口径改掉，而操作员看不出这件事发生过 |
+
+第四条是这一期新加的：阶段 3 的名册批次没有「任务」这个维度可比。
+
+**e2e 靠它做到幂等**：`vocabulary.spec.ts` 与 `app.spec.ts` 各传一份**内容固定**的文件，
+每跑一次复用同一批（实测跑完全量 e2e 后批次表只有 3 行，其中两行是 e2e 的、id 不变）。
+这是「跑 e2e 不许改掉操作员自己配的东西」的第三态：**新增、不改、不随时间增长**。
+
+#### 预览这一步不建任务、不写任何测评记录
+
+`start_assessment_import` 的 docstring 第一句就是「**不写任何测评记录**」：这一步不产生
+任何测评会话、答卷、结果或风险事件，「预览」这两个字在界面上仍然是真的。任务在
+`commit_batch` 时按自然月建或复用（`_task_for_month` 取**最新**那一批，与
+`existing_import_session` 取最新会话对齐——缺口 8 那条）。
+
+#### 九个 `match_status`，三档，判据只有一句
+
+| 档 | 码 | 选「覆盖」时这一行会写进去吗 |
+|---|---|---|
+| 能进 | `MATCHED` | 不需要任何决定，直接写 |
+| 要拍板（`MATCH_STATUSES_NEEDING_RESOLUTION`） | `AGE_CONFLICT` / `CONFLICT` / `DUPLICATE` | 选了才写 |
+| 进不去（`MATCH_STATUSES_UNIMPORTABLE`） | `INVALID_ROW` / `NOT_FOUND` / `OUT_OF_SCOPE` / `AMBIGUOUS` | **任何选择都救不回来** |
+
+后两档在界面上一行一个字写着，而且**各自对应一种操作员的动作**（选覆盖/放弃 → 去补名册
+或补发目标），所以它们的边界不能混：把一档从左边挪到右边，屏幕上那两句话就会各自承诺
+一件做不到的事。
+
+**`AMBIGUOUS` 曾经在中间那一组，第 4 期把它挪到右边**（`MATCH_STATUSES_UNIMPORTABLE`
+上面那段注释就是为这件事写的）。理由两件，都会真的发生：
+
+1. `commit_batch` 的「覆盖」分支会拿 `row.student_id` 去 `db.get(Student, …)`，
+   而它**必是 NULL**（连是哪一个人都还没定下来）→ `AttributeError` → 500；
+2. 就算侥幸不崩，那句 422「请选择覆盖或放弃这些记录后重试」也在**承诺一件做不到的事**
+   ——两个选择都不会把它写进去。
+
+§18.4 给它的处置是「**人工选择**后是」，而逐行选择（在几个候选里指出是哪一个人）
+是下一期的事。挪过去之后 `message` 里写的是学校此刻真能做的那件事（核对名册上这几名
+学生的性别与年龄）。**逐行选择接上之后它再回到中间那一档**——那时 `commit_batch` 有
+地方接住它的 `student_id` 了。
+
+`DUPLICATE` **留在**中间那一档：§18.4 表头那句「否」说的是「**不选任何处置时**不会写进去」，
+而选了覆盖（重写本月那一场）就会。这与 `AMBIGUOUS` 的区别是「覆写这个动作能不能做」，
+不是「这一行有没有冲突」。
+
+#### ★ 三个数各有各的口径，界面上不许互相顶替
+
+| 数 | 出处 | 数的是什么 |
+|---|---|---|
+| `total_rows` / `row_total` | `assessment_import_batch.total_rows` | 上传那一刻读了文件里的**多少行**（写死的时态） |
+| `row_counts` | `batch_row_counts`，**现算** | 现在这一批的行**按匹配结论**分成 `ready` / `needing_resolution` / `error` 三个数（第 6 期多了一个 `conflict`，它是 `needing_resolution` 的**子集**，不是第四档，见 §27） |
+| 列表里的行数 | `list_import_rows`，**按读者数据范围过滤**、默认 `limit=200` | 你**看得见**几行 |
+
+三处刻意的不一致，每一处都有理由：
+
+- **`batch_row_counts` 数整批、不套读者的数据范围**（与 `list_import_rows` 刻意相反）。
+  这三个数坐在**提交按钮旁边**，而 `commit_batch` 拒绝提交时用的是同一个集合、整批地数
+  （「有 3 条记录需要确认」）。套上范围会出现最坏的那种对话——屏幕上写着「待确认 0 条」，
+  点下去回一句「有 3 条记录需要确认」，**而操作员照着屏幕找不出那 3 条在哪**（§11：
+  指标卡上的数必须与它点进去的那个列表同源）。代价是「本批 N 行」与列表行数可能不等，
+  所以界面把两个数分开写、各自标明口径（§9：范围数字要写明口径）。
+- **`batch_row_counts` 不读批次上那几列计数**（`created_rows` / `updated_rows` / …）：
+  那些说的是**别的时态**。这一页问的是「现在这一批的行是什么状态」，而行的状态刚刚
+  可能被改过——操作员在页面上逐行处置之后，那几个数必须跟着动。
+- **两个读者共用一个集合**：`_match_batch_rows` 拿它写 `batch.error_rows`，
+  `batch_row_counts` 拿它现算预览页上那个「有问题 N 行」。写成两处字面量时，屏幕上那
+  两个数会在某次改动之后各说各话，而**两边看起来都对**。
+
+#### `list_import_rows` 删掉了「把候选非空的行藏起来」
+
+那条过滤第 4 期删掉了。它想挡的是**枚举**，实际造出的是**更强的枚举**：
+行在 = 那个班没这个人，行不在 = 有这个人——一次上传问遍全校。藏起来保不住任何东西
+（那些行里没有一条数据来自名册：`raw_*` 是操作员自己填进文件里的字，`matched_*` 是空），
+而「没有谁消失」才是那条款成立的前提。
+
+顺带记两个这一条实现上的坑：
+
+- **`Student` 必须显式外连接进来。** 范围谓词长在 `Student` 的列上，而这条查询的主表是
+  `assessment_import_row`——把谓词直接塞进 `WHERE` 而不给 `Student` 一个连接条件时，
+  SQLAlchemy 会把它当作一个**独立的 FROM 元素**加进去，于是变成 `assessment_import_row`
+  与 `student` 的**笛卡尔积**（213 行 × 名册里符合条件的每一个人）。行数被乘出来、
+  逐行明细整片重复，而**报出来的只是 SQLAlchemy 的一条 SAWarning**——
+  屏幕上「共 400 行」看起来完全正常。
+- **`student_id.is_(None)` 那一支刻意不依赖 `candidate_student_ids` 的存储形态**：
+  `JSON` 列的 `None` 有几个地方能悄悄变样（见下一条），而这一支的读者正是「出错的那几行」。
+  判据只挂在 `student_id` 这个真正的标量列上，就没有这一层。
+
+#### 0017 的 JSON null：一个让明细整片消失的默认值
+
+`sqlalchemy.JSON` 的 `none_as_null=False`（默认）把 Python `None` 绑成 **JSON 字面量
+`null`**（四字节），不是 SQL `NULL`。于是 `candidate_student_ids IS NULL` **恒假**
+——明细静默漏掉没匹配上的行，而**操作员最需要看见的恰恰是那些**。
+
+`0017_json_null_normalize` 是一条**数据**变更（不是 schema 变更），只改三列：
+`assessment_import_row.candidate_student_ids`、`assessment_external_result.dimension_scores_json`
+/ `result_payload_json`。判据是 `JSON_TYPE(col) = 'NULL'`。
+
+两处**必须不动**：
+
+- `audit_log.detail_json` 今天没有读者也没有写入方——不动；
+- **`system_setting.value_json` 反过来依赖 JSON null 的语义**（`nullable=False` 却允许
+  存 `None`），不许跟着改。
+
+#### 列级错误改成 422：整份文件没读懂时不建批次
+
+`_batch_errors` 管的是「这一批该不该建」，三条：批次名非空、**≤ `MAX_BATCH_NAME_LENGTH`**、
+`tested_on` 不晚于今天。第二条的理由值得记：`AssessmentTask.name` 是 **String(128)**，
+MySQL 严格模式下超长**直接 500**，而 500 里那句 `Data too long for column 'name'`
+离「批次名称」隔着一层——操作员手上唯一的信息是一句关于列的英文。
+
+全局错误**在写任何一行之前抛**（header 错误 + 上面三条 + 「没有已发布的 MHT 量表版本」）：
+半个批次比没有批次更难收拾——操作员会看到一批匹配好的行挂在「导入失败」的那一次尝试上，
+而再传一次同一个文件又会**复用这个批次**（同指纹、同操作者、仍是 `PREVIEW`），
+于是他上次改的那几行没了却看不出为什么。
+
+#### `batch_name` 是新加的一列（0016），它不叫 `file_name`
+
+`0016_import_batch_name` 给 `assessment_import_batch` 加 `batch_name String(128) NOT NULL
+server_default=""`。**两个名字不能合一**：学校的文件叫 `结果(3).csv` 是常态，而批次名会
+成为那场批次任务的名字给全校看。
+
+`server_default=""` 是给升级用的，**不拿 `file_name` 去填**——那等于替历史批次编一个
+「当时它是这么命名的」的裁决（与 §21 那条「`tested_at` 刻意不回填」同一个道理）。
+downgrade 直接删列。
+
+#### 行负载以 `message` 为准，不是一串 `errors`
+
+逐行明细里那一格是服务端拼好的**一句** `message`（`_row_message`）：
+`errors + message + warnings` 用 `；` 连接、`[:1000]` 截断。它在界面上是一个单元格，
+读起来是一句「这一行为什么进不去」的话。
+
+配套的一条：`NOT_FOUND` 那三处（学校 / 班级 / 学生）**上一级的说法全部删掉**——
+「名册中没有『初一 704』这个班级」已经说清了，再加一句「找不到学生」只会让操作员
+去查人而不是去查班。
+
+#### ★ 夹具盲点：后端套件看不见「路由写了但没提交」（阶段 3 那条的另一处）
+
+这一条在阶段 3 已经有过一次（`start_roster_import` 漏了 `db.commit()`），这一期
+`POST /assessment-imports/preview` 同样是自己 `db.commit()`（路由层，第 116 行）而
+**不从 `get_db` 拿提交**（`db/session.py` 的 `get_db` 是 `finally: db.close()`，
+从不提交）。所以阶段 3 那段结论在这里原样成立：
+
+> `conftest.py` 的 `override_get_db` yield 的是 `db_session`（外层事务罩着、
+> 请求结束既不关闭也不回滚），所以**「路由写了但没提交」在生产上是 404，在测试里是全绿**。
+
+这一侧除 e2e 外**唯一的网眼**是同形的那一条：
+`test_the_preview_survives_the_request_that_made_it`（刻意不用 `client` / `db_session`，
+另起 `throwaway_database()` + 与生产同形的 `override_get_db`，再**在另一条连接上**
+验这一批还在）。少了路由里那句 `db.commit()` 这条当场变红。
+
+#### 前端：两张新表，只有第二面保护
+
+`labels.ts` 加了 `MATCH_STATUS_LABELS`（九个码，**键序是从「能进」到「进不去」**，
+与后端那三张集合对齐）与扩到三个码的 `IMPORT_CONFLICT_LABELS`（`AGE_MISMATCH` /
+`DUPLICATE` / `IN_SYSTEM_RESULT`）＋ `matchStatusLabel` / `importConflictLabel`。
+
+两张表都**只有第二面**（`e2e/vocabulary.spec.ts` 扫像素）保护：
+
+| 面 | 有没有 |
+|---|---|
+| ①后端发的码 `labels.ts` 认不认 | 有（词条在） |
+| ②视图有没有**调用**标签函数 | **有，而且是唯一真正跑得到的那一面** |
+| ③服务端生成的导出文件认不认 | **不适用**（导入明细不进任何导出文件） |
+| ④枚举列的排序 `Column.order` | **不适用**（明细弹层是普通 `<table>`） |
+
+而第二面在这两张表上**曾经是空的**——`IMPORT_CONFLICT_LABELS` 那两列只在「查看明细」
+弹层里渲染，e2e 要走到那里得先让库里存在一条本月导入过的记录；在共享的开发库上
+「先导一条进去」会让这次运行**改变**后续用例看到的统计口径（缺口 8），所以此前
+没有为它写用例（§3 记着那次取舍）。**这一期把这个洞补上了**：新增的
+`vocabulary.spec.ts::MHT导入的批次明细` 自己**用接口造一批**（两行：一行空姓名 →
+`INVALID_ROW`，一行查无此人 → `NOT_FOUND`），再点进明细弹层扫像素。
+
+三条写法上的讲究，每一条都是「先证明有东西可扫，再断言它干净」（§测试注意那条第
+三、四例的第五例）：
+
+- 文件内容**固定**（100 个题号列一个都不能少，少了整份文件在**列级**就被 422 挡下来、
+  批次根本不会建出来，用例退化成一个「表格是空的 → 没有裸编码 → 绿」的空转）；
+- 两行的取值**不依赖名册此刻的内容**（空姓名在第 2 步就返回 `INVALID_ROW`，还没走到
+  查名册；`e2e词表查无此人` 必然 `NOT_FOUND`）——这是选它们而不是选「年龄不符 /
+  本月已导过」的理由；
+- 造不出批次就**抛**（`expect(preview.ok(), …).toBeTruthy()`），不静默退化；
+- `toHaveCount(2)` 先证明两行真的渲染了（明细弹层的 tbody 里**没有**空行，所以这个
+  断言成立），再做**变异验证**：把 `{{ matchStatusLabel(row.match_status) }}` 改成
+  `{{ row.match_status }}` → 红，报出的正是 `INVALID_ROW` 与 `NOT_FOUND` 两个码。
+  这同时证明了那两行**真的被扫到了**（扫不到的空区域在变异下永远是绿的）。
+
+`e2e/app.spec.ts` 的「MHT测评记录导入」用例跟着改了三处：`错误 2` → `无法导入 2`
+（第 4 期把「这一行进不去」与「这一行要你拍板」分成两档，界面上照这两档各报一个数）、
+批次号**从屏幕上读**（`BATCH-20260919-1` 按天编号，写死会在某一天红在一个与功能无关的
+地方），以及「导入批次」里找得到同一批并且那一行有「继续处理」——**先 `toHaveCount(1)`
+证明这一批在历史里，再断言它带着那个按钮**（顺序反过来的话，一个空表格也能让后面
+那条通过）。
+
+顺带记一处**看起来该有而刻意没有**的：`IMPORT_BATCH_STATUS_LABELS` 2026-09-19 从
+`ROSTER_BATCH_STATUS_LABELS` 改名而来并**合成一张**——两条链路的批次状态是同一批码
+（`PREVIEW` / `COMMITTED`），各留一张表就是两张会长歪的镜像。
+
+#### 跑数
+
+`make test` 600 → **608 passed / 0 failed**，`make e2e` 116 → **117 passed**。
+全量 e2e 跑两遍（含变异验证前后各一次），演示库的批次表不增长。
+
+### 26. V1.2 第 5 期：逐行处置、年龄三选项、汇总档、未匹配行的去处（2026-09-19）
+
+第 4 期把测评导入变成了三段式（建批次 → 逐行匹配 → 逐行处置 → `commit`），
+但「逐行处置」那一格在界面上是空的：预览里一行写着「年龄不符，请选择覆盖或放弃」，
+而**没有任何地方能回答它**。这一期把那一格接上，并且顺手把两条悬着的东西落地——
+汇总档那一档文件终于有了名字，而「没进得去的那几行」终于有了一个可查的地方。
+
+**零 DDL。** 本期用到的列（`import_mode` / `out_of_scope_reason` / `age_resolution` /
+`resolved_by` / `resolved_at` / `age_before` / `age_after` / `assessment_session.age_at_test`）
+**全在 0013 里就有了**（§21）——本期一个字都没改表结构，产出全部是「写入方与读者」。
+这与缺口 9 那条「列有了、路还没通」是同一句话的正面：对齐阶段铺的路，功能层一期一期接。
+
+`make test` 608 → **630 passed**，`make e2e` 117 → **119 passed**。
+
+#### 年龄三选项：一次用户裁决，以及它为什么必须有第三项
+
+§18.5 里有两句话是打架的：「无论是否覆盖 `student.age`，**本次测评的 `age_at_test`
+都必须保存外部年龄**」与「保留系统年龄时不要动 `age_at_test`」。前一句成立的话，
+三个选项只剩两个（保留与覆盖在 `age_at_test` 上会写出同一个值）。**2026-09-19 用户裁决
+让第二句让步**——于是三档在两种取值上各自不同，每一档都有一个只有它自己成立的理由：
+
+| 选项（`age_resolution`） | `student.age` | `session.age_at_test` | 这一档在说什么 |
+|---|---|---|---|
+| `keep_roster` 保留系统年龄 | 不动 | **名册那个数** | 「以名册为准」——这次测评按名册上的年龄理解他 |
+| `overwrite` 覆盖学生当前年龄 | 改写 | 文件那个数 | 「文件是对的，名册该更新」——两处一起改 |
+| `session_only` 只保存本次测评年龄 | 不动 | **文件那个数** | 「名册先不动，但这一场确实是 13 岁测的」——两句话同时成立的那一支 |
+
+**「文件里那个数一个字都没丢」是这三档共同的保证**：它一直留在
+`assessment_import_row.raw_age` / `age_after` 上，逐行明细里看得见。所以「让步」让掉的
+是 `age_at_test` 这一个字段的取值，不是外部事实本身——这条区别要记住，它是三档能同时
+成立的前提。
+
+落点只有一处：`_create_imported_session` 与 `_rewrite_imported_session` 都取
+`row["age"]`，而那个值在 `commit_batch` 里由年龄处置决定（`AGE_RESOLUTION_OVERWRITE`
+时才顺带 `_update_roster_age`）。**重导一处不能漏**（`_rewrite_imported_session` 里
+那句 `session.age_at_test = row.get("age")`）：漏了的话它停在第一次导入时的数，
+而那一行看起来完全正常——「同一次测评两个年龄」这种不一致要等对账才发现。
+
+三条配套约定：
+
+- **行上的 `age_resolution` 留空是「这一行没有年龄问题、没人问过」，不是「选了某个默认」。**
+  与 `resolution` 留空同一条（§24）。
+- **`resolution` 与 `age_resolution` 是两个字段、两个问题**：前者回答「冲突的那些行写不写」，
+  后者回答「这一场按哪个年龄记」。同一个词在两边是同一个意思（`overwrite` 直接复用
+  `RESOLUTION_OVERWRITE` 那个字面量），沿用它可以少一次数据迁移——但**它们不是同一个
+  问题的第三个值**。
+- **关系是「逐行覆盖整批」**：整批提交时的 `age_resolution` 是默认值，而逐行处置过的
+  那一行不再受它左右。所以「批上是 `overwrite`、某一行是 `keep_roster`」是正常状态，
+  而审计的 `detail` 记的是**处置完之后**的最终值（`row.resolution` 可能是这一次刚写的，
+  也可能是上一次写的，而轨迹要回答的是「提交时会读到什么」）。
+
+#### 逐行处置：`PATCH /assessment-import-rows/{row_id}/resolve`
+
+**它不写任何测评记录**——真正的落库仍然全部发生在 `commit` 那一刻，理由与预览那一层
+逐字相同（一个动作在它真的发生之前，库里不该出现它的后果）。所以这个端点改的是行上那
+两列处置字段本身。
+
+`resource_type` 是一个**新码 `ASSESSMENT_IMPORT_ROW`**，而它**没有中文映射**——
+审计页那一列本来就裸渲染（缺口 7），这是知情的代价。用 `ASSESSMENT_TASK` 的话
+`resource_id` 只能是任务 id，而一场任务下有几百行，那一条轨迹答不上「动的是哪一行」。
+行不属于这所学校时回 404，判据与措辞都与 `load_batch` 同一句（§24：**「不属于你」与
+「不存在」在响应上必须不可分辨**）。
+
+#### 汇总档：`_write_sheet` 第一行的 `return`
+
+§18.9 的汇总档（`EXTERNAL_SUMMARY`，六个身份列 + 总分 + 维度分，**没有题号列**）
+走到 `_write_sheet` 就结束：**它一行答卷都不写，也不评分、不开待办。**
+这不是「还没做」，是规格逐字要求的——`没有 100 道原始答案时**不得伪造**
+assessment_answer，也不得**直接**按本地重点题规则生成风险事件`。汇总文件里没有答案，
+所以本地那条重点题判据（第 85 / 97 题答「是」）**用不了**，而系统不该假装自己判得出来。
+平台给的分数留在 `assessment_external_result.total_score` / `dimension_scores_json` 上。
+
+代价是三处**已知且接受**的不一致（缺口 10，不是漏了）：
+
+- 这一场在按 `assessment_result` 说话的那些页面（关注等级、关注率、受控导出）上是**空的**；
+- 任务完成率按**目标行**算，会把它算成已完成；
+- 会话 `status` 停在 `IN_PROGRESS`（`_write_sheet` 早退之后没有东西把它推到 `SUBMITTED`）。
+
+三处的共同前提是**不许替未核验的外部结果担保**——而它们**不会**因为第 6 期的四档处置
+（§27）而消失：四档只对「与在线答卷冲突」的那些行生效，一份汇总档匹配到一个没有在线答卷
+的学生时四档碰不到它。缺的那一层是「这份外部结果算不算一份有效结果」，读者落在
+`assessment_target.effective_external_result_id` 上，而它今天**只有写入方**。详见缺口 10。
+
+#### 未匹配行的去处：判据是**两个取并集**，而且第二个不能省
+
+`GET /assessment-tasks/{task_id}/unmatched-import-rows`（§18.10 的未匹配口径）。
+它补的是 §18.4 那条出路的最后一环：一份文件里有几行没匹配上时，那些行从此有了一个
+**可查的地方**（在它们所属的那场任务下面），而不是只活在那一次上传的返回值里。
+
+两个判据取并集：
+
+1. `match_status` 在 `MATCH_STATUSES_UNIMPORTABLE` 里（`INVALID_ROW` / `NOT_FOUND` /
+   `OUT_OF_SCOPE` / `AMBIGUOUS`）——**任何处置都救不回来的那些**；
+2. **或者** `processing_status == ROW_PROCESSING_SKIPPED`——提交时被放弃了的那一行
+   （整批选了「放弃」、或逐行处置成 `skip`）。
+
+**第二个判据不能省**：少了它，一个「选了放弃」的批次在这一页上会一条都不剩——而那一页
+的读者正是要找出「这场任务还有谁缺着」。它匹配得上，而这一批没有把它写进去，所以对这场
+任务而言它与「没匹配上」是同一件事。
+
+**是「并入」而不是分成两档**：`reason_counts` 按 `match_status` 分，所以「哪些行是没能
+匹配、哪些是被放弃的」仍然分得开（`processing_status` 也在逐行的响应里）。排成两组会让
+同一份行表在界面上出现两次。
+
+三点与既有约定同源：
+
+- **计数与取数逐字相同**（同一组判据、同一个连接，抽在 `_unmatched_row_conditions` 里）：
+  否则「共 N 条」与下面那张表各说各话（§11）。
+- **`reason_counts` 数整场任务、不套读者的数据范围**（与 `list_import_rows` **刻意相反**，
+  同 `batch_row_counts` 那条）：这个数坐在任务详情页上，说「这场任务有多少行没进来」，
+  而范围已经在「哪些任务看得到」那一层生效了，再套一层会让同一个任务对两位老师报出
+  两个「未匹配 N 行」。逐行明细那一层仍然过滤（那里逐行给姓名）。
+  **两个数口径不同，所以界面把它们分开写、各自带着自己那半句话**（§9）：
+  `整场共 N 行没进得去（…）；其中你看得见 M 行。`
+- **两道门槛照抄 `task_targets`**（§22 那条的镜像）：这一页逐行印出学号与姓名，那是
+  **组织与账号**那一档的数据。判据直接复用 `ensure_task_target_reader`——两处各写一份
+  `scope_allows(...)` 就会有第三个定义悄悄冒出来。
+
+返回里的 `items` **复用 `import_rows_payload`**，不在这里另拼一份：同一条记录在两个屏幕上
+（任务详情页的「未匹配行」与数据中心那个明细弹层）必须逐字相同，两处各写一份序列化就是
+两个定义，而它们漂移了不会有任何东西看得见。上限 `UNMATCHED_ROW_LIMIT = 200`，截断句与
+出路照 §10（「凡是截断，都要自己说出来」）。
+
+#### `_row_payload` 补 `batch_id` / `batch_no`：`row_no` 是**批内**编号
+
+这一期给逐行响应加了这两个字段。理由就是「未匹配行那一屏是**跨批**的」：一场任务下
+可以有好几批（先初一、隔几天再初二），而 `row_no` 在每一批里都从 1 开始——少了「批次」
+这一列，看表的人会以为那两行 `2` 是重了、或者丢了一行。明细弹层（单批）里这两个字段
+不承载信息，但同一条记录在两处必须是同一个形状（见上一条）。
+
+#### 前端：四张新表、一个第三页签，以及 e2e 里**做不到**的那一半
+
+`labels.ts` 加了四张表，都是**描述性**的（没有 `*_ORDER`，读者不是 `DataTable` 的
+可排序列，§3 第四面）：
+
+| 表 | 内容 | 渲染点 |
+|---|---|---|
+| `IMPORT_MODE_LABELS` | `EXTERNAL_FULL_ANSWER` 逐题答卷 / `EXTERNAL_SUMMARY` 只有分数 | 批次摘要那一格（**不条件渲染**） |
+| `AGE_RESOLUTION_LABELS` | 保留系统年龄 / 覆盖学生当前年龄 / 只保存本次测评年龄 | 明细「处置」列（已提交的批次）+ 提交前那句提示 |
+| `OUT_OF_SCOPE_REASON_LABELS` | `SUPPLEMENT_CANDIDATE` 可补发 / `NOT_IN_TASK_SCOPE` 不在发放范围 | 匹配结论那一格下面 |
+| `UNMATCHED_REASON_LABELS` | `MATCH_STATUS_LABELS` **只改一档**（`MATCHED`） | 任务详情页的「未匹配行」页签 |
+
+**`UNMATCHED_REASON_LABELS` 与 `MATCH_STATUS_LABELS` 只差一档**：`MATCHED` 在这一屏要读成
+「**已匹配但被放弃**」——同一个码在预览里说「能进」、在这一屏说「没进」，因为这一屏的判据
+是「这场任务缺不缺他」。所以它是**另一张表**
+（`{ ...MATCH_STATUS_LABELS, MATCHED: '已匹配但被放弃' }`）而不是改掉原来那张的措辞：
+预览页上把 `MATCHED` 读成「被放弃」是错的。`unmatchedReasonTone` 同理，只在这一档上
+与 `matchStatusTone` 不同。
+
+**但那一档今天造不出来**（2026-09-20 撞出来的）。这一屏的判据是两个取并集：`match_status`
+落在 `MATCH_STATUSES_UNIMPORTABLE` 里，**或者**这一行被放弃了（`processing_status ==
+SKIPPED`）。而「被放弃」只可能落在**要拍板的那三档**上（`AGE_CONFLICT` / `DUPLICATE` /
+`CONFLICT`）：`_row_will_be_written` 对 `MATCHED` 落在最后那句 `return True` 上，
+**整批选「放弃」也照写**；逐行处置那条路也走不通——`resolve_import_row` 拿 422
+「不需要确认」把对 `MATCHED` 行的处置挡掉了。所以「匹配上了但被放弃」这一档在库里
+**不可达**，`MATCHED` 在这个清单里一次都不会出现。
+
+**这不是「那张表写错了」**：它读的那句话仍然成立——哪一天匹配上的行也能被放弃，照上一张
+渲染就会让一份叫「没进得去」的文件里印出「已匹配」。**它是这个状态的读法，不是这个状态
+存在的证据**。所以留着一个造不出来的词条，而**不**为它写一条恒绿的断言假装它被守住了
+（§29 那条：一条恒绿的守卫没人会发现，它比没有更糟，因为它占着「这一条有人守」的位置）。
+
+第一版把这件事记反了——`labels.ts`、`export_labels.py` 与本节都写着「那一档正是这一屏
+存在的理由」，而**测试夹具是照着那句话写的**（造一行 `MATCHED` 再逐行处置成「放弃」），
+于是三个用例停在一个**不可达的状态**上、一起红，而红的原因不是被测代码。三处 2026-09-20
+一起改了，夹具改成「`AGE_CONFLICT` + 整批选放弃」这个真实可达的形状。
+
+`TasksPage.vue` 多了第三个页签「未匹配行」。**那个块排在模板最后，不是顺手**：
+上面那三条 `v-if` / `v-else-if` / `v-else` 是一条链，往链条中间插一个带 `v-if` 的块，
+后面那几个 `v-else-if` 就会改挂到这个新块上——完成明细从此再也不显示，而报错、看不出是
+排版问题。
+
+#### e2e：两处可达、两处**不可达**，以及为什么不可达
+
+三条（两新一改）用例在 `e2e/vocabulary.spec.ts`，变异验证 3/3 全红（把
+`importModeLabel(...)` 与 `unmatchedReasonLabel(...)` 换成裸字段 → 三条各红一次，
+报出的正是 `EXTERNAL_SUMMARY` 与 `NOT_FOUND`）：
+
+- `MHT导入的批次明细` 加了一句 `toContainText('逐题答卷')`——「导入形态」那一格是
+  `EXTERNAL_FULL_ANSWER` 在**弹层里**唯一的渲染点；
+- `MHT导入的汇总档`（新）：用**没有题号列**的汇总 CSV 造一个 `EXTERNAL_SUMMARY` 批次，
+  断言那一格是「只有分数」；
+- `测评任务的未匹配行页签`（新）：任务**从 `GET /api/v1/assessment-tasks` 现取**、按
+  `total_targets` 最大挑（不写死任务名——写死会在某一天红在一个与功能无关的地方），
+  用一份**绑定该任务**的预览造两行（空姓名 → `INVALID_ROW`、查无此人 → `NOT_FOUND`），
+  再点进第三页签断言那两句中文与「整场共 N 行没进得去」的口径句。
+
+**另外两张表在 e2e 里第二面是空的，这是有意的取舍**（`AGE_RESOLUTION_LABELS` 与
+`OUT_OF_SCOPE_REASON_LABELS`）。原因是**演示名册的班级叫 `1班`**（`seed.py` 的基线班级、
+`seed_demo.py` 的 `GRADES` 都是这样），而文件里那一列按学校编号规则必须写数字
+（`_parse_class` 的 `4` → `704`）——**任何 CSV 行都匹配不上学生**，所以匹配这一步永远走
+不到「找人」，`AGE_CONFLICT` / `OUT_OF_SCOPE` / `DUPLICATE` / `CONFLICT` 在 e2e 里
+**不可达**。要靠 e2e 覆盖它们，得先让演示名册长出一个叫 `704` 的班级，而那会改动共享
+演示库的名册（缺口 8：跑 e2e 不许改掉数据），代价比它换来的那点保护大。
+后端那一侧是钉住的（`test_assessment_import_api.py` 逐行断言那三档的响应），
+漏的是「视图有没有调用标签函数」——与 `IMPORT_CONFLICT_LABELS`（§3）是同一类取舍。
+
+**`overwrite` 刻意不列进 `UNTRANSLATED_CODES`。** 它与名册导入的处置码是同一个字面量
+（`AGE_RESOLUTION_OVERWRITE = RESOLUTION_OVERWRITE`），而那张表
+（`ASSESSMENT_RESOLUTION_LABELS`，第 4 期）从一开始也没有列进去：一个普通的英文单词在
+别的文案里出现的可能性，比它换来的那点保护更值钱——**会无故变红的守卫很快会被人关掉**
+（§18）。`keep_roster` / `session_only` 是 `snake_case` 短语，没有这个风险，所以照列。
+
+**e2e 现在会在演示库留下 4 个批次**（此前 3 个）：两条新用例各造一个 `PREVIEW` 批次。
+不随时间增长——`_reusable_batch`（同操作者 + 同 `file_sha256` + 仍 `PREVIEW` + **同
+`task_id`**，§25）会把重传的那个文件复用掉。§25 里「实测跑完全量 e2e 后批次表只有 3 行」
+那句话据此更新。
+
+#### 顺带收窄的两条已知项
+
+- **缺口 9 里「导入路径不走 `uq_session_effective_task_student` 那套判重」这条没变**，
+  但 `OUT_OF_SCOPE` 的两种子情形现在在响应里分得开了（`out_of_scope_reason`）。
+  界面**按它分岔**（一个「补发」按钮只该长在 `SUPPLEMENT_CANDIDATE` 上），而服务端
+  **不给它兜底值**：`?? 'NOT_IN_TASK_SCOPE'` 会把「不知道」变成一句「补不了」，
+  与 §22 那条 `scope_type` 不许 `?? 'SCHOOL'` 是同一条理由。
+- **缺口 7 那条「审计页的 `resource_type` 是裸编码」多了一个新的活体**：
+  `ASSESSMENT_IMPORT_ROW`（逐行处置写的那一条）。它同样是**知情的代价**——
+  等那三件事一起做（服务端筛选器 + 中文映射 + 提示语对齐）时，这一条轨迹也会一起变。
+
+### 27. V1.2 第 6 期：有效结果与冲突处置（2026-09-19）
+
+第 5 期接的是「哪一行进得去」，这一期接的是**进去之后哪一份算数**。§18.8 那句话——
+「一个任务一个学生可以保留多个来源事实，但**同一时刻只能有一个有效结果**」——在这一期
+变成三样东西：一列、一个生成列唯一键、一个谓词。四档处置由 2026-09-19 的一次用户裁决
+定下落点（规格里只有四个名字，`技术详细设计.md` 与 `vibe-input/` 都零命中）。
+
+**零 DDL。** 本期用到的列（`is_effective` / `supersedes_session_id` /
+`assessment_target.effective_session_id` / `effective_external_result_id` /
+`assessment_import_row.conflict_resolution` / `assessment_external_result.verification_status`
+/ `applied_session_id`）**全在 0013 里就有了**（§21）——与第 5 期同一条：对齐阶段铺的路，
+功能层一期一期接。
+
+#### 「同一时刻只有一个有效结果」是一条谓词，不是一个约定
+
+三样东西合起来才成立，缺一样就退回「靠所有人记得」：
+
+| | 是什么 | 少了它会怎样 |
+|---|---|---|
+| `assessment_session.is_effective` | `Boolean NOT NULL DEFAULT TRUE` | 外部顶掉在线那一场时只剩「删行」一条路，而 §1 不许删 |
+| `uq_session_effective_task_student` | **生成列**唯一键：`is_effective=1 AND task_id IS NOT NULL` 时是 `CONCAT(task_id,':',student_id)`，否则 NULL | 「一个任务一个学生最多一场有效」变成写入侧的纪律 |
+| `effective_session_predicate()`（`models/assessment.py:284`） | 函数体就是 `return AssessmentSession.is_effective.is_(True)` | 七个读者各写一遍，漂一个不会有信号 |
+
+生成列那个形状值得单独记：`is_effective=0` 的行那一列是 **NULL**，而 MySQL 的唯一键
+不管有多少个 NULL——所以「被降级的那一场」与「任务外的会话（`task_id IS NULL`）」都天然
+不受这个键约束。**这也是 `USE_EXTERNAL` 必须先降级再插新场的原因**（见下）。
+
+**七处调用**，一律调那个函数、不自己写 `is_effective.is_(True)`：`task_service:569`
+（完成明细按场）、`export_service:86`、`analytics_service:107` / `:513`、
+`assessment_service:126`（`latest_session`）/ `:245` / `:297`。另有一处**按列的等价写法**：
+`assessment_import_service._current_effective_session:2221`——它的 docstring 写着它与
+`_existing_session_for_match` 回答的是两个问题（「现在算数的是哪一场」对「这一行会不会
+打架」），而后者**刻意不看** `is_effective`：预览要回答的是「你导的这份东西和库里什么
+撞上了」。
+
+**两处刻意不调，各有各的理由**：
+
+- `care_service` 的 `history_sessions:271`（历次趋势）——被降级的那一场仍是他真实考过的
+  一次：答案、用时、那天的分都在，趋势图少一个点就是在抹掉一段发生过的事实。降级说的是
+  「他现在以哪一份为准」，不是「那一次不算测评」。同一处的 `sitting` 走
+  `latest_session`，**是加了的**——两处不一样是有意的，注释就写在那两行中间。
+- `assessment_service.create_or_get_session:360` **排序而不是过滤**
+  （`order_by(is_effective.desc(), id.desc())`）：过滤掉之后「一场有效的都没有」（只有
+  人工改库才可能出现）会掉进下面那条**新开一张卷子**的路径，撞上
+  `uq_session_task_student_attempt`；排序最坏只是退回旧行为。而首选有效场之后，下面那道
+  `source == "IMPORTED"` 的门**同时回答了两档**：`USE_EXTERNAL` 之后有效场是导入的那一场
+  → 409「该测评由学校导入，不能在系统内作答」（正是该给的答复）；`KEEP_BOTH` 之后有效场
+  仍是在线那一场 → 照旧返回给他。
+
+#### 四档处置：规格只给了名字，落点是裁决的
+
+| 处置 | 外部会话 | 在线会话 | `external_result.verification_status` |
+|---|---|---|---|
+| `KEEP_ONLINE` 保留在线 | **不建** | 保持有效 | `PENDING`（还挂着，以后还能再裁） |
+| `USE_EXTERNAL` 采用外部 | 建，**有效** | `is_effective=0`、指新场 | `ACCEPTED` |
+| `REJECT_EXTERNAL` 否掉外部 | **不建** | 保持有效 | `REJECTED`（终态） |
+| `KEEP_BOTH_BUT_ONE_EFFECTIVE` 两份都留但以在线为准 | 建，`is_effective=0` | 保持有效 | `ACCEPTED` |
+
+这张表的**可执行形式**是代码里那张 `CONFLICT_RESOLUTION_VERIFICATION`（是数据，不是
+注释），四档的落点在 `commit_batch:2618-2766` 的四个分支里。三条不能混的：
+
+- **`KEEP_ONLINE` 与 `REJECT_EXTERNAL` 在库里唯一的差别就是 `verification_status`**
+  （建不建会话、谁有效全都一样）。「还没定」与「已经否了」是两件事，而 `REJECT_EXTERNAL`
+  是**终态**、不是「这次先不写」。
+- **「采纳」不等于「有效」**：`KEEP_BOTH` 也是 `ACCEPTED`，而那一场 `is_effective=0`。
+  「这份数据我们认」归 `verification_status`，「这份数据算作当前结果」归 `is_effective`。
+- **`USE_EXTERNAL` 不是「静默覆盖」**。§20#11 禁的是**自动**覆盖：整批点一次就把学生在
+  线答的那一场就地改写、几份卷子作废，而屏幕上没有一句话说这件事。现在是逐行选、
+  `is_effective` 留痕、`supersedes_session_id` 指得出新场、审计里写着这一档——原始答卷
+  一条不删。
+
+`CONFLICT_RESOLUTION_VERIFICATION` **收在一张表里**的理由要单独记：四档里有两档推的是
+同一个值（`USE_EXTERNAL` 与 `KEEP_BOTH` 都是 `ACCEPTED`），而它们分住在**两个 `elif`**
+里。各自写一行的话，漏掉其中一行**不会有任何东西报错**——`ACCEPTED` 与 `PENDING` 在
+「哪一场有效」上完全一样，只有这一列不同，所以那一处漏写只表现为「学校认过的外部结果
+看起来还没核」，而界面上没有任何东西看得见它（这一列今天**没有读者**，见缺口 11）。
+
+#### 冲突行只能逐行处置，整批的「覆盖」对它无效
+
+`MATCH_CONFLICT`（学生自己答过这一场、而文件里也有他）那些行走**自己的那道门**
+（`_conflict_row_is_decided`），与整批的 `resolution` 无关——2026-09-19 的第二个用户裁决。
+理由是这条路上唯一不能发生的事：**一次点击、一个整批动作，把几份学生本人作答的卷子
+作废**，而屏幕上没有任何东西能把这个代价说出来。
+
+两条出路都算已决定：`conflict_resolution` 有值（人逐行选了四档之一），或
+`resolution == skip`（人明确不要这一行）。**整批的「放弃」不算回答**：它只是让这一行
+不写，而「以哪一份为准」仍然悬着。没选就 422，并且**指名是哪几行**
+（`commit_batch:2483`）：
+
+```
+第 3 行、第 7 行等 12 行与系统内已有的在线答卷冲突，需要逐行选择处置方式
+（保留在线 / 采用外部 / 否掉外部 / 两份都留但以在线为准）。
+整批的「覆盖」对这些行无效：一次点击不该作废几份学生本人作答的卷子。
+```
+
+行号照样截断到 10 条（§10：凡是截断都要自己说出来）——一句「有 3 条需要确认」会让人不
+知道该点哪一行，而这一批可能有 200 行。**`_row_will_be_written` 是一处判据、三个读者**
+（`writes` 判要不要建任务、循环判跳不跳过、这道门判这一行算不算已决定），所以它抽成函数
+而不是在四处各写一遍：那个条件有两个维度（行自己的处置 / 整批的选择），写四遍必然有一条
+先漂。冲突行取整批的 `resolution` 是错的，那一支只看行自己的。
+
+#### `USE_EXTERNAL` 的两步次序，以及中间那次 flush
+
+```python
+if online is not None:
+    online.is_effective = False
+    db.flush()          # ← 不能省
+session = _new_imported_session(...)
+if online is not None:
+    online.supersedes_session_id = session.id
+```
+
+**先让在线那一场退位、再建新场，次序不能换**：新场 `is_effective=1`，而
+`uq_session_effective_task_student` 是生成列唯一键——旧的还没让开就插新的，flush 那一刻
+必撞 `IntegrityError`（生成列一非空就参与唯一性）。中间那次 `db.flush()` 是这次序的
+**执行形式**：赋值只是把对象标脏，不 flush 的话 SQL 的发出顺序仍由 unit of work 决定，
+而它会把 INSERT 排在 UPDATE 前面。
+
+`supersedes_session_id` 的方向以**模型上的注释为权威**：写在**旧行**、指向**新行**
+（新场的 id 这时已经有了，`_new_imported_session` 内部 flush 过）。原始答卷一条都不删。
+
+#### 一道把「正在作答」挡在外面的门
+
+`CONFLICT_IN_SYSTEM_IN_PROGRESS`：学生**正在答**这一场时，外部结果不能顶掉它——判据在
+匹配那一层（那一行带着这个 `conflict_code` 出现），出路与其余几档不同（「等他自己交完再
+来」）。它与 `create_or_get_session` 的 409 一起，让「`USE_EXTERNAL` 之后学生再点开始
+作答」这条路径**不可达**：那道门挡在前面，而学生已经交卷时界面上本来就是「已完成」，
+走不到那个按钮。**这不是缺陷，是两道门各管一段。**
+
+#### `PATCH /assessment-import-rows/{row_id}/resolve`：它一行测评记录都不写
+
+（管理员 + 心理老师。）它只改行上那三个处置字段（`resolution` / `age_resolution` /
+`conflict_resolution`）——真正的落库仍然全部发生在 `commit` 那一刻，理由与预览那一层
+逐字相同：**一个动作在它真的发生之前，库里不该出现它的后果**。
+
+- `resource_type` 是一个**新码 `ASSESSMENT_IMPORT_ROW`**，而它**没有中文映射**——审计页
+  那一列本来就裸渲染（缺口 7），这是知情的代价。用 `ASSESSMENT_TASK` 的话 `resource_id`
+  只能是任务 id，而一场任务下有几百行，那一条轨迹答不上「动的是哪一行」。
+- 审计 `action="处置导入记录"`，`detail` 记 `batch` / `row` / `match_status` 与三个处置值
+  （写 `NONE` 而不是留空——**留空与「没问过」分不开**，§24）。记的是**处置完之后**的
+  最终值，因为轨迹要回答的是「提交时会读到什么」。
+- **这一串 `detail` 今天只有数据库看得见**（`GET /audit-logs` 不发 `detail`，§8），所以
+  `KEEP_ONLINE` 与 `REJECT_EXTERNAL` 的差别在界面上是零——想让它可查，要动的是那条
+  序列化，不是这一行。
+- 行不属于这所学校时回 404，判据与措辞与 `load_batch` 同一句（§24：「不属于你」与
+  「不存在」在响应上必须不可分辨）。
+
+#### `not_applied` 与 `resolved_rows`：两个新数，各按自己的判据
+
+- **`not_applied`**（返回体里的数，批次表上**没有对应的列**——那要一条 DDL）：四档里前两
+  档（`KEEP_ONLINE` / `REJECT_EXTERNAL`）**不建外部会话**，而这一行的
+  `processing_status` 因此既不是「新增」（`created` 数的是**建出来的场**）也不是「更新」
+  ——它填的是 `created + updated + skipped` 之外的第三块。这一档在 §18.8 的规格里没有
+  名字，所以它写在返回体与审计里，不落列。
+- **`resolved_rows` 按 `resolved_by` 数，不按 `row.resolution is not None`**（第 6 期修）。
+  理由：下面的循环会替**整批**选择补写 `row.resolution`，之后这两者在那一列上长得一模
+  一样——按它数会把整批动作数成人逐行看过的。`resolved_by` / `resolved_at` 只有
+  `resolve_import_row` 写，是这件事**唯一**的痕迹。它也是**冲突行能被数进去的唯一途径**：
+  冲突行的 `resolution` 至今仍是 `None`（四档写在 `conflict_resolution` 上）。
+
+#### 第四个计数 `conflict`：它挡下的是「必须回答一个管不着的问题」
+
+用户裁决「整批的『覆盖』对冲突行无效」之后，`batch_row_counts` 的三个数就不够用了：
+`MATCH_STATUSES_NEEDING_RESOLUTION` 里那三档，**两类动作**——`AGE_CONFLICT` /
+`DUPLICATE` 由整批那一次「覆盖 / 放弃」回答，`CONFLICT` 只能逐行选四档。而界面上那个
+单选项组和提交按钮的硬门槛，此前读的都是 `needing_resolution`（那三档的和）。后果是
+一条**只在冲突行上暴露**的死结：一批待确认**全是**冲突行时，操作员把每一行都处置好了，
+按钮仍然点不亮——它要他在两个屏幕上刚说过「管不着这些行」的选项里挑一个。
+
+所以 `batch_row_counts` 多返回一个 `conflict`（`counts.get(MATCH_CONFLICT, 0)`），
+**它是 `needing_resolution` 的一个子项，不是并列的第四档**，界面用那个差额：
+
+| 数 | 谁在读 | 用途 |
+|---|---|---|
+| `needing_resolution` | 面板标题「有 N 条记录需要确认」 | 那几条确实还需要他做点事 |
+| `needing_resolution - conflict` | 两个单选项的显示条件、提交按钮的置灰、`commitAssessments` 的前置判据 | **整批那一次选择管得着的行数** |
+
+`assessmentBatchResolutionRows`（`useDataImport.ts`）就是那个差额，一处算出、三处读
+——这仍然是 §11 那条「指标卡上的数必须与它点进去的那个列表同源」：屏幕上的选项与它
+能管到的行必须同源。
+
+**冲突行那一道门不在前端**，这是刻意的：前端从 `row_counts` 看不出「那几行逐行处置过
+没有」，而拿看得见的 200 行去猜就是一条会漏的守卫（`hasVisibleAgeConflict` 的注释记着
+同一个边界）。所以未逐行处置就提交 → 服务端 422 并**指名是哪几行**
+（`_conflict_row_is_decided`）——这正是用户裁决里选的那条路。
+
+面板的话**跟着这个差额分岔**（同一处 `v-if` 的两支）：有整批管辖的行时，小字说那几条
+「**不在**这两个选项管得着的范围里」；只有冲突行时，单选项根本不摆出来，小字改说
+「这一批要确认的**全是**这一类，所以上面没有覆盖 / 放弃可选」。**不跟着分岔的那一版
+会把「这两个选项」指到一组不存在的控件上**——与 §14 那条「一次失败的读取不许留下上一次
+的答案」是同一类：留下的那句话会一直回答用户的问题。
+
+**守卫只有后端那一侧**（`test_import_conflict_resolution.py` 的 182 行与
+`test_assessment_import_api.py:2013` 逐字断言 `conflict`），前端这三处是**零覆盖**——
+理由与四档中文那张表逐字相同（下一节）：`CONFLICT` 在 e2e 里不可达。变异验证因此只做
+后端那一半：把 `counts.get(MATCH_CONFLICT, 0)` 改成 `0`，`test_import_conflict_resolution.py`
++ `test_assessment_import_api.py` **10 failed / 78 passed**——预期的那两条
+（`test_keep_online_leaves_the_students_own_sheet_alone` 与
+`test_a_row_that_collides_with_an_online_sheet_needs_a_decision`）都在里面，
+另外 8 条红的走的是那个文件里**共用的断言 helper**（同一处 `row_counts` 字面量）。
+**把前端那三处退回 `needing_resolution` 不会红**，而这条要记在这里，免得下次把它读成
+「守卫还在」。
+
+```ts
+// useDataImport.ts（`conflict` 是 `needing_resolution` 的子集）
+const assessmentBatchResolutionRows = computed(() => {
+  const counts = assessmentRowCounts.value
+  if (!counts) return 0
+  return counts.needing_resolution - counts.conflict
+})
+```
+
+#### 前端：两张表、一个「第三个问题」，以及 e2e 里做不到的那一半
+
+`labels.ts` 加了 `CONFLICT_RESOLUTION_LABELS`（四档中文）+ `conflictResolutionLabel`，
+`IMPORT_ROW_STATUS_LABELS` 多了一个 `NOT_APPLIED`（「未落成测评」，
+`importRowStatusTone` 把它与 `SKIPPED` 一起归灰）。`api.ts` 的逐行处置载荷因此有**三个
+并列**的处置字段：`resolution` / `ageResolution` / `conflictResolution`——它们是三个
+问题，不是一个问题的三个值。
+
+唯一的渲染点是 `/counselor/data` 明细弹层「处置」列里**冲突行专属的那一支**——非冲突行
+渲染的是年龄处置。那一格有**两副面孔**，判据是这一批提交了没有：
+
+- **预览中**（`DataCenterPage.vue:1008`）：四档渲染成一组**单选**
+  （`v-for` 遍历 `CONFLICT_RESOLUTION_LABELS`，所以**表里的键序就是屏幕上的选项次序**），
+  外加一个「或者：这一行不要了」（那一档写的是 `resolution=skip`，与四档各写各的字段，
+  两个单选组互不干扰）。选项文字本身就是**影响说明**——「系统内那一场作废保留，
+  不删除」这句话写在 `USE_EXTERNAL` 的标签里，不另做一块预览面板。
+- **已提交**（`:989`）：渲染成文字而不是控件，读的是既成事实。**这一支也是第二面唯一
+  扫得到这几张表的地方**：单选按钮的 `value` 不进 `innerText`，只渲染控件的话第二面在这
+  两张表上就是空的。
+
+`IN_SYSTEM_IN_PROGRESS` 那一行多两块东西，而它们与后端那道门**逐字同源**：打头那句问题
+分岔成「正在作答（还没交卷）」与「已经交过卷」，`USE_EXTERNAL` 那个单选**被禁用**，
+下面紧跟一句灰字说得出为什么（「作废它等于把他正在做的事扔掉。等他交卷之后再导入，
+或者选下面的『这一行不要了』」）。**灰掉的按钮必须说得出为什么**，与 §17 那条
+「空态是一句关于数据的话」同一族。
+
+**四档与 `NOT_APPLIED` 进 `UNTRANSLATED_CODES`，而它们在 e2e 里是零覆盖，这是有意的
+取舍**——与 §26 的 `AGE_RESOLUTION_LABELS` / `OUT_OF_SCOPE_REASON_LABELS` 逐字同源：
+来源冲突的前提是这一行**匹配上了某个学生**（`IN_SYSTEM_RESULT` 还要那名学生在本场有在线
+答卷），而演示名册的班级叫 `1班`、文件那一列按学校编号规则必须写 `704`，匹配这一步永远
+走不到「找人」，所以 `CONFLICT` / `IN_SYSTEM_RESULT` 在 e2e 里**不可达**。要靠 e2e 覆盖
+它，得先让演示名册长出一个叫 `704` 的班，而那会改动共享演示库的名册（跑 e2e 不许改掉
+数据），代价比它换来的那点保护大。后端那一侧是钉住的
+（`test_import_conflict_resolution.py` 十条）。`overwrite` 仍然不列进那份清单（理由见 §26
+那一段），而这三档是 `SCREAMING_SNAKE` 的码，在别的文案里出现的可能性极低。
+
+#### 跑数
+
+`make test` 630 → **640 passed / 0 failed / 318.05s**（新增
+`test_import_conflict_resolution.py` 十条）；`make e2e` **119 passed (36.0s)**——本期只
+加了清单项、没加用例，所以 e2e 数与阶段 5 持平。
+
+**这一期第一次跑 e2e 报了 4 failed，而根因与代码无关**：库停在 `0016`，缺
+`conflict_resolution` 列，于是预览接口撞 MySQL 1054 回 500，界面上表现为导入那一块整片
+不渲染。`make migrate` 升到 0018（35 张表 / 8151 行，**逐表一行不差**）之后 119 passed。
+**这与 §20 那类「代码与库版本分岔，而症状看起来像功能坏了」同源**——开发库每加一条迁移
+都要跟着升，而它看起来只是「这条功能坏了」。
+
+### 28. V1.2 阶段 7：档案病例、乐观锁与两处 500（2026-09-19）
+
+对齐阶段给 `student_care_case` 加了 `case_version` / `closed_by` / `reopened_by` /
+`reopen_reason`、给 `care_case_event` 建了表、给 `manual_review` 加了
+`care_case_id` / `student_id` 与复合外键 `manual_review_fk_case_student`——**而它们一个
+都没有写入方**（缺口 9 点名了其中三条）。这一期把这批列接上，顺带修掉两条已知会 500 的路径。
+
+**零 DDL。** 本期一个字都没改表结构，产出全部是「写入方与读者」——与第 5 / 6 期同一条：
+对齐阶段铺的路，功能层一期一期接。
+
+#### `care_case_event` 是这份档案的**病历**，`audit_log` 是系统级轨迹
+
+同一次操作产生两条，而它们回答的问题不同：审计回答「谁在什么时候调了哪个接口」，
+事件回答「**这份档案经历了什么**」。读者、保留期、权限都不同。
+
+八个码，判据只有一句：**这个动作改变了这份档案的 `status` 或 `owner_id`（或者它是这条
+生命的起点）。** 按这条，家庭回访与复测**也记**——它们会把状态推回 `FOLLOWING` /
+`OBSERVING`，看起来像「只是加了一条记录」，实际改的是档案自己的状态。
+
+| 码 | 写在哪 |
+|---|---|
+| `CASE_OPENED` 开档 | `assessment_service.open_or_reuse_care_case`（**系统自动开**：`operator_id` 为 NULL，时间线上显示「系统」） |
+| `MANUAL_REVIEWED` / `FOLLOW_UP_ADDED` / `FAMILY_CONTACT_ADDED` / `RETEST_PLANNED` | 四个写入入口，各自写在 `db.flush()` 之后 |
+| `CASE_CLOSED` / `CASE_REOPENED` | `close_case` / `reopen_case` |
+| `OWNER_ASSIGNED` 转派 | `batch_assign_owner`——**唯一一条 `from_status` 与 `to_status` 都为空的事件**（它不改状态、只改归属，`reason` 里写着新负责人的名字，时间线上那一行于是不渲染状态迁移） |
+
+**`services/care_events.py` 为什么是一个独立模块**（而不是 `care_service` 里的几个函数）：
+`care_service` 已经 import 了 `assessment_service`，而开档那一条写在
+`assessment_service.open_or_reuse_care_case` 里——助手放在 `care_service` 就会让
+`assessment_service` 反过来 import 它，那是一个循环导入。所以那个模块只依赖 `models`。
+（`assessment_service` 里那两行仍是**局部 import**，理由是让「谁依赖谁」在这一行上看得见，
+不必读三个文件才能确认。）
+
+四条容易写错的：
+
+- **时间线按 `id.desc()` 排，不按 `created_at`。** `now_utc_naive()` 截断到整秒（§20 那条
+  生产改动的另一面），所以「交卷 → 开档 → 复核」这种同一秒内发生的事时间戳并列，按时间排
+  与按 id 排会给出两个次序。
+- **`reason` 是 `String(255)`，写入方自己截断**（`REASON_COLUMN_LIMIT`）。各调用方递进来的
+  长度不一（`record_type` / `channel` 是 64 字的枚举码、`close_reason` 128 字、重开原因
+  允许 5000 字），不截断时 MySQL 严格模式回的是 `1406 Data too long for column 'reason'`
+  ——离「事件里那句话太长了」隔着一个列名。截断只影响这个**摘要**格，原文留在原来那张表
+  自己那一列上。这与 §18 那条「写入方与读取方对『空』的理解必须由写入方保证」是同一条，
+  只是这一处管的是「超长」。
+- **`close_note` 不进事件**：它是关档人写下的判断，家在 `student_care_case.close_note` 上
+  （详情页直接渲染它）。事件是「发生了什么」，不是它的副本。
+- **家庭回访正文也不进**（§16.6 点名的四类不得留存内容里有它）：它留在
+  `family_contact_record.confirmed_facts` 上，那一行才是它的家。`confirmed_facts` 这一列
+  （DDL 里就有的 `Text`）记的是**复核与跟进**的事实记录——时间线上只写「人工复核 · 张三 ·
+  09-19」而下面没有一行事实，这条病历就只剩一串动词，读不出发生过什么。
+
+#### 乐观锁三件套，与那道 `_ensure_open`
+
+`care_service.py` 的前 135 行现在是三个函数，一处读、一处写、一处拒：
+
+| | 做什么 | 用在哪 |
+|---|---|---|
+| `_check_case_version(care_case, expected)` | 对不上 → 409，消息里同时说出「库里是哪个版本、你手上是哪个」 | 关闭 / 重新打开 / 转派（逐行） |
+| `_bump_case_version(care_case)` | `+1` | 上面三处，改完立刻 |
+| `_ensure_open(care_case)` | `status == "CLOSED"` → 409 | 复核 / 跟进 / 家庭回访 / 复测**四个入口** |
+
+**`case_version` 从这一期起不再是常量 1**（缺口 9 那一条关闭）。接口层的两个请求模型
+（`CloseCaseRequest` / `ReopenCaseRequest`）把 `case_version` 声明成**必填**——一个可选的
+乐观锁等于没有锁：客户端不传就永远不冲突，而它挡的正是「两个人拿着同一份页面各点一次」。
+批量转派是把 `{case_id: case_version}` 整批带进来、循环里逐行判，任一条陈旧就当场抛
+——抛出去时这一次请求的事务不会提交，所以**整批要么全做、要么全不做**。
+
+**`_ensure_open` 堵住的不只是 §16.4 那条规格要求（「关闭档案不可直接新增跟进，必须先重新
+打开」），它同时堵住了四个同类 500。** 那四个入口都会把 `status` 改成 `FOLLOWING` /
+`OBSERVING`，而对一条 CLOSED 档案这样做等于**隐式复活**它——`active_student_id` 生成列
+立刻非空，若这名学生已经又有一条在办档案（秋季关档、春季再开，§1），它当场撞
+`uq_care_case_one_active_per_student`，用户拿到一句英文的 500。那四个入口此前都没有查过
+状态（`git diff` 里能看见：删掉的行里没有任何一处判 `status`）。
+
+#### 两处已知的 500，两处确定的处置
+
+| 原本 | 处置 | 为什么不是另一种 |
+|---|---|---|
+| `reopen_case` **无条件**把 `status` 设成 `FOLLOWING`，学生已有在办档案时撞唯一键 → 500 | **先查再改**：查该学生非 CLOSED 且不是本条的档案，有就 409，并把**编号说出来**（「这名学生已经有一条在办档案（编号 N）…」） | 这不是一个可以自动决定的问题（要不要把现在那条在办的关掉？那是另一件有代价的事），所以答案是把事实说清楚，让老师自己选。0014 的 precheck 把「迁移时库里已经有多份在办」挡在迁移之前，挡不住**迁移之后**这个动作 |
+| `open_or_reuse_care_case` 是一条无锁的读-然后-插入 | `begin_nested()` 包住插入 + 捕获 `IntegrityError` 后**重查一次** | 选它而不是 `SELECT … FOR UPDATE`：这里**根本没有行可锁**，锁的前提是那一行已经存在，而这条路要处理的恰恰是「不存在、于是两个人一起插」；`FOR UPDATE` 在没有行匹配时锁的是间隙，能不能挡住第二个插入取决于隔离级别与索引，在这个项目里既没有先例也无法稳定复现。唯一键是数据库已经有的那个判据，代价只是撞上时多一次 SELECT |
+
+`begin_nested()` 那个 savepoint 是必须的：`IntegrityError` 会让**整个事务**进入失败状态，
+不套 savepoint 的话捕获之后连重查那条 SELECT 都发不出去。重查回来仍然为 `None` 时**重新
+抛出**——那说明不是这个原因（外键、或别的约束），别把它吞掉。
+
+**被 savepoint 回滚掉的那一次插入不会留下开档事件**（事件与档案在同一个 savepoint 里），
+所以正好只有一条 `CASE_OPENED` 落库。这一条没有单独的断言，它由
+`test_two_requests_that_both_find_no_case_still_leave_exactly_one`（用 `monkeypatch`
+把第一次查询变成"看不见"，逼出那条冲突路径）顺带钉住——那条用例断言的是「最终只有一条
+在办档案」，而事件数在同一个夹具里也能看。
+
+#### `closed_at` / `close_reason` / `close_note` **刻意不清**（2026-09-19 裁决）
+
+`reopen_case` 把它们留在原地，与 `reopened_at` 并存。这不是「状态不一致」：它们回答的是
+「**上一次是怎么关的**」，那是确实发生过的事。清掉等于抹掉一段历史——与 §1「关闭档案不得
+删除历史记录」是同一条。上一轮的关档说明、这一轮的重开原因、以及两者之间隔了多久，
+三条一起才读得出这条时序。（写这条时对照过 `close_case`：它同时写 `closed_by` 与
+`owner_id`，而「谁关的」在这两列上会各说各话——`owner_id` 是负责人、可能被转派走，
+`closed_by` 才是关档人。所以 `reopened_by` / `reopen_reason` 也一并加了写入方。）
+
+#### `manual_review.care_case_id` 有了非空写入方
+
+§16.4 那一条：新建记录的 `care_case_id` 必须非空。现在 `create_manual_review` 写它，
+**并且 `student_id` 取自档案而不是请求体**——复合外键 `manual_review_fk_case_student`
+断言这两列指向同一名学生，而让调用方各传一个就等于把那条约束的输入交给调用方，
+写错时数据库报的是一句英文（`1452`）。既然档案上就有那个人，就没有第二个输入。
+（缺口 9 里「`manual_review.care_case_id` / `student_id` 无写入方」这一条据此关闭一半——
+**历史行仍然是 NULL**，那批行是这一期之前写的，没有回填。）
+
+#### 前端：一条时间线、三个页面带上版本号
+
+- **个案详情新增「档案事件」时间线**（`CareCaseDetailPage.vue`）：药丸 + 操作人 + 状态迁移
+  + 事实记录。转派那一条两个状态都为空，那一行就不渲染（`v-if="event.to_status"`）。
+  码 → 中文走 `labels.ts` 的 `CARE_EVENT_LABELS` / `careEventLabel` / `careEventTone`
+  （§3 第一面），视图里不写中文。
+- **关闭 / 重新打开 / 转派三处都带上 `case_version`**：`CareCaseDetailPage.vue` 与
+  `CounselorWorkbenchPage.vue` 的关闭 / 重开取 `detail.value.case_version`，
+  `CasesPage.vue` 的批量转派取列表行上的 `c.case_version`（`api.ts` 的
+  `CareCaseItem.case_version` 为此从"只有详情页有"变成两处都有）。冲突时服务端 409 的
+  那句话直接落到 toast 上——「你手上的是 N，库里是 M」，而不是一个 500。
+
+#### e2e：`.pill` 那个定位器，与一次演示数据重建
+
+新增一条用例（`学生档案的档案事件页签`），它先问接口要一个**真有事件**的学生
+（`studentWithCaseEvents`），再点进页签扫像素。定位器收在 `.timeline-item .pill` 上而不是
+整条 `.timeline-item`：`hasText` 是**子串**匹配，而 `CASE_OPENED` 自己的 `reason` 就写着
+「系统自动开档」——按整条匹配时，一个把名字渲染成 `CASE_OPENED` 的坏实现**照样能命中**
+（它命中的是正文里那两个偶然出现的字）。这是「**先证明有东西可扫，再断言它干净**」那条
+教训的又一次发作——§测试注意里写着「给这个文件加用例时照办」，这一条是照办的样子。
+
+**顺带重建了演示数据，而这件事本身值得记。** 旧演示库的 `care_case_event` 是 **0 行**：
+那 12 份档案是**阶段 7 之前**种的，那时这张表还没有写入方；而 `make seed-demo` 的循环
+不会再推进它们（所有 risk_event 都已 `REVIEWED`，`if not pending: continue` 先挡住）。
+**正解是 `make purge-demo && make seed-demo`，不是给种子写一段「从既有记录反推时间线」的
+回填**——那等于替演示数据编一段历史，而全部事件的时间戳都会是「现在」，与全新种出来的
+效果一样却没有全新种的那份真实。重建后 `care_case_event` **43 行、七种码齐全**，
+`manual_review.care_case_id IS NULL` 从 11 行降到 **0**（顺带让演示数据也展示了这一期的
+写入方）。
+
+#### `seed_demo` 里新加的那一行：已关闭的档案不再往前走
+
+阶段 7 给四个写入入口加了 `_ensure_open` 之后，`seed_demo` 的档案闭环就有一个**真实可达**
+的崩溃点：那个循环遍历**全部**档案，而其中任何一条是 CLOSED、且它名下的风险事件还有
+`PENDING` 时，`create_manual_review` 会当场抛 `AppError: 这份关注档案已经关闭…`。
+**实测过**（不是推出来的）：把一份 `stage != 0` 的档案（position 1）置 CLOSED、把它名下的
+风险事件置 PENDING，`python -m app.db.seed_demo` 就以那个 409 收场——而这个脚本叫
+「可重复执行」，崩出来那句话与种子毫无关系。
+
+处置是循环里加一句 `if case.status == "CLOSED": continue`，**位置在转派之前**（那一块也是
+在「推进」这份档案，而关过的档案本来就有负责人），`summary["cases"]` 那个计数留在它**之上**
+——它数的是「库里有多少份档案」，不是「推进了几份」。加了之后同一个构造下 `EXIT=0`、
+`cases: 12` 不变；全新种出来的库上这一行**永不触发**（CLOSED 是在同一次循环里刚关的，
+而当次不会再回到它），所以逐字输出与从前一致。
+
+#### 跑数、守卫与变异验证
+
+`make test` 640 → **649 passed / 0 failed**（`test_care_api.py` +8、`test_status_vocabulary.py`
++1），`make e2e` 119 → **120 passed**（全量两遍：`120 passed (34.7s)` / `120 passed (27.1s)`）。
+
+后端 8 条新用例各自钉住一件事，三条值得单独记：
+
+| 用例 | 钉住什么 |
+|---|---|
+| `test_close_refuses_a_stale_version_and_changes_nothing` / `..._reopen_...` | 陈旧的版本号 → 409，且**什么都没改**（断言的是「改动没有发生」，不只是「返回了 409」） |
+| `test_batch_assign_refuses_the_whole_batch_if_any_version_is_stale` | 批量转派的整批语义 |
+| `test_reopening_an_old_case_that_has_a_newer_active_one_is_a_409_not_a_500` | 上面那条 500 的转化 |
+| `test_a_closed_case_refuses_every_new_record_until_it_is_reopened` | 四个入口逐个试一遍（关档后全 409，重开后又能写） |
+| `test_the_event_timeline_records_the_whole_lifecycle` | 一条档案走完开档 → 复核 → 跟进 → 回访 → 复测 → 关档 → 重开，断言的是**事件序列** |
+| `test_a_manual_review_is_attached_to_the_case_it_reviews` | `care_case_id` / `student_id` 非空且指向同一名学生 |
+| `test_two_requests_that_both_find_no_case_still_leave_exactly_one` | savepoint + 重查那条路 |
+
+`test_status_vocabulary.py` 新增 `CARE_EVENT_TYPES` 与
+`test_care_case_events_use_the_documented_vocabulary`（§3 第一面：后端发的八个码，
+`labels.ts` 必须认得）。
+
+**变异验证 4/4 全红，每条都 `cp -p` 备份、改完 `cmp` 逐字节还原**：
+
+| 变异 | 位置 | 结果 |
+|---|---|---|
+| M1 | `care_events.py` 的 `CASE_OPENED` 值改成 `CASE_CREATED` | `test_status_vocabulary.py` **1 failed**（`Extra items in the right set: 'CASE_OPENED'`） |
+| M2 | `open_or_reuse_care_case` 里整段去掉 `record_case_event(...)` 调用 | **1 failed**（只看「事件写没写进去」；第一稿把 `del` 追加在调用之后，语义上什么都不做、全绿——**是变异写错不是守卫失灵**，改成整段替换才红） |
+| M3 | `CareCaseDetailPage.vue` 的 `{{ careEventLabel(event.event_type) }}` → `{{ event.event_type }}` | 档案事件用例**红**（`.pill` 里 filter '开档' 收到 0 个元素） |
+| M4 | `labels.ts` 的 `CARE_EVENT_LABELS` 删掉 `FOLLOW_UP_ADDED` 词条 | 用例**红**在 `leakedCodes` 那一行——证明清单那一半也有牙、且那一段真的被扫到 |
+
+**顺带修掉一处我自己埋下的脆弱判据**：`test_data_scope.py` 里两条载荷补了
+`case_version: 1`（关闭 / 重开现在必填版本号）。那不是"改松断言"，而是新接口形状的后果
+——它红的原因是「请求模型多了一个必填字段」，与它要钉的数据范围无关。
+
+### 29. V1.2 阶段 8：导出作业化与可撤销会话（2026-09-19）
+
+对齐阶段留下的**最后两张没有写入方的表**在这一期接上：`export_job`（§16.3）与
+`auth_session`（§16.5）。在此之前，导出是「一次点击直接吐字节」，登出是**纯粹的客户端
+动作**——被偷走的 token 照样用到过期。这一期把这两件事都变成**库里的事实**。
+
+**零 DDL。** 与第 5 / 6 / 7 期同一条：两张表都由 0013 建好了，本期产出全部是
+「写入方与读者」。
+
+`make test` 649 → **696 passed / 0 failed**，`make e2e` 120 → **122 passed**。
+
+#### 导出从「即时下载」变成一次**作业**：两跳
+
+`POST …/export` 现在只回**作业载荷**（`job_no` / 类型 / 用途 / 遮蔽等级 / 行数 / 有效期），
+字节一律从 `GET /export-jobs/{job_id}/download` 出去。§16.3 那三件事——文件短期有效、
+可撤销、能数被下载了几次——**每一件都要求下载经过一道门**，而「即时下载」那条路上
+根本没有可以拦的地方：字节在 `return` 那一刻已经在响应体里了。
+
+这一改动波及的是**测试的交通方式**，不是断言：`test_audit_export_api.py` 的
+`export_and_download(client, path, headers, json)` 是那个两跳的封装（建作业 → 取文件，
+**返回取文件那一步的响应**），现在有三个文件共用它。两处没跟着改的用例当场变红，
+症状各不相同，两处都值得记：
+
+- `test_data_scope.py::test_bulk_export_excludes_other_schools`：
+  `assert 'S001' in response.text` 撞上 `'{"success":true,"data":{"id":1,"job_no":…}'`
+  ——它断的是「这份文件里没有云海的人」，而拿到的是一段 JSON。
+- `test_assessment_import_api.py::test_the_export_source_column_names_the_sitting_…`：
+  `_csv_rows()` 把那段 JSON 当成 CSV 解，`StopIteration` 报在找 `S701` 的那一行。
+  **这个错的形状比上面那个更值得记**：报出来的是一句「找不到这个学生」，离真正的原因
+  （文件还没生成）隔着一整个接口。
+
+两处都只是换了交通方式，**CSV 内容断言一个字没改**——这不是把断言改松。
+
+#### `field_policy` 的来历：字段白名单不是一个开关，是**文件自己的表头**
+
+§16.3 要求「导出接口不得接受任意字段名」。落法不是「写一张允许列的清单，再拿请求体去
+比对」——那种写法有第二个定义（那张清单），而它与真正写出去的那些列漂移了不会有任何
+东西看得见。这里是从**产物**倒着写：
+
+```python
+field_policy={"columns": list(document.columns)}   # document 是那个 ExportDocument
+```
+
+`ExportDocument`（`services/export_document.py`，一个 frozen dataclass：`csv_text` /
+`columns` / `row_count`）是「这份文件里有哪些列」的**唯一定义**，由生成文件的那一处填。
+于是「请求体里带一个列名」这件事**在类型上就没有落点**——没有任何一行代码从 `payload`
+里读列名。这条约束是**构造上**成立的，不是靠一处判断守住的。
+
+它还有一个更实用的作用：`field_policy` 是**事后的**答案。三个月后有人问「那份文件里
+有没有学号」，读这一列就行，不必找到那个版本的程序、再读它的 `_task_completion_csv`。
+
+**`ExportDocument` 这个模块本身是为了断开一个循环 import**（`task_service` 要发文件、
+`export_service` 要问任务完成明细，谁先 import 谁就是一个环），与 `care_events.py`
+同一个形状。**`row_count` 不数表头那一行**——它在界面上是「导出 N 行」，把表头算进去
+会每一份都多一行。
+
+#### `mask_level` 单独一列，与 `purpose` 分开
+
+理由与 §8 那条缺口逐字同源：`purpose` 是**自由文本**，担不起任何机器判据；而
+「这份文件是不是实名的」恰恰是导出审计唯一要回答的问题。两条同样 action、同样
+`resource_type`、同样 `purpose` 的轨迹，遮蔽与实名在库里长得一模一样——所以
+`mask_level` 是它自己的列（`MASKED` / `IDENTIFIED`）。
+
+审计里也照写（`_export_detail` 把遮蔽模式拼进 `detail`），**但那一串 `detail` 今天只有
+数据库看得见**（`GET /audit-logs` 不发 `detail`，§8）——所以界面上那个「遮罩」列读的是
+`export_job.mask_level`，不是审计。这是 §8 那条缺口之外**新出现的一个读者**：导出这件事
+的遮蔽模式现在有一处界面读得出来了，因为它是作业行自己的一列，不是审计的一段文本。
+
+#### 状态是现算的：**撤销优先于过期**
+
+`effective_export_status(job, *, now=None)`，库里只写「撤销」这个**真实发生过的动作**
+（`status=REVOKED`）——「有没有过期」由 `expires_at` 与此刻比出来。与 §12 的
+`effective_task_status` 同一条：存下来的只是事实，推出来的是结论。
+
+所以一行会在**没有任何人碰它**的情况下自己从「可下载」变成「已过期」，而它那一行在库里
+一个字都没动。判据次序是**撤销在前**：一份先被撤销、后又跨过有效期的文件，它的故事是
+「有人叫停了它」，而不是「它自己到期了」——两个人做的事不能读成一个人没做。
+
+这条次序在 `labels.ts` 里也写着：`EXPORT_JOB_STATUS_LABELS` 的**键序 = 判据次序**，
+`EXPORT_JOB_STATUS_ORDER` 取它（§3 第四面里那张表的新一行），导出中心那一列的可排序
+声明用的是它。
+
+`PENDING` / `FAILED` 两个码**不在前端表里**：导出是同步的（作业行与文件在同一个请求里
+成型），所以它们在库里不可达——模型上有默认值是 DDL 对齐阶段的形状。**留着词条等于给一个
+永远不会出现的格子写中文**（§3 那条「表在 `labels.ts` 里而没人从那儿取也算没接上」的
+反面：给没有读者的码写词条同样是一种没接上）。
+
+#### 下载只有**本人**能取，管理员能列能撤但**不能下**
+
+这是本期唯一一处刻意的**不对称**，页面上也写着（`ExportCenterPage.vue` 顶上那段）：
+
+- 管理员能看**全部人**的作业台账、能替任何人撤销（数据外泄时那是一个紧急开关）；
+- 但他的 `STUDENT_PSYCH_DETAIL` 是 `NONE`（§4）——**一份实名名册不该经过他**。
+  受控导出不能成为绕过心理详情的旁路（§4 那条已经有了），所以下载那一列对他不出现。
+
+#### sha256 不匹配时回 **409**，不是「照样发」
+
+`_write_export_file` 的哈希是从**真正写出去的那一串字节**算的，不是把 CSV 文本再
+`encode()` 一遍另算一份（那样两处各算各的，漂移了看不出来）。下载时重算一遍磁盘上那份，
+对不上就拒绝——**宁可发不出去，也不要发一份说不清是不是当初那一份的文件**。
+
+#### 两个 `TODO_BUSINESS_CONFIRMATION`（在 `settings_service.DEFAULTS` 的 `export` 组）
+
+| 项 | 出厂值 | 为什么是这个值 |
+|---|---|---|
+| `job_ttl_hours` | `24` | §16.3 要求文件短期有效，而「短期」是多少没有业务答案。24 小时是一个能用的默认值，不是结论 |
+| `max_rows` | `0` | **0 = 不限**，不是「一个都不导」。**没有编一个截断数**：截断要自己说出来（§10），而这里连「多少算多」都没有依据。超出上限时**拒绝生成**而不是截断——§10 那条「截断只许影响显示，绝不许影响写入」的镜像 |
+
+#### §18.10 收口：应测口径的**分子与分母来自同一个集合**
+
+需求说明书那一句是「应测人数 = 任务目标人数 − 请假 − 免测 − 已排除」，而它在这期变成
+一个**谓词**（`models/assessment.py:344` 的 `expected_participation_predicate`）与三个数
+（`task_service.task_participation_counts`，:151）：
+
+| 键 | 数的是什么 |
+|---|---|
+| `total_targets` | 目标行数（发放 + 补发，**原始人数**） |
+| `excluded_targets` | 其中请假 / 免测 / 已排除的那些，**相减得到**，不是另数一遍 |
+| `expected_targets` | **应测人数** |
+| `completed_targets` | 应测名单里已完成的目标行 |
+| `completion_rate` | 有效完成率 = 上一行 ÷ 应测人数 |
+
+**这条谓词住在模型层，不住在 `task_service`**，理由与 `effective_session_predicate`
+逐字相同：完成明细（按场）、`analytics_service` 与 `care_service` 的完成率都要用它，
+而这三处的 import 方向是**反的**（`assessment_service` 依赖 `task_service`）。一处定义、
+四处引用，漂一个不会有任何东西报错。
+
+**分子也用它，这是这条算式里最容易做错的一处。** 一个被标记为请假/免测的学生**即使后来
+还是答了卷**，也不进这一场的完成率——他不在应测名单里。按 `status` 数分子、按 `expected`
+数分母会给出一个**超过 100% 的完成率**，而那在屏幕上只是一个数字偏高。
+`test_task_participation.py::test_a_student_who_was_excused_stays_out_of_both_the_top_and_the_bottom`
+钉住它。这与「他答过」不冲突：那一行仍然是 `COMPLETED`，完成明细里照旧一行一人、照旧
+带着他的分（§1 的四层事实模型：**标记管理事实不修改原始答卷**）。
+
+四个码（`PARTICIPATION_REQUIRED` / `_LEAVE` / `_EXEMPT` / `_EXCLUDED`）在模型里，
+**三个减项的顺序就是算式的顺序**，`labels.ts` 的 `PARTICIPATION_DISPOSITION_LABELS`
+按同一序排。**「为什么拒绝参加」的理由码仍然没有定义**（§16.10 的
+`TODO_BUSINESS_CONFIRMATION`）：`disposition_reason` 收的是一句人写的说明，不是码——
+「用户裁决「编码是实现自由度」」只覆盖那三个减项，**把尚未定稿的词表编出来等于让一个
+没人认得的码开始落库**（§21 那条「认不出的当场报错、不猜默认值」的同一句话）。
+
+顺带记一处连带效果：`task_target_counts`（`effective_task_status` 的输入）**「应测」这
+两个字是这一期加的**。默认状态下**一个数都没变**（没人标记过时全是 `REQUIRED`，应测人数
+等于目标人数），所以唯一可见的变化是「把最后一个学生标记成请假，这场就结束了」——而那
+正是学校标记他时想要的结果。
+
+`task_completion`（:605）取有效会话走的是 `effective_session_predicate()`（§27）——
+被降级的那一场不再算作完成。
+
+#### 标记参与状态：`PATCH /assessment-tasks/{task_id}/targets/{target_id}/participation`
+
+**它一行答题事实都不动。** 目标行的 `status`、会话、答卷、结果一个不碰——「该不该参加」
+与「参没参加」是两个维度，标记为请假永远只是让这一行不进应测名单，不是「把他标成没完成」。
+
+| 判据 | 是什么 |
+|---|---|
+| 写权 | 心理老师（`ensure_task_writer`），**外加** `ensure_student_in_scope`——「他是心理老师」不说「他是**这名**学生的心理老师」，所以只带 CLASS 范围的老师改不动别人班上的行（§9 的第二个入口） |
+| 非 `REQUIRED` | **必须给原因**（`disposition_reason`，String(128)），`REQUIRED` 不给 |
+| 恢复 `REQUIRED` | 等于取消标记：原因一起清掉；`marked_by` / `marked_at` **两个方向都写**——它们回答的是「谁最后动了这一行」 |
+| 行不属于这场任务 | 404，判据与措辞与「不存在」同一句（§24：「不属于你」与「不存在」在响应上必须不可分辨） |
+| 被范围拒绝 | **不写审计**（§9：给一次被拒的写入记上「标记参与状态」，会让访问轨迹反过来撒谎） |
+
+审计的动作码是「**标记参与状态**」，`detail` 记 `目标 {id} · {旧} → {新} · 原因={原文}`
+——**留原文而不是只记新值**：只记新值的话，「从请假改回应测」那一条与「本来就是应测」
+在轨迹上长得一样（`NONE` 而不是留空，§24 那条「留空与没问过分不开」）。审计由**路由**
+写（服务层不碰审计是全库一致的形状），并且带 `student_id`——那一列让这一次标记出现在这名
+学生的敏感访问记录里。
+
+`GET …/participation` 返回上面那五个数**加一个不在表里的** `unimported_records`
+（任务外 / 重复 / 未匹配 / 冲突的导入记录数）。规格那句话的后半截是「它们不进入任务完成
+率」——而它们本来就住在 `assessment_import_row` 上、**从来不在目标行里**，所以那半句是
+**构造上成立的**。单独数出来给读者看，是因为「这场任务有多少行没进来」是一句学校要问的
+话，而它不属于上面那五个数中的任何一个（混进去会让分母变成一个说不清的东西）。
+
+`excluded_targets` **不拆成请假 / 免测 / 已排除三列**：那要先有 §16.10 那套理由码表，
+而今天落库的是一句人写的原因（逐行明细里逐条列着）。**从自由文本反推分类是猜。**
+
+`scope` 是可选的读者范围谓词，**同时套在分子与分母上**——「应测」与「已完成」必须来自
+同一个集合。这一整块是**统计**，与 `task_target_counts` 那条「状态口径是整场任务」不同
+（§12：状态是任务自身的属性，完成率跟读者的范围走）。一个数也不套范围的情形只有一种：
+`effective_task_status` 问「这场还能不能开新卷子」，拿的是不带 `scope` 的那一份。
+
+#### 两份任务级明细清单的导出：**三道门槛**，与 §22 那条是同一个形状的镜像
+
+`POST /assessment-tasks/{task_id}/non-participants/export`（§18.11 第九个端点）与
+`POST /assessment-tasks/{task_id}/unmatched-import-rows/export`（第十个，2026-09-20 补）
+逐行印出学号与姓名，那是**组织与账号**那一档的数据；它们又是任务内部的；而导出的遮蔽
+等级是 `MASK_LEVEL_IDENTIFIED`（实名）。所以三道依赖各管一段：
+
+`require_role(*TASK_READERS)`（任务读者）+ `ControlledExporter`（受控导出）+
+`DetailExporter`（`STUDENT_PSYCH_DETAIL: {SCOPED}`）。
+
+少任何一道都能单独造出一个洞：少了第一道，一个不是任务读者的人拿到了任务的目标名册；
+少了第三道，`CONTROLLED_EXPORT: PROGRESS_SUMMARY` 的德育领导能导出一份**实名**名单
+——而他在 `/students` 上连按行姓名都拿不到（§4 那条的第二次发作）。这个组合那些
+逐角色的用例**构造不出来**（默认矩阵里 Leader 本来就缺心理详情、Admin 本来就缺任务读者），
+所以 `test_permissions.py::test_revoking_psych_detail_also_blocks_the_two_task_detail_exports`
+专门把 `STUDENT_PSYCH_DETAIL` 降成 `NONE` 再各导一次，**两个端点都验**——只验一个的话，
+另一个上通着的那条旁路没有任何东西看得见。
+
+**★ 那道第三门槛 2026-09-20 从 `ensure_non_participant_exporter` 改名为
+`ensure_detail_exporter`。** 第十个端点要的是**同一对判据**，而照旧名字复用会让「未匹配行
+导出」去调一个叫 `non_participant` 的函数——名字开始撒谎，而下一个人会照着它再写一份
+「给未匹配行用的」版本（那正是「同一处只许有一个定义」反复记着的形状）。改名只碰调用点
+与测试里的引用，判据本身一个字没动。
+
+两个端点都只有 `POST` 一个动词（导出是**一次作业**，不是一次读取，§16.3 那三件事都要求它
+落一行到 `export_job` 上）——而它们各自的**读**法在 `GET …/participation`、第三页签
+「未匹配行」与数据中心那个明细弹层上，那几处不生成文件。
+
+**两份文件与它们各自的屏幕逐字相同，而「相同」是构造出来的**：都用同一个函数取数
+（`unmatched_rows_csv` 与 `list_unmatched_import_rows` 共用 `_unmatched_row_conditions`）、
+同一张中文表（`unmatched_reason_label`，**不是** `match_status_label`——这一屏的 `MATCHED`
+读作「已匹配但被放弃」）、同一个次序（批次从新到旧、批内按行号）、服务端早就拼好的那一句
+`message` 也照抄不另拼。
+
+**★ 第十个端点刻意不封顶。** `list_unmatched_import_rows` 有 `UNMATCHED_ROW_LIMIT = 200`，
+`unmatched_rows_csv` **没有 `limit` 参数**——不是忘了传，是它不该有。那 200 是给眼睛的
+（屏幕上翻页有出路），而一份被截断的文件**没有任何东西看得出来**：收到的人会以为「这场
+任务就只有这 200 行没进来」，而屏幕上此刻正写着「整场共 N 行没进得去」（那个数是整场地
+数出来的）。§10 那句「**截断只许影响「显示」，绝不许影响「写入」**」在导出这一侧就是
+这一条。守卫是 `test_the_unmatched_export_is_not_capped_even_though_the_screen_is`：
+造 `UNMATCHED_ROW_LIMIT + 1` 行，**两个数一起断**（文件 201 行**且**列表端点仍然只回 200）
+——只断文件行数的话，一个把 200 条样本拿去写文件的实现也过。
+
+**`field_policy` 那一列照旧是产物倒着写的**（`list(document.columns)`），所以七列表头
+来自 `UNMATCHED_ROW_COLUMNS` 这一处定义，请求体里没有列名的落点（§16.3）。
+
+#### 会话：`jti` + **每一个请求**都查一次
+
+`auth_session` 此前只有写入方（登录时插一行），**没有任何读者**。现在：
+token 里带 `jti`，`get_auth_context` 用**一条 SELECT** 把 `UserAccount` 与 `AuthSession`
+按 `id` / `jti` / `session_token_hash` 一起 join 出来，逐条判：
+
+| 情况 | 回什么 |
+|---|---|
+| token 里没有 `jti` | 401「请先登录」——**历史令牌全部失效是有意的**（与 §22 那条「`tested_at` 刻意不回填」同一个道理：给一个不带会话标识的令牌放行，等于让「登出」这件事对**已经发出去的那些**令牌永远无效） |
+| 查不到那一行 | 401「登录状态已失效，请重新登录」 |
+| 账号 `active` 为假 | 「账号已停用，请联系管理员」 |
+| `revoked_at` 非空 | 「登录状态已被撤销，请重新登录」 |
+| 过期 | 「登录状态已过期，请重新登录」 |
+
+**四句话必须分得开**，因为它们导向的动作不同：停用要找管理员、撤销是**有人做了决定**、
+过期只是放太久了。合成一句「登录失效」会让用户做错事（去重打密码，而问题在别处）——
+与 §2 那条「服务端答了话」是同一条。
+
+**选「每个请求都查」而不是「只在敏感接口查」**：后者要维护一张「哪些接口算敏感」的清单，
+而那张清单**漏一项是静默的**——被撤销的 token 在那个接口上照样能用，没有任何东西会报错。
+一次主键 join 换掉一整类静默失败，值得。（它与 `get_current_user` 早就在每个请求查一次
+`active` 是同一条思路，见 §4 那条「停用 ≠ 删除」。）
+
+#### `logout` 现在真的撤销了，动作码一个字没改
+
+`POST /auth/logout` 调 `revoke_session(db, session, "用户主动退出")`。此前它只写一条审计
+——「强制下线」这件事根本做不到。**码仍然是「退出」**：审计是已经落库的历史，用户在
+审计页按眼睛看到的名字搜（§3 那条教训的第五次位置）。
+
+撤销的三条路各有各的范围，这个差别是有意的：
+
+| 动作 | 撤销哪些 | 为什么 |
+|---|---|---|
+| `logout` | 当前这一条 | 就是这个意思 |
+| `change-password`（本人） | **其它**所有，当前留着 | 改密码本身就是在说「我怀疑别人拿到了我的密码」，所以别处的会话等于没改；但把用户自己也登出会让他以为改失败了（他手上那份 token 下一个请求才开始被拒） |
+| `admin_reset_password` | **全部**，含他此刻正在用的那一条 | 管理员重置的是别人的密码，那个人手上所有 token 都该立刻失效 |
+
+「退出其它所有设备」（`POST /auth/sessions/revoke-others`）也留着当前这一条，
+同一个理由。**撤销自己的当前设备回 422 并指出出路**（「要退出，请用右上角的「退出」」）
+——不是「不行」，是「你要的那件事在别处」：点了撤销而页面看样子还好好的，是最难理解的
+那种失败。
+
+`sessions/{session_id}/revoke` 对「不是你的」与「不存在」回**同一句话同一个码**（§24：
+**「不属于你」与「不存在」在响应上必须不可分辨**）。
+
+**两条路由的声明次序不能换**：`/sessions/revoke-others` 必须排在
+`/sessions/{session_id}/revoke` 前面，否则 FastAPI 先把 `revoke-others` 当成一个
+`session_id` 去转 int，回 422 而不是执行到那个端点。
+
+#### `admin_reset_password`：三件事都是 §16.5 逐字要求的
+
+- **强制改密**（`must_change_password`）：临时密码是管理员口头/短信给的，只该活一次登录；
+- **旧会话全部撤销**（含那个人此刻正在用的）；
+- **不回传明文**：`reset_password` 从此返回 `None`，响应体里**没有** `temporary_password`。
+  此前那一版把它发回浏览器，而统一响应封装会把整份 payload 送出去——规格禁的是
+  「返回或记录明文密码」，那条正好两条都踩。
+
+`purpose` 是管理员填的**原因**，必填，进 `purpose` 那一列。审计记目标账号 / 原因 / 结果
+（`detail=f"账号 {user.account}；撤销登录会话 {revoked} 个；要求下次登录修改密码"`），
+**不记密码**（§16.6）。
+
+#### ★ 登录那一次 flush：MySQL 1213 死锁，以及「unit of work 不会替你排序」
+
+**这是本期最值钱的一条**，因为它是本项目第一次遇到「同一时刻两张表都要写、而它们之间的
+先后是硬要求」——而它报出来的是一句与业务毫无关系的英文。
+
+症状是**间歇的**：`POST /api/v1/auth/login` 偶尔 500，`pymysql.err.OperationalError (1213,
+'Deadlock found when trying to get lock; try restarting transaction')`。在 e2e 上表现得
+更像 UI 的毛病——`loginAs` 的 `waitForURL` 超时，而它看起来像前端路由坏了。
+
+成因两条叠加：
+
+1. `auth_session.user_id` 是指向 `user_account` 的外键，所以**子行的 INSERT 会拿父行的
+   共享锁**；而登录那一次 flush 里，父行自己还有一条 UPDATE（`last_login_at` /
+   `failed_attempts` / `locked_until` 那三处改动）。两个并发登录各自拿着对方要的那把锁，
+   就是完整的死锁环。
+2. **`AuthSession` 与 `UserAccount` 之间没有 `relationship()`**，所以 SQLAlchemy 的
+   unit of work **看不到依赖边**——它按 mapper 的**注册次序**决定先发哪一条，而
+   `AuthSession` 注册在 `UserAccount` 前面，于是 INSERT 每次都排在 UPDATE 前面。
+
+**实测（探针，独立跑三遍，结果一致）**：去掉 `authenticate` 里那一行 `db.flush()`，
+SQLAlchemy **每次都**先发 INSERT 再发 UPDATE。处置就是把那条次序由书写者钉死：
+
+```python
+db.flush()          # 父行的 UPDATE 必须先出去——理由见上面那一长段注释
+```
+
+守卫是 `test_auth_sessions.py::test_the_parent_row_is_updated_before_the_session_row_is_inserted`
+——它挂 `before_cursor_execute` 把这一次 flush 发出的语句记下来，**先断言两条都真的发出去
+了**（只写后半句的话，一个「两条一条都没发」的实现也能过），再断言 UPDATE 在 INSERT 之前。
+
+**这一条要往两处推广，而第二处今天没有守卫**：`reset_password` 与 `change_password`
+里各有一行同样目的的 flush，理由相同（下面各写了一条子行）。**它们今天恰好是对的，
+靠的是注册次序**——而那正是这次踩到的东西。`reset_password` 的注释里明写了这一点
+（「它**没有守卫**」）：哪天有人给 `UserAccount` 与 `AuthSession` 之间加上
+`relationship()`，unit of work 就会按依赖边自己排对，这两行 flush 变成多余的；
+而在那之前，谁调整了 mapper 的注册次序，谁就把它们改坏了而没有任何东西会红。
+
+**可复用的那条**：**「两次写入之间有先后要求时，顺序要由书写者保证，不能指望 unit of
+work」**——尤其当两张表之间**没有** `relationship()` 的时候，因为它连「看得见的依赖」都
+没有。
+
+#### 前端：导出中心 + 登录设备弹层
+
+- **`ExportCenterPage.vue`**（`/counselor/exports` 与 `/admin/exports` 共用一个组件，
+  与 `TasksPage` / `AuditPage` 那几个同形）。管理员与心理老师的差别只有一处
+  （下载那一列对他不出现），而那处差别**写在页面上**，不靠用户自己发现——§9 那条
+  「口径要写进界面」。
+  - 「有效期」那一格**按状态分岔**：可下载的写它什么时候到期，已过期的写它什么时候
+    过期的，已撤销的写它什么时候被撤销的。同一格三句话，因为读者要做的判断不同。
+  - 「能不能下载」读的是服务端算的 `downloadable`，**不由这里的状态推**——一处判据
+    （`_is_downloadable` 同时给列表的旗标与下载端点），不可能两处各说各话。
+  - 「撤销」那个按钮只长在 `READY` 行上：那个动作**不可撤**（库里写的是事实）。
+  - 撤销原因**选填**是有意的：撤销是数据外泄时的紧急动作，那一刻多一个必填字段就是在
+    最不该拦人的地方拦人（这是「破坏性动作的默认值不能是破坏」的正面——**它不是破坏性
+    动作，它是止损**）。
+- **`SessionListDialog.vue`**（顶栏「登录设备」，与「修改密码」并排——这两件事在用户的
+  脑子里是同一类：都关于「我这一份登录」）。逐行印 IP 与浏览器，**只看得到自己的**：
+  管理员要踢人走的是「重置密码」那条路，那一次会撤销全部会话。
+
+#### 词表：五张新表，四个面各走一遍
+
+`labels.ts` 加了 `PARTICIPATION_DISPOSITION_LABELS`（应测 / 请假 / 免测 / 已排除）、
+`AUTH_SESSION_STATUS_LABELS`（活跃 / 已撤销 / 已过期）、`EXPORT_TYPE_LABELS`（**六种**——
+第五种「未参与名单」随第九个端点、第六种「未匹配行清单」随收口时补的第十个端点）、
+`MASK_LEVEL_LABELS`（姓名已遮蔽 / 实名）、`EXPORT_JOB_STATUS_LABELS`（可下载 / 已撤销 /
+已过期）+ `EXPORT_JOB_STATUS_ORDER`，以及 `participationLabel` / `participationTone` /
+`exportTypeLabel` / `maskLevelLabel` / `maskLevelTone` / `exportJobStatusLabel` /
+`exportJobStatusTone` / `sessionStatusLabel`。
+
+**五张表里只有 `EXPORT_JOB_STATUS_LABELS` 有 `*_ORDER`**，其余四张没有，各有各的理由，
+理由都写在它们各自的 docstring 里（§3 第四面：可排序的枚举列必须**显式声明**，而反向的
+「这张表为什么不做排序」也要写下来，否则下一个人会以为是漏了）：
+
+| 表 | 有 `*_ORDER` 吗 | 为什么 |
+|---|---|---|
+| `EXPORT_JOB_STATUS_LABELS` | **有** | 导出中心那一列 `sortable: true` + `order: EXPORT_JOB_STATUS_ORDER`；键序 = `effective_export_status` 的**判据次序** |
+| `PARTICIPATION_DISPOSITION_LABELS` | 没有 | 键序**就是算式次序**（后端 `PARTICIPATION_EXCLUDED_DISPOSITIONS` 按同一序排），但那一列不可排序（完成明细是普通 `<table>`）——**键序有意义 ≠ 需要 `*_ORDER`**，前者的读者是「算式」，后者才是 `DataTable` |
+| `AUTH_SESSION_STATUS_LABELS` | 没有 | 会话列表是普通 `<table>`（每个人手上就几台设备），没有 `Column.order` 的读者 |
+| `EXPORT_TYPE_LABELS` | 没有 | 那一列不做排序（有用的是状态与时间） |
+| `MASK_LEVEL_LABELS` | 没有 | 不做排序（两档分成两组看不出什么） |
+
+中文写成「姓名已遮蔽 / 实名」而不是「脱敏 / 不脱敏」：后者听起来是一个开关的两档，
+而这里要回答的是**这份文件里能不能认出人**。
+
+**第三面（服务端生成的导出文件）本期过了两张新镜像，而其中一张逼着守卫自己长了一截。**
+`MATCH_STATUS_LABELS` 与 `UNMATCHED_REASON_LABELS` 进 `export_labels.py`——第十个端点
+那份 CSV 的「匹配结论」列要按**未匹配行那一屏**的读法渲染（`MATCHED` 在那里是「已匹配但
+被放弃」，照原表渲染会在一份叫「没进得去」的文件里印出「已匹配」）。而它在 `labels.ts`
+里**不是一张字面量的表**：
+
+```ts
+export const UNMATCHED_REASON_LABELS: Record<string, string> = {
+  ...MATCH_STATUS_LABELS,          // ← 展开
+  MATCHED: '已匹配但被放弃'
+}
+```
+
+镜像测试的 `frontend_map()` 原来只做 `re.findall(r"([A-Z_]+):\s*'([^']*)'", …)`，
+**看不见展开**——它会把这张表读成只有一条，而后端那九条一比就红。所以给解析器加了
+展开合并（先递归取出 `...XXX`，再覆盖字面量键），MIRRORED_MAPS 加两行；后端那两张也
+用**同一个形状**写（`{**MATCH_STATUS_LABELS, "MATCHED": …}`），于是「两边各抄一遍中文」
+这件事根本没有发生——这正是这个文件存在的理由。
+
+**扩展守卫本身要有自证**：`test_the_spread_tables_are_actually_read_through` 就是那一条
+（展开解析不能是空转的），变异验证 ③ 摘掉展开解析时，红的正是它而不是别的用例。
+这与 §18 那条「变异验证的复原校验必须拿落盘的原始字节当基准」是同一个形状的两种：
+**一条新加的守卫，要先证明它真的在跑**。
+
+**而 `EXPORT_TYPE_LABELS` 自己 ③④ 都不适用**，两处都写在那张表的 docstring 里：
+`export_type` 是作业自己的类型、**不进任何 CSV**（那是「文件的列清单」，是另一件事），
+而导出中心那一列不做排序，所以它**没有 `*_ORDER`**。
+
+第二面（`e2e/vocabulary.spec.ts` 扫像素）本期加了两条用例，**两条都是先自己用接口造数据
+再扫**——理由与第 4 期那条逐字相同（`seed_demo` **不种**导出作业与会话，光靠 `auditPages`
+扫的是空表）：
+
+- **「顶栏的登录设备弹层」**：先用 `page.request.post('/api/v1/auth/login')` 开两条会话，
+  撤销其中一条（`doomed`），再 `loginAs` 走界面点进弹层，断言 `.session-row` 的第一条
+  可见**且**有一行「已撤销」——**两个色带都要有，否则一个只渲染「活跃」的实现也是绿的**，
+  最后 `leakedCodes(modal)` 为空。
+- **「导出中心的作业台账」**：用接口建一个作业，断言 `job_no` 匹配 `/^EXPORT-/`，
+  走界面断言那一行有「关注档案摘要 / 姓名已遮蔽 / 可下载」，再用接口撤销、重载页面、
+  断言变「已撤销」。
+
+**`PARTICIPATION_DISPOSITION_LABELS` 是为数不多「不需要新用例」的表**，因为它的渲染点
+（完成明细弹层「参与状态」那一列）**不条件渲染**——每一行都出一个药丸，演示数据里每一行
+都是 `REQUIRED`。所以本文件上面那条「测评任务的完成明细弹窗」用例已经扫得到它了
+（与 §3 里 `IN_SYSTEM` 在「全部学生」页签上的处境同形）。
+
+**两条新用例都不断言行数**（§测试注意那条）：`REVOKED` 那几行每跑一次 e2e 就多一行
+（`auth_session` 更甚——**每一次 `loginAs` 都插一行**，跑完一轮全量 e2e 之后那个表会多出
+一百多行）。写死数字会让这两条在某一天红在一个与功能无关的地方。
+
+**导出中心进 `auditPages` 的路径清单这件事本身要有一句记录，因为它是量出来的**：路径加进
+清单之后做变异验证（把三个 `xxxLabel(...)` 全换成裸字段），四条角色用例**全绿**——因为
+`export_job` 表此刻 0 行，`DataTable` 渲染的是空态那一行，一个格子都没有。**清单加成功了，
+覆盖仍然是零**。这与「先证明有东西可扫，再断言它干净」是同一句话，只是这次的「没有东西
+可扫」来自一张空表而不是一个没点开的页签。
+
+#### §17(c) 收口：三条一直没有守卫的验收，与它们各教了一件事
+
+那句话里列了五样，收口时逐条问了一遍「它的判据写在哪里」，三条已有、两条没有：
+
+| 验收 | 守卫 |
+|---|---|
+| 管理员重置密码后旧 Token 全部失效 | `test_auth_sessions.py::test_resetting_a_password_revokes_every_session_including_the_one_in_use` |
+| 撤销会话无法访问敏感接口 | `test_auth_sessions.py::test_logging_out_kills_the_token_immediately` |
+| 系统管理员没有心理数据查看权限 | `test_permissions.py:52`（一行断言） |
+| **查看原始答卷前必须填写查看原因** | **此前没有**——代码在 `students.py`，而用例只钉住了它的**下一句**（「范围外不写审计」） |
+| **审计详情不包含原始答卷和家庭回访正文** | **此前没有**——`test_audit_export_api.py` 那两条断言的是**导出文件**，不是**审计行** |
+
+现在收在 `test_sensitive_reads.py`（3 条）。第三条是把验收清单 §5 那句「德育领导查看学生
+档案时不返回重点题和访谈正文」一并落下来——它在实现上的形状是**整个端点不可达**，
+而原有的 `test_leader_is_denied_case_detail_under_defaults` 钉的是**列表**接口，
+验收句里点名的两个端点（个案详情、重点题）一个都没被点过。
+
+**这两条各教了一件事，都是「守卫看上去在，其实不在」的形状：**
+
+- **`audit_log` 上有两列叫得像同一件事，而它们是两个东西。** `detail`（`Text`）是审计
+  真正写的那一列；`detail_json` 是 V1.2 对齐时加的、**今天既没有写入方也没有读者**
+  （§27 记着它）。第一稿的判据写成 `row.detail_json is None`——那是一条**恒真**的断言
+  （一个永远是 NULL 的列，任何内容都进不去），所以**变异验证时它没红**才被发现。
+  这是「会无故变红的守卫很快会被人关掉」的镜像：**一条恒绿的守卫没人会发现，
+  它比没有更糟，因为它占着「这一条有人守」的位置**。
+- **`scope_allows` 是先拒 `NONE`、再看 `allow` 的**（`permissions.py:196`）。
+  所以「把 `NONE` 加进 `allow={...}`」**不是**一道能打开门的变异——没配这一档是一道
+  更早的硬拒。第一稿按这个变异，用例照绿；那时该怀疑的是**变异写错了**
+  （§28 的 M2 是同一条教训），不是守卫失灵。真正的变异只有一种：把那一档真的授给
+  德育领导（改 `CAPABILITY_DEFAULTS` 或插一行 `role_permission`），改完变红。
+
+三条的变异验证因此是 **4 次尝试 / 3 次成功**：M1（摘掉空原因那一判）、
+M2（让回访审计带上正文）、M3（真的把重点题授给德育领导）各红一次，
+另有一次是上面那条写错的变异。每一次都 `cp -p` 备份、`cmp` 逐字节还原。
+
+#### §20 十六条逐条落成用例（§7 第 4 条）
+
+需求说明书 §20 那十六条验收此前**一次都没有逐条对过**。这一期把它们逐条落到用例上，
+每条写「判据在哪个文件的哪条用例」——**这是一次清点，不是一次声称**：下面每一行都
+`grep` 过那个函数名。
+
+| # | 验收句 | 守卫 |
+|---|---|---|
+| 1 | 目标快照准确生成 | `test_task_targets.py::test_the_target_snapshot_is_written_column_by_column` |
+| 2 | 三批导入、重复学生不重复计数 | `test_assessment_import_api.py::test_imports_in_the_same_month_share_one_task_and_get_their_own_targets`（目标行一人一条、同月归一场任务）+ `test_task_participation.py::test_the_counts_split_the_target_list_into_expected_and_excluded` |
+| 3 | 无学号按校/年级/班级/姓名匹配 | `test_assessment_import_api.py::test_a_name_shared_by_two_classmates_needs_gender_and_age_to_resolve`（按性别与年龄定位到 S702，`match_confidence` = 0.9） |
+| 4 | 同名同班 → `AMBIGUOUS`，**不得自动导入** | 同上文件 `::test_two_classmates_that_gender_and_age_cannot_split_is_an_error`（`row_counts["error"] == 1`，且「覆盖」也写不进去） |
+| 5 | 年龄不一致显示差异、未确认不得覆盖 | `test_assessment_import_api.py:2531`（`AGE_CONFLICT` + `age_before` / `age_after` = 12 / 13） |
+| 6 | 覆盖后保留旧值/新值/操作人/批次/时间 | `age_before` / `age_after`（同上）、`resolved_by` / `resolved_at`（`test_assessment_import_api.py:2763`）；批次由行自己的 `batch_id` 带（`::test_the_batch_number_travels_with_each_row`） |
+| 7 | `NOT_FOUND`，**不能自动创建学生** | `test_assessment_import_api.py::test_a_missing_class_and_a_missing_student_are_reported_separately` + `:822` 那一组（名册行数前后不变） |
+| 8 | `OUT_OF_SCOPE` 不进完成率 | 行**根本不成目标行**（`assessment_target` 里没有它）+ `expected_participation_predicate()`（§29 那条算式） |
+| 9 | 补发确认后才新增目标行 | `test_task_targets.py::test_supplement_previews_first_and_only_writes_after_confirmation` |
+| 10 | 在线作答**进行中**不得被自动覆盖 | `test_import_conflict_resolution.py::test_an_in_progress_sheet_cannot_be_replaced_by_an_external_result` |
+| 11 | 已提交的在线答卷不得被**静默**覆盖 | 同上文件 `::test_a_submitted_sheet_is_never_silently_overwritten`（四档要人逐行选）+ `::test_the_batch_choice_never_reaches_a_conflict_row`（整批的「覆盖」管不着它） |
+| 12 | 只有汇总分数时不伪造 100 道原始答案 | `test_assessment_import_api.py:2351`（`AssessmentAnswer` 计数 == 0） |
+| 13 | 重复导入不产生重复会话/结果/风险事件 | `test_assessment_import_api.py::test_overwriting_replaces_the_previous_record_in_place`（sessions 仍是一条、维度仍 8 行、风险事件仍 1 条） |
+| 14 | 四类记录可**查询与导出** | 查询：`test_assessment_import_api.py::test_the_rows_that_did_not_get_in_are_listed_under_their_task`；**导出：本期的第十个端点**（`test_task_participation.py` 那四条） |
+| 15 | 完成率只统计**有效目标学生**和**有效结果** | 前半 `test_task_participation.py::test_a_student_who_was_excused_stays_out_of_both_the_top_and_the_bottom`；**后半不成立，见下** |
+| 16 | 导入 / 年龄覆盖 / 补发目标 / 冲突选择**均写入审计** | `导入测评记录`（`assessment_import.py:156`）、`更新学生年龄`（`test_assessment_import_api.py:697`）、`补发目标学生`（`test_task_targets.py:423`）、`处置导入记录`（`test_assessment_import_api.py:2775`） |
+
+**#15 的后半（有效结果）在汇总档上不成立，这不是漏了一条用例。** `_write_sheet` 对
+`EXTERNAL_SUMMARY` 早退、不写 `assessment_result`，所以那一场在按结果说话的页面上是
+空的——这是**缺口 10** 逐字记着的那件事，它的读者落在
+`assessment_target.effective_external_result_id` 上，而那一列今天**只有写入方**。
+指向缺口 10，不在这里另立一个说法。**接它之前不要顺手统一**：把汇总档塞进
+`assessment_result` 正是那句话禁止的「替未核验的外部结果担保」，会让一个未经核验的分数
+直接进关注率。
+
+**规模数字（1000 人 / 30+40+50 人）不落成夹具**，与 §测试注意那条「不要给账号表加精确
+行数断言」同源：那些数是规格在描述**形状**（快照一行一人、分母按人去重），而写死 1000
+只会让用例在演示数据变一次之后红在一个与功能无关的地方。所以上面每条钉的都是那个形状。
+
+#### 缺口 12：完成明细那两道门（2026-09-20，收口之后）
+
+收口那天清点 §20 十六条时撞出来的最后一条缺口，用户当天裁决「加一道门」。
+**零 DDL、零新端点**——只在既有两条路径上补门槛，加一处抽出来共用：
+
+| 改动 | 位置 |
+|---|---|
+| 判据抽出来（`STUDENT_PSYCH_DETAIL: {SCOPED}`） | `task_service.ensure_detail_reader`（`ensure_task_reader` 旁边） |
+| 读与导出共用一个数据层 | `task_completion` 开头两道：`ensure_task_reader` + `ensure_detail_reader` |
+| 导出那一侧改名并复用它 | `ensure_non_participant_exporter` → **`ensure_detail_exporter`**，函数体改成「`CONTROLLED_EXPORT` 一道 + `ensure_detail_reader` 一道」 |
+| 路由层别名 | `tasks.py` 的 `DetailExporter`（与 `ControlledExporter` 分开声明：前者三项导出共用，后者只有**建作业**那一侧要） |
+| 前端 | `TasksPage.vue` 的 `canReadDetail` 与三枚导出按钮的判据 |
+
+三点值得记：
+
+- **判据按问题取名，不按第一个调用者取名。** 第九个端点先落地时它叫
+  `ensure_non_participant_exporter`，第三个调用点（完成明细导出）一来，那个名字就开始
+  撒谎——而下一个要写「给未匹配行用的」版本的人正是照着名字找上来的。与 §22
+  `TASK_SCOPE` 那次、§「同一处只许有一个定义」是同一个形状。
+- **门槛放进 `task_completion` 的数据本身**，三个调用点自动全覆盖。只加在路由上会留下
+  「服务层还有一条路读得到」的形状，而这正是「两处各查一次、拆一处仍然全绿」那个陷阱的
+  另一面（§4 记着它：**别把「拆了一处仍然全绿」读成守卫失效**）。
+- **前端三枚导出按钮的判据从 `canWrite` 改成 `canReadDetail`，并补了一处漏掉的 `v-if`。**
+  「导出未参与名单」「导出未匹配行清单」此前按 `canWrite` 显示，而它们是**导出**不是**写**
+  ——`canWrite` 与 `canReadDetail` 今天恰好只有心理老师为真，所以这个错看不出来，但判据
+  按问题取名之后它们归位了。更要紧的是「导出CSV」（完成明细那一枚）**此前没有 `v-if`**、
+  只有 `:disabled`：门加上去之后它就成了领导手上的一枚**必然 403** 的按钮——缺口 12 说的是
+  「后端一条能力门槛都没有」，前端这一处是它的镜像面。
+  **`canReadDetail` 按 `role_code` 猜是一个已知代价**（`/auth/me` 不发 capabilities），
+  理由与边界写在那个 `computed` 的注释里：**后端那两道门是权威**（§4：前端隐藏不是安全
+  措施），它只负责不把用户带到一个必定失败的页签上。
+
+#### 跑数与守卫
+
+后端新增 `test_export_jobs.py`（17 条）、`test_auth_sessions.py`（13 条）、
+`test_task_participation.py`（**17 条**，其中 4 条是第十个端点的）与
+`test_sensitive_reads.py`（3 条），`make test` 649 → **707 passed / 0 failed /
+335.90s**；`make e2e` 120 → **122 passed (28.2s)**。
+
+**这两个是收口完成那一次的实测数。缺口 12 加门之后又实测了一次，是
+`make test` **708 passed / 0 failed / 400.39s**、`make e2e` **123 passed (34.5s)**——
+以这一组为准。** 多出来的三条用例是那一道门自己的：`test_permissions.py` 里那条提级用例
+（§上面那张表里 `test_the_completion_gate_is_a_capability_not_a_hardcoded_role`）、
+`test_task_roles.py` 里那条**改写**过的领导用例（它此前断的是「领导读得到完成明细」），
+以及 `e2e/app.spec.ts` 那条领导侧的弹层用例。**耗时那一项 335.90 → 400.39 秒差了 65 秒，
+而用例只多两条**——原因没有查（同一台机器上的其它负载、MySQL 当时的冷热都会影响它），
+所以那一列只当参考，别拿它比版本。
+
+这一节此前记的 699 是第十个端点刚落地那一次的数——**三个都真、只是时点不同**：收口期间
+又补过守卫（`test_permissions.py` 那条撤销用例、镜像测试的展开自证等）。而这条本身也是
+§19 那条教训的又一次：一个「看起来像设过、其实没人再测过」的数，光看它对不出来。
+**每次动完都重跑、按实测改，别照着上一版抄。**
+
+**另外记一次 e2e 的红，它不是这一期引入的、也没有修**：上面那次全量 e2e 的**第一遍**里
+`量表评分规则 › saving a published rule versions it rather than mutating in place` 也红了
+一次（同一遍里我自己那条新用例因为定位器撞上严格模式而红，是另一回事）。单独跑那一条
+**绿**，改完定位器重跑全量**123 passed 全绿**。所以它是一次没有复现的偶发，**没有查到
+原因**；写在这里是为了下一个人再撞上时知道它有过一次，而不是把它当成「已经修好了」。
+
+**第十个端点那 4 条里有一处夹具是被撞出来的**，值得记：`_csv_rows` 用 `csv.reader`
+而不是 `line.split(",")`——「说明」那一列里嵌着服务端拼的**自由文本**（含中文顿号与
+分号），按逗号切会把一行切成七八列而断言随后报「找不到第 7 列」。
+
+守卫里三条值得单独记：
+
+| 用例 | 钉住什么 |
+|---|---|
+| `test_the_parent_row_is_updated_before_the_session_row_is_inserted` | 上面那个 1213 死锁的形状（**先断言两条语句都发出去了**，再断言次序） |
+| 过期 / 撤销的下载必须失败 | 两种状态回**不同的** 410，措辞分开（§2 那条的另一处） |
+| sha256 对不上时拒绝发送（`Path(row.file_uri).unlink()` 之后） | 文件被人动过 / 被删掉时不发一份说不清来路的文件 |
+
+**变异验证**：把 `authenticate` 里那一行 `db.flush()` 摘掉 →
+`test_auth_sessions.py` **1 failed / 12 passed**（**恰好是那一条**），随后用 `cp -p` 的
+落盘备份 `cmp` 逐字节还原（§18 那条：变异验证的复原校验必须拿落盘的原始字节当基准，
+不能是内存里再编码一遍的字符串）。
+
+#### 本期留下的三处，记在缺口里
+
+1. **`var/exports/` 下的文件没有任何东西删。** `purge-demo` 会删 `export_job` 的**行**
+   （只删演示账号名下的那些），但**磁盘上那些文件留着**——而它们已经没有任何行指得着了。
+   生产上同理：过期是库里的结论，文件本身不会被回收。缺的是一个清理动作（按 `expires_at`
+   扫、删掉到期且已被撤销/过期的文件），而它需要一个「谁来跑」的答案（计划任务？启动时？），
+   所以没有顺手加。
+2. **e2e 每跑一次就往 `auth_session` 里加一百多行。** 每一次 `loginAs` 都登一次，
+   而登出不是每条用例都做。它们不影响任何断言（会话列表只列自己的、导出不读它），
+   但共享的开发库上这个表会单调增长。与「新建账号那条用例留下的临时账号」（§测试注意）
+   是同一类**已知且接受**的残留——区别是那个看得见、点得掉，而这个要去库里删。
+3. **`verification_status` 仍然没有读者**（缺口 11 未变）。阶段 8 没有碰它——四档处置
+   那一列的唯一读点还是审计的 `detail`，而那一串 `detail` 仍然只有数据库看得见。
+
 ## 已知缺口（动手前先看这里）
 
 1. **数据范围已在查询层生效，但有两处刻意的例外和一个口径盲点。**
@@ -1964,13 +4257,17 @@ VERSION_LABEL = "V" + ".".join(__version__.split(".")[:2]) # 显示串 → V1.0
      改一处要想着另一处。
    - **选填列（性别 / 年龄）文件里空着就跳过，不写 NULL**：「这一列我没填」与「把名册上
      这个数抹掉」是两件事，前者是常态（四列的老模板根本没有这两列）。
-   - **两个入口都要接**：`DataCenterPage.vue` 与 `OrganizationPage.vue` 各有一份学生导入。
-     只接一处的话，从另一个入口进来的管理员会拿到一句 422，而界面上没有能回答它的地方。
+   - ~~**两个入口都要接**：`DataCenterPage.vue` 与 `OrganizationPage.vue` 各有一份学生导入。~~
+     **2026-09-19 更正：只剩一个入口**（`OrganizationPage.vue`）。数据中心那一份是死代码
+     （§4：`v-if="isAdmin"` 与那一页的 `meta.role` 对不上，对任何角色都不显示），2026-09-17
+     已删。所以「从另一个入口进来的管理员拿到一句 422」这个形状**今天不成立**——但
+     「冲突必须有地方拍板」这条要求本身还在，只是它现在只有一个落点。新增第二个入口时
+     那条要求会立刻回来。
    审计的 `detail` 记 `resolution` 的**中文**（`student_resolution_label`）；`None`
    （文件里没有冲突）与「选了放弃」必须长得不一样，否则事后读轨迹的人会以为那次导入
    把冲突默认放行了。
-3. `make test` 用**内存 sqlite + ORM metadata 建表**（`tests/conftest.py`），**完全不跑 Alembic**。
-   模型与迁移漂移不会被测试发现。
+3. ~~`make test` 用**内存 sqlite + ORM metadata 建表**（`tests/conftest.py`），**完全不跑 Alembic**。
+   模型与迁移漂移不会被测试发现。~~ **2026-09-19 关闭**，见下面那一节。
 4. 前端**没有路由守卫**（`main.ts` 无 `beforeEach`）。角色门禁靠 `AppLayout.vue` 拿到 `/auth/me` 后
    比对 `meta.role`，不匹配就 `router.push('/login')`——越权访问表现为"被弹回登录页"。
 5. `docker-compose.yml` 的 MySQL 是 `root/root`，而 README 与 `core/config.py` 默认值是 `root/password`。
@@ -1987,6 +4284,14 @@ VERSION_LABEL = "V" + ".".join(__version__.split(".")[:2]) # 显示串 → V1.0
    2026-09-16 起 `DataCenterPage.vue` 的「近期数据任务」**不再打印** `resource_type`（那一格对导入行
    本来不承载信息，导出行有「查看记录」），所以那条链路上不再有裸编码；审计页保持原样，等这三件事
    一起做。
+   **2026-09-19 补：这一列现在成了全站唯一已知存在的裸枚举渲染**，而且它的成因比原来记的多一条。
+   起因是 `vocabulary.spec.ts` 报了一次假阳性（`/admin/audit → STUDENT`）：审计页只显示最新 20 行，
+   而 `app.spec.ts` 的学生导入用例确实写进 `resource_type=STUDENT` 的审计，两个文件又通过
+   `playwright.config.ts` 的 `fullyParallel` **并发**运行——于是红不红取决于那 20 行里此刻有没有
+   它。查审计表确认那一行就写在那次运行的时间窗里，**与代码无关**。处置是把 `STUDENT` 从
+   `UNTRANSLATED_CODES` 里移除（它在界面上没有别的渲染点，那条清单项是零覆盖，见 §24）。
+   所以这一处「不能顺手改」除了原来那条理由（改了中文，用户照着提示搜会搜不到），还多一条：
+   **它同时被另一个 spec 的数据写入牵着**，改它之前先想清楚那 20 行的守卫怎么办。
 8. **导入的测评记录（`source=IMPORTED`）按系统内作答同一口径判定，但仍会改统计口径。**
    2026-09-16 随「MHT测评记录导入」加：批次任务与导入会话都带 `source`（迁移 `0010_import_source`，
    默认 `IN_SYSTEM`）。下面这些**会**被改：
@@ -2051,6 +4356,195 @@ VERSION_LABEL = "V" + ".".join(__version__.split(".")[:2]) # 显示串 → V1.0
      在此之前两者都不存在，于是导入一批校外普查之后，被判「一般观察」、因而不会开档案的
      学生一个都查不到（用户报的：「我是刚刚导入了一个测评，但查不到这里的记录，比如张三」）。
 
+9. **「列有了、路还没通」这一类，对齐阶段留下的六条，其中五条已在功能层的第 1 / 2 / 7 期
+   关闭**（下面用删除线标出）。剩下的**一条**是**已知且接受**的，由用户定的范围划出来的，
+   不是漏掉的；它自己写着「为什么还不能改」。
+
+   - ~~**`care_service.reopen_case:521` 撞新的唯一键会给用户一个 500。**~~ **2026-09-19
+     第 7 期关闭**：它把 `status` 无条件设成 `FOLLOWING`，而 V1.2 起
+     `student_care_case` 上有 `uq_care_case_one_active_per_student`（生成列
+     `active_student_id` = 非 CLOSED 时的 `student_id`，否则 NULL）。一名学生**先关掉旧
+     档案、后来又有一条在办**，此时点「重新打开」那条旧档案，两次写入落在同一个
+     `active_student_id` 上 → `IntegrityError` → 500。这与 §1 记的「秋季关档、春季再关
+     一次」是同一个时序，只是换了个入口。0014 的 precheck 把「库里已经有多份在办」挡在
+     迁移之前，挡不住**迁移之后**这个动作。**处置正是当时写下的那个修法**：先查在办的
+     那条，有就 409 并把**编号说出来**（§28）。
+   - ~~**`assessment_service.open_or_reuse_care_case:617` 是一段读-改-写，没有锁。**~~
+     **2026-09-19 第 7 期关闭**：它先 `SELECT` 在办档案、找不到才 `INSERT`，两个请求同时
+     到达时两边都查不到、两边都插入 → 撞同一个唯一键。**在 V1.2 之前这条路上没有约束**，
+     所以它此前是**静默地建出两份在办档案**（比现在更糟，只是看不出来）。**处置选了
+     savepoint + 捕获 `IntegrityError` 后重查，不是 `SELECT … FOR UPDATE`**——这里根本没有
+     行可锁（要处理的恰恰是「不存在、于是两个人一起插」），理由写在那个函数的 docstring
+     里（§28）。
+   - **导入路径不走 `uq_session_effective_task_student` 那套判重**（**2026-09-19 第 4 期
+     收窄了一半**）。判重现在是 `_existing_session_for_match` **两层并存**（用户裁决
+     「两层都留」，两套判据回答的问题不同：按任务的问「这一场我导过没有」，按月的问
+     「这个月学校那次普查我导过没有」）：
+     - 批次**绑定了任务**时，它查这场任务里这名学生**全部**的会话（不分来源），落到
+       学生的会话上时按 `source` 分成 `DUPLICATE`（外部平台导的，同一份又导一遍）与
+       `CONFLICT`（学生自己在本系统答的）——**「一次外部导入与一次校内作答落在同一场
+       任务里」这个组合，在这一支上已经问过对方了**；
+     - **没绑任务**时仍按自然月（缺口 8，用户 2026-09-17 要的「不同月份的评测视为不同
+       的测试任务」）。
+     仍然没有合并它们，因为合并要先决定「同一场任务里，两来源的分数谁算数」——
+     那是业务问题（`TODO_BUSINESS_CONFIRMATION` §16.10）。而且这两支都只是**匹配时
+     的一次查询**，不是数据库约束：唯一键那两道门（`uq_session_task_student_attempt` /
+     `uq_session_effective_task_student`）仍然不认识导入路径，真正并发到达时兜底的是
+     它们，代价是一句英文的 `IntegrityError`。
+   - ~~**两个「诚实的默认值」现在是恒定的**~~ **2026-09-19 第 2 期关闭**：
+     `tested_at_source` 由两条写入路径各写一处（在线交卷 `ONLINE_SUBMIT`、导入
+     `IMPORT_FILE`），`calculation_status` 由 `score_session` 的三步状态机写，
+     `ix_session_calculation_status` 于是不再筛出全集。**两个默认值本身一个字没改**——
+     `PENDING` / `PENDING_VERIFICATION` 仍然是「不知道」的诚实取值，只是现在多了
+     「知道的那一条路」会覆盖它。**历史行仍然是常量**（0015 只回填 `calculation_status`，
+     见 §23）：那批行的 `tested_at` 与哈希至今为空，而这个缺口说的是「列没有写入方」，
+     不是「历史数据没法补」——后者是业务规则，仍然没有答案。
+   - ~~**`assessment_target` 的六列快照全都没有写入方**~~ **2026-09-19 第 1 期关闭**：
+     七个快照列现在由 `services/target_snapshot.py::target_snapshot` 一处定义，四个写入方
+     （建任务发放 / 补发 / 导入收行 / `seed.py`）都走它，`list_task_targets` 按快照读、
+     名册只兜底。见 §22。
+   - ~~**`student_care_case.case_version` 现在恒为 1。**~~ **2026-09-19 第 7 期关闭**：
+     它是需求说明书 §14 的乐观锁（状态变更要带上读到的版本号、改完 +1），而对齐阶段只加了
+     列、没有 `service` 读它。现在三处写入口都带上版本号——关闭 / 重新打开 / 转派，
+     由 `_check_case_version` + `_bump_case_version` 成对实现，且两个请求模型把它声明成
+     **必填**（一个可选的乐观锁等于没有锁）。它与上面那条 `open_or_reuse_care_case` 的
+     读-改-写是**同一类洞的两种解法**：一个用唯一键兜底，一个用版本号（两处现在都有人接）。
+
+10. **汇总档（`EXTERNAL_SUMMARY`）在按 `assessment_result` 说话的页面上是空的，
+    而任务完成率会把它算成已完成。** 第 5 期让汇总文件能导进来了（§26），而它
+    **一行答卷都不写**——这是规格逐字要求的（`没有 100 道原始答案时不得伪造
+    assessment_answer`），代价是三处不一致（来源不止一个，见下）：
+
+    | 症状 | 为什么 |
+    |---|---|
+    | 关注等级 / 关注率 / 受控导出里这一场是空的 | 那些页面读 `assessment_result`，而汇总档不评分 |
+    | 任务完成率算它已完成 | 完成率按**目标行**算，而行确实写进去了 |
+    | 会话 `status` 停在 `IN_PROGRESS` | `_write_sheet` 早退之后没有东西把它推到 `SUBMITTED` |
+
+    **第 6 期的四档处置（§27）没有关掉它们，而且这是对的。** 四档只对
+    `MATCH_CONFLICT` 那些行生效（学生自己在本场答过、文件里也有他），而一份汇总档
+    匹配到一个**没有在线答卷**的学生时 `conflict_choice is None`——四档碰不到它。
+    §26 那一版把这三处归给「阶段 6」，那句话是错的：它假设「有效结果」这一层会在第 6 期
+    接上，而第 6 期接的是**哪一场会话有效**，不是**一份只带分数的外部结果怎么进结果表**。
+
+    真正的缺口在这里：`assessment_target.effective_session_id` 与
+    `effective_external_result_id` **今天都只有写入方、没有读者**（`grep` 数得出来：
+    各一处写，其余命中全是索引定义与类型注解）。前者不构成缺陷——「哪一场有效」由 §18.8 那个
+    谓词回答，读者读的是会话上那一列；而**后者正是这三处要接的那一层**：
+    「这一场的外部平台分算不算一份有效结果，算的话它的等级从哪来」。
+    平台给的分数一直留在 `assessment_external_result.total_score` /
+    `dimension_scores_json` 上，**没有丢**。
+
+    **接它之前不要「顺手统一」**：把汇总档也塞进 `assessment_result` 就正是那句话禁止的
+    「替未核验的外部结果担保」，而它会让一个未经核验的分数直接进关注率。完成率那一处
+    （`task_service.task_completion`）排在**阶段 8 的 §18.10 收口**；而「一份汇总档的
+    有效结果怎么读」在那 8 期里**没有落点**——它要先回答 §16.10 的业务问题（外部平台的
+    总分按哪套分段判等级），所以不要自己定。`_write_sheet` 的 docstring 里点着名等这一节。
+
+11. **`assessment_external_result.verification_status` 只有写入方、没有读者，而
+    `KEEP_ONLINE` 与 `REJECT_EXTERNAL` 的差别全在它上面。** 第 6 期（§27）让四档处置
+    各自把这一列推到一个值，而全库**没有一处读它**——`grep verification_status` 数出来的
+    是三处写（建行时的 `PENDING`、处置时按 `CONFLICT_RESOLUTION_VERIFICATION` 取值、
+    `_apply_external_result` 落列）、一个索引、**零处读**。后果是具体的两件：
+
+    - **`KEEP_ONLINE` 与 `REJECT_EXTERNAL` 在所有界面上长得一模一样。** 它们在建不建
+      会话、谁有效上完全一样，唯一的差别就是这一列——而它在库里之外只出现在审计的
+      `detail` 里，那一串 `detail` 今天**只有数据库看得见**（§8：`GET /audit-logs` 不发
+      `detail`）。所以「那两条在线答卷当时是按哪一档裁的」这个问题，界面上答不出来。
+    - **「已经否了的那一份，下一次上传时按什么口径出现」没有答案。** 代码注释里写过的
+      「后者不该在下一次导入时又被问一遍」是一句**意图**：重传同一个文件时
+      `_clear_batch_rows` 把这一批的行与外部结果**全删了重建**（批次按指纹复用，
+      **行不复用**），于是人逐行做过的处置（`conflict_resolution` / `resolution` /
+      `age_resolution` 与 `resolved_by` 那个「有几行是人逐条看过的」的数）**跟着一起没**，
+      而操作员看不出这件事发生过。
+
+    两条出路分开，都还没有排期：让这一列有个读者——第一件要做的是让 `detail` 可查，
+    那要动 §8 那条序列化（它同时决定「登录失败」与「查看了谁的档案」该不该受权限约束）；
+    以及让逐行处置在重传时**留下来**（行按指纹复用，或重传时把处置带过去）。在那之前，
+    这一列的诚实读法是「它记着学校对这份外部结果的态度，但今天没有任何东西按它办事」。
+
+12. ~~**完成明细（`GET /assessment-tasks/{id}/completion` 与 `POST …/completion/export`）
+    一条能力门槛都没有，而它的载荷里同时有身份列与等级列。**~~ **2026-09-20 关闭**
+    （用户裁决：「缺口12 加一道门」），加的是 `STUDENT_PSYCH_DETAIL: {SCOPED}`。
+    下面这一段是**发现时的原样**，留着当这条缺口的定义；关闭记录在它后面。
+
+    2026-09-20 清点 §20 十六条
+    时撞出来的，**实测过**（探针跑完即删）：德育领导（`STUDENT_PSYCH_DETAIL` 按 §4 是
+    `SUMMARY`，词汇表说它「只是聚合」）在同一个响应里拿到
+
+    ```
+    学号 S001 · 姓名 林同学 · 班级 1班 · total_level='GENERAL_RANGE' · total_score=1
+    ```
+
+    ——**逐人的等级**，而 `SUMMARY` 恰恰不是逐人明细。两条路径都缺门：
+
+    | 路径 | 今天的门槛 | 载荷 |
+    |---|---|---|
+    | `GET …/completion` | `require_role(*TASK_READERS)`（只有这一道） | 身份六列 + `total_level` / `total_score` |
+    | `POST …/completion/export` | 同上，**连 `CONTROLLED_EXPORT` 都没有** | 同上，且 `mask_level=IDENTIFIED`（学号 + 真实姓名 + 等级，进一份离楼的文件） |
+
+    **这一条与 §4 那两条是同一个形状，而它们都已经有门了**：
+    `GET /students/results`（身份列 + 等级列）要**两道**门槛，
+    `non-participants/export` 与 `unmatched-import-rows/export`（只有身份列）要
+    `ensure_detail_exporter`（`CONTROLLED_EXPORT` + `STUDENT_PSYCH_DETAIL: SCOPED`）。
+    完成明细是**身份列与等级列都齐**的那一份，却一道没有。§4 那句「受控导出不能成为绕过
+    心理详情的旁路」在这里原样成立：德育领导的 `CONTROLLED_EXPORT` 是 `PROGRESS_SUMMARY`，
+    它在 `/students` 上连按行姓名都拿不到，却能从这里导出一份**实名＋等级**的名单。
+
+    **它不是「没人发现」，是那条裁决没有问载荷里有什么。**
+    `test_task_roles.py::test_the_leader_reads_completion_but_does_not_write` 明确断言
+    领导读得到（2026-09-17 的裁决：任务阅读权归心理老师 + 德育领导），而它**只断了
+    200、没断 `total_level` 是什么**。而 §11 记着**同一天**给完成明细加了那两列
+    （关注等级 / MHT总分）——一条决定「谁读得到这一页」，一条往这一页里加逐人的等级，
+    两条同一天落地，**后者落地时没有人回去问前者那句话还成不成立**。
+    探针第一版之所以看着「没事」，也是同一个原因：基线种子只有 1 名学生、且他在那场任务里
+    **没交过卷**，等级列是 NULL——**要先把人真的交一次卷，这一列才现形**。
+
+    **当时没有顺手加门，因为这是一个产品的裁断，不是一处漏写的依赖。** 加门会改动一条
+    2026-09-17 的裁决（并且要改那条明确钉着它的用例），而它必须与 §4 里
+    「`/students/results` 对德育领导严一档」这个决定**放在一起裁**：如果完成明细该让领导
+    看到逐人等级，那么同一个人在 `/students/results` 上被拦住就因为路径不同而说不通；
+    如果该拦，那就得回答「领导按年级看完成率」这件事以后从哪看（现在正是靠这一页）。
+    两个答案都成立，所以留给人定。
+
+    **2026-09-20 关闭：加门。** 用户在这一天作出裁决，答案是上面那一段的后一半——**拦**。
+    落点与那两条既有裁决完全同形（身份列 + 等级列**两道**门槛，见 §4），所以这一条**不是
+    新口径，是既有口径漏掉的一个端点半边**：
+
+    | 路径 | 加门之后 | 判据落在哪 |
+    |---|---|---|
+    | `GET …/completion` | `require_role(*TASK_READERS)` + `TaskTargetReader` + `DetailExporter` | 服务层 `task_completion` 里那两道 |
+    | `POST …/completion/export` | 上面三道 + `ControlledExporter` | 服务层 `ensure_detail_exporter` 里那两道 |
+
+    四点值得记：
+
+    - **判据抽成 `task_service.ensure_detail_reader`（`STUDENT_PSYCH_DETAIL: {SCOPED}`）**，
+      读与导出**共用同一句**。导出那一侧原来那道双查（`ensure_non_participant_exporter`）
+      改名为 **`ensure_detail_exporter`** 并改成调它——名字按**问题**取，不按第一个调用者取，
+      否则「未匹配行导出」会去调一个叫 `non_participant` 的函数，而下一个人会照着这个名字
+      再写一份「给未匹配行用的」版本（§22 那次改名的同一条理由）。
+    - **门槛放进 `task_completion` 的数据本身**，所以三个调用点（读端点、导出端点、
+      参与口径那一页**不**经过它）自动全覆盖；只加在路由上就会出现「服务层还有一条路
+      读得到」的形状。
+    - **它按能力矩阵走，不是「领导一律不行」写死**。`test_permissions.py::test_the_completion_gate_is_a_capability_not_a_hardcoded_role`
+      把领导那一格提到 `SCOPED` 之后两条都放行——一个 `if role_code == LEADER: raise` 的
+      实现会在这条上变红。学校在权限页上给领导开了这一格，就该真的开。
+    - **§4 那句「受控导出不能成为绕过心理详情的旁路」在这一条上第一次被单独验**：
+      `test_permissions.py::test_revoking_psych_detail_also_blocks_the_task_detail_endpoints`
+      把心理老师自己的 `STUDENT_PSYCH_DETAIL` 降成 `NONE`（他有 `CONTROLLED_EXPORT`），
+      三份任务级明细导出各试一次。默认矩阵里**构造不出**这个组合，所以那些逐角色用例
+      看不见它。
+
+    **代价，如实记：领导失去了「逐人参与处置」的可见性。** 完成明细表里有一列「参与」
+    （请假 / 免测 / 已排除的逐人标记），它是**整块 403** 挡掉的，不是前端藏起来的——
+    与等级列同一条路径。领导仍然拿得到**计数**（`GET …/participation` 的六个数里含
+    `excluded_targets`），失去的是「哪几个人」。这一处与「该不该拦」是同一个裁断的两面：
+    那三列与学号 / 姓名在同一张表里，逐人给就等于把逐人身份一起给了。**领导看完成率的
+    三条落点不变**（`GET /assessment-tasks` 每行的 `total_targets` / `completed_targets` /
+    `completion_rate`、`GET …/participation` 六个数、`/leader/analytics`），
+    `TasksPage.vue` 在页签收起处写明了这一句，并指明上面那六格与「目标学生」「未匹配行」
+    两个页签照常可查。
+
 ## 测试注意
 
 - 后端测试从 `db/seed.py` 的种子数据起步（青禾实验学校 / 初一 / 1班 / `S001` 林同学 / `MHT-1.1.0` / `TASK-2026-FALL-MHT`）。
@@ -2062,15 +4556,15 @@ VERSION_LABEL = "V" + ".".join(__version__.split(".")[:2]) # 显示串 → V1.0
   可重开的档案。这些都是数据量依赖，不是回归——正确处理是补数据，不是把断言改松
   （改松会把分页/复测的覆盖一起丢掉）。
 - **`app/db/purge.py` 的删除顺序有测试把守，别绕开它。** 全库没有任何 `ondelete=`，
-  所以每个外键都是 RESTRICT，父行先删在 MySQL 上是必然的 1451。而
-  `tests/conftest.py` 的内存 SQLite **默认不检查外键**，父行先删照样全绿——
+  所以每个外键都是 RESTRICT，父行先删在 MySQL 上是必然的 1451。
   `make reset-db` 原来那段内联脚本就是这么坏的（`risk_event` 排在 `manual_review` 之前，
-  而 10 行 `manual_review` 正引用着活着的 `risk_event`）。`tests/test_purge_demo.py`
-  自建引擎并在 `connect` 事件里开 `PRAGMA foreign_keys=ON`（pragma 在事务里是空操作，
-  必须在连接建立时设），改删除顺序先看这个文件。
+  而 10 行 `manual_review` 正引用着活着的 `risk_event`）——**而它当年一直没被发现**，
+  因为测试库是内存 SQLite，**默认不检查外键**（缺口 3）。2026-09-19 起整条测试链在真
+  MySQL 上，`tests/test_purge_demo.py` 那套自建引擎 + `PRAGMA foreign_keys=ON` 的脚手架
+  因此整个删掉了：外键一直在，它对每一个用例都是这样。改删除顺序先看这个文件。
   **同一件武器现在还有第二处**：`tests/test_sql_reset_to_baseline.py` 把
   `backend/sql/reset_to_baseline.sql` 的删除顺序按 `Base.metadata` 的外键图重推一遍
-  （§16）。它不需要数据库，所以**这条守卫在 sqlite 上也是有效的**——上面那个「只有真库
+  （§16）。它**不碰数据库**（静态推），所以在哪个方言下都有效——上面那个「只有真库
   会报」的缺口，在 SQL 脚本这一侧被补上了一点。写它时踩过一个坑值得记：判「置 NULL 的
   那条 UPDATE 在不在父行删除之前」时，两个判断必须用**同一套语句序号**，否则比的是
   「第几条 DELETE」与「第几条语句」两个不相干的坐标，测试会一直绿。变异验证时发现的。

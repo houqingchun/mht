@@ -1257,6 +1257,26 @@ h1 {
   box-shadow: 0 0 0 2px var(--red);
 }
 
+/* 档案事件时间线的语气（§16.4）。基础色是蓝 = 「办过的事」（复核 / 跟进 / 回访 /
+   复测 / 转派），所以只有另外三档需要规则。判据与写法都和上面那一条一样：
+   `careEventTone` 给的是 `pill` 那套名字（green / red / gray），而点与药丸
+   用的是同一个词、两种画法——**颜色不是唯一信号**，那条事件的名字本来就写着
+   「关闭档案」「重新打开」，色觉障碍的用户照样读得出这一条是好是坏。 */
+.timeline-dot.green {
+  background: var(--green);
+  box-shadow: 0 0 0 2px var(--green);
+}
+
+.timeline-dot.red {
+  background: var(--red);
+  box-shadow: 0 0 0 2px var(--red);
+}
+
+.timeline-dot.gray {
+  background: #98a5b4;
+  box-shadow: 0 0 0 2px #98a5b4;
+}
+
 .timeline-title {
   font-weight: 750;
   margin-top: 2px;
@@ -1999,7 +2019,12 @@ tbody tr:hover td {
   gap: 8px;
 }
 
-.import-conflicts .conflict-option {
+/* 「一组单选项 + 一句解释」——导入冲突的处置。
+   它**不再限定在 `.import-conflicts` 里**（2026-09-19）：同一形状现在有两处，
+   卡片上那一块（整批的覆盖/放弃 + 年龄处置）与逐行明细弹层里的那一格
+   （这一行的覆盖/放弃）。两处说的是同一件事，所以样式同源、不各写一套——
+   而 `.import-conflicts` 里那五处调用的渲染结果一字未变（只是选择器放宽了）。 */
+.conflict-option {
   display: grid;
   grid-template-columns: auto 1fr;
   gap: 8px;
@@ -2009,7 +2034,7 @@ tbody tr:hover td {
   cursor: pointer;
 }
 
-.import-conflicts .conflict-option input {
+.conflict-option input {
   margin-top: 3px;
 }
 

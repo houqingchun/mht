@@ -15,6 +15,14 @@ frontend/.vite/
 # 本地环境
 backend/.env
 .claude/settings.local.json
+# `.claude/settings.json` 也是**这台机器上**的工具配置（谁点过「总是允许」就是谁的事），
+# 与 settings.local.json 同族。仓库里进版本控制的那份配置没有它也能跑。
+.claude/settings.json
+
+# 受控导出的落点（`export_service.export_directory()` = 仓库根 /var/exports）。
+# 里面全是**实名**的学生数据，退一步说也是运行期产物：它属于这台机器，不属于历史。
+# `/var/` 只匹配仓库根那一层——裸 `var/` 会吞掉任何一层叫 var 的目录。
+/var/
 
 # 部署包产物（`make deploy-package`）。`/dist/` 只匹配仓库根那一层，
 # 不用裸 `dist/`——那会把任何一层叫 dist 的目录都吞掉，包括
@@ -28,3 +36,12 @@ node_modules/
 /blob-report/
 /playwright/.cache/
 /playwright/.auth/
+# 上面那几条是**仓库根**那一层，而 `make e2e` 的落点正是仓库根：`playwright.config.ts`
+# 在根、`testDir: './e2e'`，Makefile 也是光 `npx playwright test` 不带 cd。所以它们是够的。
+# 下面这一条挡的是**另一个落点**：从 `frontend/` 目录里起 playwright 时（编辑器插件、
+# 或在那个目录下手敲一次），产物会落在那一层——本机确实留下过一份
+# `frontend/test-results/.last-run.json`。带一层前缀写死，不用裸 `test-results/`：
+# 裸写法会把任何一层叫这个名字的目录都吞掉，包括将来某个真该进库的。
+frontend/test-results/
+frontend/playwright-report/
+frontend/blob-report/

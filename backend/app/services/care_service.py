@@ -11,13 +11,21 @@ from app.models.assessment import (
     RiskEvent,
 )
 from app.models.audit import AuditLog
-from app.models.care import FamilyContactRecord, FollowUpRecord, ManualReview, RetestPlan, StudentCareCase
+from app.models.care import (
+    CareCaseEvent,
+    FamilyContactRecord,
+    FollowUpRecord,
+    ManualReview,
+    RetestPlan,
+    StudentCareCase,
+)
 from app.models.enums import RoleCode
 from app.models.organization import ClassGroup, Grade, Student
 from app.models.scale import ScaleQuestion
 from app.security.data_scope import ensure_student_in_scope, student_scope_predicate
 from app.security.permissions import SCOPED, STUDENT_PSYCH_DETAIL, scope_allows
 from app.schemas.care import (
+    BatchAssignItem,
     CloseCaseRequest,
     FamilyContactRequest,
     FollowUpRequest,
@@ -30,6 +38,24 @@ from app.services.assessment_service import (
     now_utc_naive,
     session_history_order,
 )
+from app.services.care_events import (
+    CASE_CLOSED,
+    CASE_REOPENED,
+    FAMILY_CONTACT_ADDED,
+    FOLLOW_UP_ADDED,
+    MANUAL_REVIEWED,
+    OWNER_ASSIGNED,
+    RETEST_PLANNED,
+    record_case_event,
+)
+
+# `student_care_case.reopen_reason` 是 String(255)，而 `ReopenCaseRequest.reason` 允许
+# 5000 字。写回那一列时必须截断——否则 MySQL 严格模式下报的是一句
+# `1406 Data too long for column 'reopen_reason'`，离「重新打开原因太长了」隔着一个列名。
+# **原文一个字都不丢**：它完整地留在事件与那条跟进记录上（两处都是 Text / 明文），
+# 被截断的只是那个给「最近一次重开原因」用的摘要列。同一个形状见 `close_case`——
+# 那边的两个字段宽度与请求上的 `max_length` 是对齐的（128 / Text），所以不需要截断。
+REOPEN_REASON_COLUMN_LIMIT = 255
 
 
 def ensure_counselor(db: Session, user: UserAccount) -> None:
@@ -57,6 +83,53 @@ def _scoped_case(db: Session, user: UserAccount, case_id: int) -> StudentCareCas
         raise AppError("NOT_FOUND", "关注档案不存在", 404)
     ensure_student_in_scope(db, user, care_case.student_id)
     return care_case
+
+
+def _ensure_open(care_case: StudentCareCase) -> None:
+    """已关闭的档案不能被直接改动 —— §16.4「关闭档案不可直接新增跟进，必须先重新打开」。
+
+    **这不只是那条规格要求，它同时堵住了四个同类 500。** 下面四个入口
+    （复核 / 跟进 / 家庭回访 / 复测）都会把 `status` 改成 `FOLLOWING` 或 `OBSERVING`，
+    而对一条 CLOSED 档案这样做等于**隐式复活**它——`active_student_id` 生成列立刻
+    非空，若这名学生已经又有一条在办档案（秋季关档、春季再开，见 §1），
+    它当场撞 `uq_care_case_one_active_per_student`，用户拿到一句英文的 500。
+    那四个入口此前没有任何一个查过状态。
+    """
+    if care_case.status == "CLOSED":
+        raise AppError(
+            "CONFLICT",
+            "这份关注档案已经关闭，不能直接新增记录。请先「重新打开档案」再继续。",
+            409,
+        )
+
+
+def _check_case_version(care_case: StudentCareCase, expected: int | None) -> None:
+    """乐观锁（§16.4：关闭 / 重新打开 / 转派负责人必须带版本号）。
+
+    `case_version` 在 V1.2 对齐阶段就加好了列，但**直到这一期才有人读它**
+    （CLAUDE.md 缺口 9：它此前恒为 1）。判据是「客户端读到的那一版，现在还是不是
+    那一版」——两份页面同时开着时，后动手的那一个会拿到 409 与一句人话，
+    而不是把先动手的那一个的修改静默盖掉。
+
+    `expected is None` 是**只给内部调用方留的口子**（服务层的其他路径调进来时
+    还没有版本概念）：接口层的两个请求模型都把 `case_version` 声明成必填，
+    所以从 HTTP 进来的调用一定带号。
+    """
+    if expected is None:
+        return
+    if expected != care_case.case_version:
+        raise AppError(
+            "CONFLICT",
+            "这份关注档案在你打开之后已经被别人修改过（当前版本 "
+            f"{care_case.case_version}，你手上的是 {expected}）。"
+            "请刷新页面、确认最新的状态之后重试。",
+            409,
+        )
+
+
+def _bump_case_version(care_case: StudentCareCase) -> None:
+    """改完 +1。与 `_check_case_version` 成对出现，一处读一处写、都在本模块里。"""
+    care_case.case_version = care_case.case_version + 1
 
 
 def counselor_workbench(db: Session, user: UserAccount) -> dict:
@@ -150,6 +223,9 @@ def list_care_cases(db: Session, user: UserAccount) -> list[dict]:
                 "grade": grade.name,
                 "class_name": class_group.name,
                 "case_status": care_case.status,
+                # 「批量分配」逐行带回来的版本号（§16.4）。列表是唯一能一次拿到
+                # 多条档案版本的地方，所以它必须在这里下发。
+                "case_version": care_case.case_version,
                 "owner_id": care_case.owner_id,
                 "owner_name": owner.display_name if owner else None,
                 "total_level": result.total_level if result else None,
@@ -180,23 +256,69 @@ def list_assignable_owners(db: Session, user: UserAccount) -> list[dict]:
     return [{"id": owner.id, "display_name": owner.display_name} for owner in owners]
 
 
-def batch_assign_owner(db: Session, user: UserAccount, case_ids: list[int], owner_id: int) -> dict:
+def batch_assign_owner(
+    db: Session, user: UserAccount, assignments: list[BatchAssignItem], owner_id: int
+) -> dict:
+    """转派负责人（§16.4 的三处乐观锁之一）。
+
+    **载荷是逐行带版本号的**，不是一串 id：一条「批量分配」动的是每一行档案的
+    `owner_id`，而客户端读到的那一行的版本各不相同（列表上有些行是十分钟前拉的）。
+    一个 `list[int]` 承载不了这件事——它只能表达「我要改这几条」，
+    表达不了「我读到的是这几条的哪一版」。
+
+    **任何一条版本对不上就 409，且一行都不写。** 这与下面那句「Validate the whole
+    batch before mutating any row」是同一条理由：只改看得见的那一部分、然后报一个
+    比请求小的数，用户没有任何办法知道哪几条被丢下了。
+    """
     ensure_counselor(db, user)
-    if not case_ids:
+    if not assignments:
         raise AppError("VALIDATION_ERROR", "请至少选择一名学生", 422)
     owner = db.get(UserAccount, owner_id)
     if not owner or owner.role_code != RoleCode.COUNSELOR or not owner.active:
         raise AppError("VALIDATION_ERROR", "负责人必须是启用中的心理老师账号", 422)
-    cases = db.scalars(select(StudentCareCase).where(StudentCareCase.id.in_(case_ids))).all()
-    if not cases:
+
+    # 一条 assignment 里同一个 case_id 出现两次时，两次都拿同一个版本号比对、
+    # 而第一次 +1 之后第二次必然对不上——报给用户的是「被改过了」，而真相是
+    # 他自己把这一行发了两遍。去重之后行为才是可预期的。
+    requested = {item.case_id: item.case_version for item in assignments}
+    cases = db.scalars(
+        select(StudentCareCase).where(StudentCareCase.id.in_(list(requested)))
+    ).all()
+    if len(cases) != len(requested):
         raise AppError("NOT_FOUND", "未找到可分配的关注档案", 404)
     # Validate the whole batch before mutating any row: silently assigning only
     # the subset the caller can see would report a smaller count than requested,
     # with no indication of which ids were dropped.
     for care_case in cases:
         ensure_student_in_scope(db, user, care_case.student_id)
+        _check_case_version(care_case, requested[care_case.id])
+    # 事件里的那句话写**姓名**而不是账号 id：这条时间线的读者是心理老师，
+    # 而「负责人 12 → 15」对他不承载任何信息。上一位负责人要另查一次（它在
+    # 上面那条查询里没有 join），所以一次把这一批用到的名字全取出来——
+    # 逐行 `db.get` 就是 N 次 SELECT。
+    previous_owner_ids = {care_case.owner_id for care_case in cases if care_case.owner_id}
+    previous_owner_names = {
+        row_id: display_name
+        for row_id, display_name in db.execute(
+            select(UserAccount.id, UserAccount.display_name).where(
+                UserAccount.id.in_(previous_owner_ids)
+            )
+        ).all()
+    }
+
     for care_case in cases:
+        previous_owner_name = previous_owner_names.get(care_case.owner_id or -1)
         care_case.owner_id = owner_id
+        _bump_case_version(care_case)
+        record_case_event(
+            db,
+            care_case,
+            OWNER_ASSIGNED,
+            user.id,
+            reason=f"负责人 {previous_owner_name or '（未分配）'} → {owner.display_name}",
+            # 转派不改状态，所以 from_status / to_status 都留空——它是这张表上唯一
+            # 一条不涉及状态迁移的事件（`record_case_event` 的 docstring 写着同一条）。
+        )
     # Existing follow-up records are untouched — assignment only changes the owner.
     return {"updated": len(cases)}
 
@@ -267,6 +389,11 @@ def get_care_case(db: Session, user: UserAccount, student_id: int) -> dict:
     # 历次测评事实序列，供「历次趋势」比较。**从旧到新**排（趋势图按这个方向读），
     # 排序口径与「本次测评」共用 `latest_session_order()`：施测时间优先，id 兜底。
     # 只按 id 排的话，导入一份上学期的普查结果就会在末尾凭空多出一个「最近」的点。
+    #
+    # **这里刻意不加 `effective_session_predicate()`**（上面那个 `sitting` 加了，两处
+    # 不一样是有意的）。被 §18.8 降级过的那一场仍然是他真实考过的一次：答案、用时、
+    # 那一天的分都在，趋势图少一个点就是在抹掉一段发生过的事实。降级说的是「他现在
+    # 以哪一份为准」，不是「那一次不算测评」。
     history_sessions = db.scalars(
         select(AssessmentSession)
         .where(AssessmentSession.student_id == student_id)
@@ -322,6 +449,17 @@ def get_care_case(db: Session, user: UserAccount, student_id: int) -> dict:
         .order_by(AuditLog.id.desc())
         .limit(100)
     ).all()
+    # 档案事件：带操作人姓名，最新在前（与这一页其余列表同一个读法，它们都是
+    # `id.desc()`）。**没有上限**：事件是只追加的，而一份档案的事件数由它经历过的
+    # 复核/跟进/回访/复测/关档次数决定——那是十几次量级，不是几百次。
+    # 什么时候它真的会很长（一张档案上几百条），那时再加 `limit` 与一句
+    # 「还有 N 条未显示」（§10），而不是现在猜一个数。
+    event_rows = db.execute(
+        select(CareCaseEvent, UserAccount)
+        .outerjoin(UserAccount, UserAccount.id == CareCaseEvent.operator_id)
+        .where(CareCaseEvent.care_case_id == care_case.id)
+        .order_by(CareCaseEvent.id.desc())
+    ).all()
     return {
         "case_id": care_case.id,
         "student": {
@@ -335,10 +473,26 @@ def get_care_case(db: Session, user: UserAccount, student_id: int) -> dict:
             "age": student.age,
         },
         "case_status": care_case.status,
+        # 乐观锁的版本号（§16.4）。**它必须出现在这里**，因为关闭 / 重开都要求
+        # 客户端把它带回来——而客户端唯一拿得到它的地方就是这一个响应。
+        "case_version": care_case.case_version,
         "assessment": {
             "session_id": sitting.id if sitting else None,
             "submitted_at": sitting.submitted_at.isoformat() if sitting and sitting.submitted_at else None,
             "duration_seconds": sitting.duration_seconds if sitting else None,
+            # 「算出来了没有」与「算出来是什么」是两个字段：上面那三个只有在算成了之后
+            # 才可能不是 `None`，而这一组回答的是为什么它们可能是 `None`——
+            # `PENDING`（还没算）/ `CALCULATING`（正在算，只可能在同一事务里）/
+            # `CALCULATED` / `CALCULATION_FAILED`（算不出来，附带原因，可以重试）。
+            # 个案详情据此渲染那一行「评分状态」与重试按钮。
+            "calculation_status": sitting.calculation_status if sitting else None,
+            "calculation_error": sitting.calculation_error if sitting else None,
+            # 「这一场测的是哪一天」以及那个日期是从哪来的。它与 `submitted_at` 在在线
+            # 路径上是同一个值，**但两者回答的不是同一个问题**：导入的会话 `submitted_at`
+            # 也是文件里的测评日，所以只看时间戳分不出这一场是学生在线做的还是从外部平台
+            # 导进来的（`source` 说「哪来的」，这一列说「日期是谁给的」）。
+            "tested_at": sitting.tested_at.isoformat() if sitting and sitting.tested_at else None,
+            "tested_at_source": sitting.tested_at_source if sitting else None,
             "total_level": result.total_level if result else None,
             "validity_status": result.validity_status if result else None,
             "rule_version": result.rule_version if result else None,
@@ -404,6 +558,27 @@ def get_care_case(db: Session, user: UserAccount, student_id: int) -> dict:
             for dimension in dimensions
         ],
         "history": history,
+        # 档案事件时间线（§16.4）——「这份档案经历了什么」。
+        #
+        # **按 `care_case_id` 过滤，不按 `student_id`。** 这一页上面那几个列表
+        # （`follow_ups` / `family_contacts` / `retest_plans` / `risk_events`）都是按
+        # 学生过滤、**跨档案**取全部历史行的（§1：关闭档案不得删除历史记录，
+        # 所以一名学生的旧档案上的记录一直在）。事件不同：它回答的是
+        # 「**这一份**档案从开档到现在经过了谁的手」，把上一条已关闭档案的事件
+        # 混进来会让这条时间线读不出边界。两者口径不同是有意的。
+        "events": [
+            {
+                "id": event.id,
+                "event_type": event.event_type,
+                "from_status": event.from_status,
+                "to_status": event.to_status,
+                "operator_name": operator.display_name if operator else None,
+                "reason": event.reason,
+                "confirmed_facts": event.confirmed_facts,
+                "created_at": event.created_at.isoformat() if event.created_at else None,
+            }
+            for event, operator in event_rows
+        ],
         "audit_logs": [
             {
                 "id": row.id,
@@ -422,6 +597,7 @@ def get_care_case(db: Session, user: UserAccount, student_id: int) -> dict:
 def create_manual_review(db: Session, user: UserAccount, case_id: int, payload: ManualReviewRequest) -> ManualReview:
     ensure_counselor(db, user)
     care_case = _scoped_case(db, user, case_id)
+    _ensure_open(care_case)
     risk_event = db.get(RiskEvent, payload.risk_event_id)
     if not risk_event or risk_event.student_id != care_case.student_id:
         raise AppError("SCOPE_FORBIDDEN", "风险事件不属于该关注档案", 403)
@@ -432,13 +608,31 @@ def create_manual_review(db: Session, user: UserAccount, case_id: int, payload: 
         confirmed_facts=payload.confirmed_facts,
         next_action=payload.next_action,
         next_follow_up_date=payload.next_follow_up_date,
+        # §16.4：新建记录的 `care_case_id` 必须非空。这两列在 V1.2 对齐阶段就加好了
+        # （可空只是给历史行回填用的），而复合外键 `manual_review_fk_case_student`
+        # 保证它们与档案指向同一名学生——所以 `student_id` 取自档案而不是请求体。
+        care_case_id=care_case.id,
+        student_id=care_case.student_id,
     )
     risk_event.status = "REVIEWED"
     risk_event.reviewed_by = user.id
     risk_event.reviewed_at = now_utc_naive()
+    from_status = care_case.status
     care_case.status = "FOLLOWING"
     care_case.owner_id = user.id
+    _bump_case_version(care_case)
     db.add(review)
+    db.flush()
+    record_case_event(
+        db,
+        care_case,
+        MANUAL_REVIEWED,
+        user.id,
+        from_status=from_status,
+        to_status="FOLLOWING",
+        reason=payload.next_action,
+        confirmed_facts=payload.confirmed_facts,
+    )
     db.flush()
     return review
 
@@ -446,6 +640,7 @@ def create_manual_review(db: Session, user: UserAccount, case_id: int, payload: 
 def create_follow_up(db: Session, user: UserAccount, case_id: int, payload: FollowUpRequest) -> FollowUpRecord:
     ensure_counselor(db, user)
     care_case = _scoped_case(db, user, case_id)
+    _ensure_open(care_case)
     followup = FollowUpRecord(
         student_id=care_case.student_id,
         operator_id=user.id,
@@ -453,10 +648,24 @@ def create_follow_up(db: Session, user: UserAccount, case_id: int, payload: Foll
         confirmed_facts=payload.confirmed_facts,
         next_follow_up_date=payload.next_follow_up_date,
         status="ACTIVE",
+        care_case_id=care_case.id,
     )
+    from_status = care_case.status
     care_case.status = "FOLLOWING"
     care_case.owner_id = user.id
+    _bump_case_version(care_case)
     db.add(followup)
+    db.flush()
+    record_case_event(
+        db,
+        care_case,
+        FOLLOW_UP_ADDED,
+        user.id,
+        from_status=from_status,
+        to_status="FOLLOWING",
+        reason=payload.record_type,
+        confirmed_facts=payload.confirmed_facts,
+    )
     db.flush()
     return followup
 
@@ -466,6 +675,7 @@ def create_family_contact(
 ) -> FamilyContactRecord:
     ensure_counselor(db, user)
     care_case = _scoped_case(db, user, case_id)
+    _ensure_open(care_case)
     record = FamilyContactRecord(
         student_id=care_case.student_id,
         operator_id=user.id,
@@ -476,10 +686,25 @@ def create_family_contact(
         support_status=payload.support_status,
         confirmed_facts=payload.confirmed_facts,
         next_contact_date=payload.next_contact_date,
+        care_case_id=care_case.id,
     )
+    from_status = care_case.status
     care_case.status = "FOLLOWING"
     care_case.owner_id = user.id
+    _bump_case_version(care_case)
     db.add(record)
+    db.flush()
+    record_case_event(
+        db,
+        care_case,
+        FAMILY_CONTACT_ADDED,
+        user.id,
+        from_status=from_status,
+        to_status="FOLLOWING",
+        reason=payload.channel,
+        # **家庭回访正文不进事件**（§16.6：审计与事件都不得存家庭回访正文）。
+        # 它留在 `family_contact_record.confirmed_facts` 上，那一行才是它的家。
+    )
     db.flush()
     return record
 
@@ -487,6 +712,7 @@ def create_family_contact(
 def create_retest_plan(db: Session, user: UserAccount, case_id: int, payload: RetestPlanRequest) -> RetestPlan:
     ensure_counselor(db, user)
     care_case = _scoped_case(db, user, case_id)
+    _ensure_open(care_case)
     # 复测以「最近一次施测」为基线，口径同个案详情的「本次测评」（不是 id 最大的一场）。
     baseline = latest_session(db, care_case.student_id)
     retest = RetestPlan(
@@ -496,10 +722,23 @@ def create_retest_plan(db: Session, user: UserAccount, case_id: int, payload: Re
         reason=payload.reason,
         status="PLANNED",
         created_by=user.id,
+        care_case_id=care_case.id,
     )
+    from_status = care_case.status
     care_case.status = "OBSERVING"
     care_case.owner_id = user.id
+    _bump_case_version(care_case)
     db.add(retest)
+    db.flush()
+    record_case_event(
+        db,
+        care_case,
+        RETEST_PLANNED,
+        user.id,
+        from_status=from_status,
+        to_status="OBSERVING",
+        reason=payload.reason,
+    )
     db.flush()
     return retest
 
@@ -509,11 +748,34 @@ def close_case(db: Session, user: UserAccount, case_id: int, payload: CloseCaseR
     if not payload.confirm_follow_up_checked:
         raise AppError("VALIDATION_ERROR", "关闭前必须确认已检查后续安排", 422)
     care_case = _scoped_case(db, user, case_id)
+    _check_case_version(care_case, payload.case_version)
+    if care_case.status == "CLOSED":
+        raise AppError("CONFLICT", "这份关注档案已经关闭了。", 409)
+    from_status = care_case.status
     care_case.status = "CLOSED"
     care_case.closed_at = now_utc_naive()
     care_case.close_reason = payload.close_reason
     care_case.close_note = payload.close_note
+    # `closed_by` 与 `reopened_by` 在 V1.2 对齐阶段就加好了列，而**这一期之前没有
+    # 任何东西写它们**：`owner_id` 在被关掉的那一刻被设成关档人，于是「谁关的」
+    # 只在「关档人恰好也是负责人」时才答得上来。这两列才是那个问题的答案，
+    # 而它们不该靠 `owner_id` 兼职（关档之后负责人可能被转派走）。
+    care_case.closed_by = user.id
     care_case.owner_id = user.id
+    _bump_case_version(care_case)
+    db.flush()
+    record_case_event(
+        db,
+        care_case,
+        CASE_CLOSED,
+        user.id,
+        from_status=from_status,
+        to_status="CLOSED",
+        reason=payload.close_reason,
+        # **关闭说明不进事件**：`close_note` 是关档人写下的判断，它的家在
+        # `student_care_case.close_note` 上（详情页直接渲染它）。
+        # 事件是「这份档案发生了什么」，不是它的副本。
+    )
     db.flush()
     return care_case
 
@@ -521,18 +783,72 @@ def close_case(db: Session, user: UserAccount, case_id: int, payload: CloseCaseR
 def reopen_case(db: Session, user: UserAccount, case_id: int, payload: ReopenCaseRequest) -> StudentCareCase:
     ensure_counselor(db, user)
     care_case = _scoped_case(db, user, case_id)
+    _check_case_version(care_case, payload.case_version)
+
+    # ★ 这一步是这一期修掉的 500 的来源。
+    #
+    # `uq_care_case_one_active_per_student`（生成列 `active_student_id`）断言
+    # 「同一名学生最多一条非 CLOSED 的档案」。秋季关掉一条、春季再开一条是学校每年
+    # 都会遇到的时序（§1），此时点「重新打开」那条**旧的**，无条件设 FOLLOWING 会
+    # 让两行落在同一个 `active_student_id` 上 → IntegrityError → 用户拿到 500，
+    # 而错误里只有一句英文。0014 的 precheck 把「迁移时库里已经有多份在办」挡在
+    # 迁移之前，挡不住**迁移之后**这个动作。
+    #
+    # 处置是「先查再改」：这不是一个可以自动决定的问题（要不要把现在那条在办的
+    # 关掉？那是另一件有代价的事），所以答案是把事实说清楚，让老师自己选。
+    active = db.scalar(
+        select(StudentCareCase).where(
+            StudentCareCase.student_id == care_case.student_id,
+            StudentCareCase.status != "CLOSED",
+            StudentCareCase.id != care_case.id,
+        )
+    )
+    if active:
+        raise AppError(
+            "CONFLICT",
+            f"这名学生已经有一条在办档案（编号 {active.id}），所以不能再打开这一条。"
+            "如果你要办的是他现在的状况，请到那一条上继续；"
+            "如果那一条已经了结，先把它关闭。",
+            409,
+        )
+
+    # 已关闭的档案不接受「重新打开」，未关闭的档案也不接受。
+    if care_case.status != "CLOSED":
+        raise AppError("CONFLICT", "这份关注档案本来就在办，不需要重新打开。", 409)
+
+    from_status = care_case.status
     care_case.status = "FOLLOWING"
     care_case.reopened_at = now_utc_naive()
+    care_case.reopened_by = user.id
+    care_case.reopen_reason = payload.reason[:REOPEN_REASON_COLUMN_LIMIT]
+    # `reopened_by` 与 `reopen_reason` 与 `closed_by` 同理：这一期之前没有写入方。
     care_case.owner_id = user.id
-    db.add(
-        FollowUpRecord(
-            student_id=care_case.student_id,
-            operator_id=user.id,
-            record_type="重新打开档案",
-            confirmed_facts=payload.reason,
-            next_follow_up_date=now_utc_naive().date(),
-            status="ACTIVE",
-        )
+    _bump_case_version(care_case)
+    # **`closed_at` / `close_reason` / `close_note` 刻意不清空**（2026-09-19 裁决）。
+    # 它们与 `reopened_at` 并存，而这不是「状态不一致」：它们回答的是
+    # 「**上一次是怎么关的**」，那是确实发生过的事。清掉等于抹掉一段历史——
+    # 与 §1「关闭档案不得删除历史记录」是同一条。上一轮的关档说明、这一轮的
+    # 重开原因、以及两者之间隔了多久，三条一起才读得出这条时序。
+    followup = FollowUpRecord(
+        student_id=care_case.student_id,
+        operator_id=user.id,
+        record_type="重新打开档案",
+        confirmed_facts=payload.reason,
+        next_follow_up_date=now_utc_naive().date(),
+        status="ACTIVE",
+        care_case_id=care_case.id,
+    )
+    db.add(followup)
+    db.flush()
+    record_case_event(
+        db,
+        care_case,
+        CASE_REOPENED,
+        user.id,
+        from_status=from_status,
+        to_status="FOLLOWING",
+        reason=payload.reason[:REOPEN_REASON_COLUMN_LIMIT],
+        # 原文（可能比 255 长）留在上面那条跟进记录上，那是 Text。
     )
     db.flush()
     return care_case

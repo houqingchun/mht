@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { modalZIndex, pushModal, dropModal } from '../composables/modalStack'
 
 const props = withDefaults(defineProps<{
   modelValue: boolean
@@ -23,6 +24,13 @@ const emit = defineEmits<{
 const shell = ref<HTMLElement | null>(null)
 
 const sizeClass = computed(() => `modal-${props.size ?? 'md'}`)
+
+/**
+ * 这个弹层在「打开中的弹层」那一叠里的位置——决定它压在谁上面。
+ * 为什么需要它、为什么住在 `composables/modalStack.ts` 里，见那个文件。
+ */
+const token = {}
+const zIndex = modalZIndex(token)
 
 function onBackdropClick() {
   if (props.persistent) return
@@ -92,6 +100,7 @@ let lastFocused: HTMLElement | null = null
 function activate() {
   const active = document.activeElement
   lastFocused = active instanceof HTMLElement ? active : null
+  pushModal(token)
   document.addEventListener('keydown', onKeydown)
   document.body.style.overflow = 'hidden'
   // 焦点先落在面板本身（有 tabindex="-1" 与 aria-label）：读屏软件随即念出标题，
@@ -100,6 +109,7 @@ function activate() {
 }
 
 function deactivate() {
+  dropModal(token)
   document.removeEventListener('keydown', onKeydown)
   document.body.style.overflow = ''
   // 还焦点之前先确认它还在：卸载往往连同那个按钮一起删掉了。
@@ -131,7 +141,16 @@ onUnmounted(deactivate)
 <template>
   <Teleport to="body">
     <Transition name="modal">
-      <div v-if="modelValue" class="modal-backdrop" @click="onBackdropClick" tabindex="-1">
+      <!-- 行内 `z-index` 与 `styles.css` 里那条基础规则同值（第一个开出来的是 1000），
+           所以**只开一个弹层时这一层与从前逐像素相同**；它只在同时开着两个以上时
+           才开始起作用（`composables/modalStack.ts` 里写着为什么不能靠 DOM 次序）。 -->
+      <div
+        v-if="modelValue"
+        class="modal-backdrop"
+        :style="{ zIndex }"
+        @click="onBackdropClick"
+        tabindex="-1"
+      >
         <section
           ref="shell"
           :class="['modal-panel', sizeClass]"

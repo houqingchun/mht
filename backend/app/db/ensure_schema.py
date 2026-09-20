@@ -93,7 +93,9 @@ def compare_schema(inspector, metadata) -> SchemaDiff:
     """把库里实际有的表与列，和 `metadata`（= `Base.metadata`）比一比。
 
     纯函数：只读 `inspector`，不碰数据库。`test_ensure_schema.py` 拿两份临时的小
-    metadata 在内存 sqlite 上逐种情形钉它。
+    metadata，在一个一次性 MySQL 库上逐种情形钉它。**这里的方言不能换**：`inspect()`
+    的行为逐方言不同，而它只比表名与列名正是为了躲开 MySQL 的反射噪音
+    （CLAUDE.md §18「选 3」那一节），那条判断该由 MySQL 来验。
     """
     actual_tables = set(inspector.get_table_names())
     missing_tables: list[str] = []

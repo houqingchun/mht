@@ -4,10 +4,10 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, require_role
+from app.api.deps import get_current_session, get_current_user, require_role
 from app.core.errors import AppError, ok
 from app.db.session import get_db
-from app.models.account import UserAccount
+from app.models.account import AuthSession, UserAccount
 from app.models.enums import RoleCode
 from app.models.permission import RolePermission
 from app.schemas.auth import (
@@ -38,6 +38,9 @@ from app.services.auth_service import (
     create_account,
     reset_password,
     resolve_scope_names,
+    revoke_all_sessions,
+    revoke_session,
+    serialize_sessions,
     serialize_user,
     scope_audit_detail,
     scope_options,
@@ -57,7 +60,9 @@ OrgAccountManager = Annotated[
 @router.post("/login")
 def login(payload: LoginRequest, request: Request, db: Annotated[Session, Depends(get_db)]):
     try:
-        user, token = authenticate(db, payload)
+        # `request` 一路传进去是给 `auth_session` 记来源用的（IP / 浏览器）——
+        # 「这条会话是哪台机器开的」是会话管理页上唯一能帮用户判断的东西。
+        user, token = authenticate(db, payload, request)
         write_audit(db, action="登录成功", resource_type="USER_ACCOUNT", resource_id=str(user.id), actor=user, request=request)
         db.commit()
         return ok({"access_token": token, "token_type": "bearer", "user": serialize_user(db, user)})
@@ -76,8 +81,106 @@ def login(payload: LoginRequest, request: Request, db: Annotated[Session, Depend
 
 
 @router.post("/logout")
-def logout(current_user: Annotated[UserAccount, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)]):
-    write_audit(db, action="退出", resource_type="USER_ACCOUNT", resource_id=str(current_user.id), actor=current_user)
+def logout(
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    session: Annotated[AuthSession, Depends(get_current_session)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """退出登录：**服务端把这一条会话撤销掉**。
+
+    此前这里只写一条审计——被偷走的 token 照样用到过期，「强制下线」这件事根本
+    做不到（`auth_session` 的模型 docstring 说的就是这个）。现在它同时是
+    「这条会话到此为止」：下一个带上同一个 token 的请求会在 `get_auth_context`
+    被拒。
+
+    动作码「退出」**一个字没改**：审计是已经落库的历史，用户在审计页按眼睛看到的
+    名字搜（§3 那条教训）。
+    """
+    revoke_session(db, session, "用户主动退出")
+    write_audit(
+        db,
+        action="退出",
+        resource_type="USER_ACCOUNT",
+        resource_id=str(current_user.id),
+        actor=current_user,
+        detail=f"撤销会话 #{session.id}",
+    )
+    db.commit()
+    return ok()
+
+
+@router.get("/sessions")
+def list_my_sessions(
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    session: Annotated[AuthSession, Depends(get_current_session)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """本人的登录设备清单。**只看得到自己的**——它逐行印出 IP 与浏览器，
+    那是账号持有者本人该看见的信息，不是管理员的（管理员要踢人走的是
+    「重置密码」那条路，那一次会撤销全部会话）。
+    """
+    return ok({"items": serialize_sessions(db, current_user.id, current_session_id=session.id)})
+
+
+# 这两条的顺序不能换：`/sessions/revoke-others` 必须排在 `/sessions/{session_id}/revoke`
+# 前面，否则 FastAPI 先把 `revoke-others` 当成一个 `session_id` 去转 int，回 422 而不是
+# 执行到这个端点。加新路径时先看一眼有没有更宽的模式排在它前面。
+@router.post("/sessions/revoke-others")
+def revoke_other_sessions(
+    request: Request,
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    session: Annotated[AuthSession, Depends(get_current_session)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    """「退出其它所有设备」——**当前这一条留着**，否则用户点完就被自己登出，
+    还得再登一次才能确认操作成功。
+    """
+    revoked = revoke_all_sessions(
+        db, current_user.id, "用户主动撤销其它登录", except_session_id=session.id
+    )
+    write_audit(
+        db,
+        action="撤销登录会话",
+        resource_type="USER_ACCOUNT",
+        resource_id=str(current_user.id),
+        actor=current_user,
+        request=request,
+        detail=f"撤销其它会话 {revoked} 个",
+    )
+    db.commit()
+    return ok({"revoked_sessions": revoked})
+
+
+@router.post("/sessions/{session_id}/revoke")
+def revoke_my_session(
+    session_id: int,
+    request: Request,
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    session: Annotated[AuthSession, Depends(get_current_session)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    target = db.get(AuthSession, session_id)
+    # 「不是你的」与「不存在」回同一句话同一个码：`session_id` 是客户端传来的，
+    # 分开报就等于确认了某个 id 存在（§24 那条「不可分辨」）。
+    if target is None or target.user_id != current_user.id:
+        raise AppError("NOT_FOUND", "登录设备不存在", 404)
+    if target.id == session.id:
+        # 不是「不行」，是「你要的那件事在别处」：用户想退出，而退出按钮就在右上角。
+        # 让他在这里把当前设备撤销掉也可以，但下一个请求才失败的登出是最难理解的那种
+        # ——点了「撤销」，页面看起来还好好的。
+        raise AppError(
+            "VALIDATION_ERROR", "这是你当前正在使用的设备。要退出，请用右上角的「退出」", 422
+        )
+    revoke_session(db, target, "用户主动撤销会话")
+    write_audit(
+        db,
+        action="撤销登录会话",
+        resource_type="USER_ACCOUNT",
+        resource_id=str(current_user.id),
+        actor=current_user,
+        request=request,
+        detail=f"撤销会话 #{target.id}",
+    )
     db.commit()
     return ok()
 
@@ -91,15 +194,42 @@ def me(current_user: Annotated[UserAccount, Depends(get_current_user)], db: Anno
 def change_password(
     payload: ChangePasswordRequest,
     current_user: Annotated[UserAccount, Depends(get_current_user)],
+    session: Annotated[AuthSession, Depends(get_current_session)],
     db: Annotated[Session, Depends(get_db)],
 ):
+    """改自己的密码，**顺手把其它设备上的我踢下线**。
+
+    改密码这件事本身就是在说「我怀疑别人拿到了我的密码」，所以留着别处的会话
+    等于没改。但**当前这一条留着**：用户改完密码还要继续用，把他一起登出会让他
+    以为改失败了（他手上那份 token 下一个请求才开始被拒）。
+
+    这里**不撤销**当前会话，与 `admin_reset_password` 那边**撤销全部**是有意的
+    差别：管理员重置的是别人的密码，那个人手上所有的 token（包括他此刻正在用
+    的那一份）都该立刻失效。
+    """
     if not verify_password(payload.old_password, current_user.password_hash):
         raise AppError("AUTH_INVALID", "原密码不正确", 422)
     current_user.password_hash = hash_password(payload.new_password)
     current_user.must_change_password = False
-    write_audit(db, action="修改本人密码", resource_type="USER_ACCOUNT", resource_id=str(current_user.id), actor=current_user)
+    # 与 `auth_service.authenticate` 里那一行同一个理由：父行的 UPDATE 必须先发出去，
+    # 否则下面 `revoke_all_sessions` 与 `write_audit` 写的子行（`auth_session` /
+    # `audit_log`，两张都有指向 `user_account` 的外键）可能在同一个 flush 里抢在它前面
+    # ——那是 MySQL 1213 的形状。完整的推导与实测写在 `authenticate` 那一行上面，
+    # 「这里今天恰好是对的、靠的是注册次序」那一句写在 `reset_password` 里。
+    db.flush()
+    revoked = revoke_all_sessions(
+        db, current_user.id, "本人修改密码", except_session_id=session.id
+    )
+    write_audit(
+        db,
+        action="修改本人密码",
+        resource_type="USER_ACCOUNT",
+        resource_id=str(current_user.id),
+        actor=current_user,
+        detail=f"撤销其它会话 {revoked} 个",
+    )
     db.commit()
-    return ok()
+    return ok({"revoked_sessions": revoked})
 
 
 @admin_router.get("")
@@ -218,10 +348,27 @@ def admin_reset_password(
     current_user: OrgAccountManager,
     db: Annotated[Session, Depends(get_db)],
 ):
+    """管理员重置别人的密码：**强制改密 + 旧会话全部失效 + 不回传明文**。
+
+    三件事都是 §16.5 逐字要求的，而它们各自堵住一种失败：
+
+    - **强制改密**（`must_change_password`）：临时密码是管理员口头/短信给的，
+      它必须只活一次登录。下一个请求它就会被 `change_password` 换掉。
+    - **撤销全部会话**（含那个人此刻正在用的那一条）：重置密码最常见的原因就是
+      「他的账号可能被别人用了」，留一条活动会话等于把这件事做了一半。
+    - **不回传明文**：`reset_password` 从此返回 `None`。此前这个端点的响应体里
+      带着 `temporary_password`，而统一响应封装会把整份 payload 发回浏览器——
+      规格禁的是「返回或记录明文密码」，这条正好两条都踩。
+
+    审计记的是**目标账号 / 原因 / 结果**，不记密码（§16.6：审计明细不得保存密码
+    或 Token）。`purpose` 是管理员填的原因，它进 `purpose` 那一列，与全站其余
+    入口一致。
+    """
     user = db.get(UserAccount, account_id)
     if not user:
         raise AppError("NOT_FOUND", "账号不存在", 404)
-    temporary_password = reset_password(db, user, payload.temporary_password)
+    reset_password(db, user, payload.temporary_password)
+    revoked = revoke_all_sessions(db, user.id, "管理员重置密码")
     write_audit(
         db,
         action="重置密码",
@@ -230,9 +377,10 @@ def admin_reset_password(
         actor=current_user,
         purpose=payload.purpose,
         request=request,
+        detail=f"账号 {user.account}；撤销登录会话 {revoked} 个；要求下次登录修改密码",
     )
     db.commit()
-    return ok({"temporary_password": temporary_password, "must_change_password": True})
+    return ok({"must_change_password": True, "revoked_sessions": revoked})
 
 
 @permission_router.get("/permissions")

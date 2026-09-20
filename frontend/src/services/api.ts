@@ -132,6 +132,14 @@ export interface StudentAssessmentHistoryItem {
   duration_seconds: number | null
   /** IN_SYSTEM / IMPORTED，或 null（这一行没有会话）。 */
   source: string | null
+  /**
+   * PENDING / CALCULATING / CALCULATED / CALCULATION_FAILED，或 null（这一行没有会话）。
+   *
+   * 分数仍然不下发给学生（见后端 `list_student_assessment_history` 的说明），
+   * 这一列说的是「这份答卷处理完了没有」——一名交完卷的学生看到「已完成」而学校里
+   * 这一场根本没算出来，他会以为一切都好。
+   */
+  calculation_status: string | null
 }
 
 export async function getStudentAssessmentHistory(): Promise<StudentAssessmentHistoryItem[]> {
@@ -171,13 +179,52 @@ export async function saveAssessmentAnswer(
   })
 }
 
-export async function submitAssessmentSession(sessionId: number): Promise<void> {
-  await apiRequest(`/assessment-sessions/${sessionId}/submit`, {
+export async function submitAssessmentSession(sessionId: number): Promise<SessionOutcome> {
+  return apiRequest<SessionOutcome>(`/assessment-sessions/${sessionId}/submit`, {
     method: 'POST',
     headers: {
       'Idempotency-Key': `submit-${sessionId}`
     }
   })
+}
+
+/**
+ * 一场测评「处理到哪一步了」——交卷与重算返回的是同一个形状
+ * （后端 `assessment_service.result_payload`）。
+ *
+ * **只列了界面真的会读的那几项**，不是这份响应的全部字段：多列一个没人读的字段，
+ * 下一次改后端形状时它就成了一个假承诺。要加字段先问一句「谁读它」。
+ */
+export interface SessionOutcome {
+  session_id: number
+  /** 会话自己的状态（IN_PROGRESS / SUBMITTED …），**不是**评分状态。 */
+  status: string
+  calculation_status: string
+  /** 失败原因原文（后端截断到 1000 字）。算成功时为 null。 */
+  calculation_error: string | null
+  submitted_at: string | null
+  tested_at: string | null
+  tested_at_source: string | null
+  /**
+   * 结果本身。**评分失败时它是 null，而 `calculation_status` 说为什么**——
+   * 所以判断「这一场有没有分」要看这个字段，不要看 `status`：一份没算出来的答卷
+   * 仍然是一份交过的答卷。
+   */
+  result: { total_level: string; rule_version: string } | null
+}
+
+/**
+ * 重算一场「没算出来」的答卷 —— 个案详情上那个「重算评分」按钮。
+ *
+ * 这是心理老师的动作（后端 `require_role(COUNSELOR)`），而且是一次**敏感读取**：
+ * 重算要读满整份答卷，所以每一次都写审计，并挂在这名学生名下。
+ * `recalculated: false` 不是失败——它说的是「已经有结果了，这一次什么都没写」。
+ */
+export async function retrySessionCalculation(sessionId: number): Promise<SessionOutcome & { recalculated: boolean }> {
+  return apiRequest<SessionOutcome & { recalculated: boolean }>(
+    `/assessment-sessions/${sessionId}/calculate`,
+    { method: 'POST' }
+  )
 }
 
 export interface CounselorWorkbench {
@@ -195,6 +242,8 @@ export interface CareCaseItem {
   grade: string
   class_name: string
   case_status: string
+  /** 乐观锁版本号（§16.4）——「批量分配」逐行带回去的就是它。 */
+  case_version: number
   owner_id: number | null
   owner_name: string | null
   total_level: string | null
@@ -225,6 +274,14 @@ export interface CareCaseDetail {
     age: number | null
   }
   case_status: string
+  /**
+   * 乐观锁版本号（§16.4）。
+   *
+   * **它必须出现在这个响应里**：关闭 / 重新打开都要求客户端把读到的版本带回去，
+   * 而客户端唯一拿得到它的地方就是这里。列表页走 `CareCaseItem.case_version`，
+   * 那是另一条路（批量分配逐行带号用）。
+   */
+  case_version: number
   assessment: {
     session_id: number | null
     submitted_at: string | null
@@ -234,6 +291,27 @@ export interface CareCaseDetail {
     rule_version: string | null
     /** IN_SYSTEM / IMPORTED，或 null（还没有任何一场测评）。 */
     source: string | null
+    /**
+     * 这一场算出来了没有 —— PENDING / CALCULATING / CALCULATED / CALCULATION_FAILED。
+     *
+     * 与上面几项**不是一回事**：`total_level` / `validity_status` / `rule_version` 都来自
+     * `assessment_result` 那一行，评分没成功时它们全是 null，而 null 在界面上长得与
+     * 「还没测」一模一样。这一列是那两者之间唯一的区别，也是「重算评分」按钮的判据。
+     */
+    calculation_status: string | null
+    /** 失败原因原文（后端已截断）。算成功或还没算时为 null。 */
+    calculation_error: string | null
+    /**
+     * 这一场**真实发生**的日期，与 `submitted_at` 分开。
+     *
+     * 在线作答时两者相同（交卷那一刻就是测评那一刻）；外部导入时 `submitted_at` 也是
+     * 文件里的那格日期，所以今天它们总是一样。但趋势是按这个字段排的，而
+     * `tested_at_source` 回答的正是「这个日期是谁给的」——历史行两者都是 null
+     * （0013 刻意没有回填，见 CLAUDE.md §21），那时界面只能照实说「待核实」。
+     */
+    tested_at: string | null
+    /** ONLINE_SUBMIT / IMPORT_FILE / PENDING_VERIFICATION，或 null。 */
+    tested_at_source: string | null
   }
   risk_events: Array<{
     id: number
@@ -292,6 +370,29 @@ export interface CareCaseDetail {
       score: number
       max_score: number
     }>
+  }>
+  /**
+   * 档案事件时间线（§16.4），**最新在前**（后端按 `id.desc()` 排）。
+   *
+   * 它与 `audit_logs` 是两件事，也是这一页上的两个页签——审计回答「谁在什么时候
+   * 调了哪个接口」，事件回答「这份档案经历了什么」。**按 `care_case_id` 过滤，
+   * 不像上面那几个列表那样按学生跨档案取**：这条时间线要读得出「这一份」的边界。
+   */
+  events: Array<{
+    id: number
+    /** `CARE_EVENT_LABELS` 的八个码之一（labels.ts）。 */
+    event_type: string
+    from_status: string | null
+    to_status: string | null
+    /** 操作人姓名；**开档那一条为 null**——它是系统自动开的（界面显示「系统」）。 */
+    operator_name: string | null
+    reason: string | null
+    /**
+     * 复核的结论原文。**只有人工复核那一条有值**：家庭回访的正文归
+     * `family_contacts[].confirmed_facts`，§16.6 明令不在这里存一份副本。
+     */
+    confirmed_facts: string | null
+    created_at: string | null
   }>
   audit_logs: Array<{
     id: number
@@ -383,9 +484,18 @@ export async function createRetestPlan(caseId: number, payload: { planned_date: 
   })
 }
 
+/**
+ * 关闭档案。`case_version` 是乐观锁（§16.4），取自 `CareCaseDetail.case_version`
+ * ——服务端在版本对不上时回 409 与一句人话，而不是让数据库用一句英文回答用户。
+ */
 export async function closeCareCase(
   caseId: number,
-  payload: { close_reason: string; close_note: string; confirm_follow_up_checked: boolean }
+  payload: {
+    close_reason: string
+    close_note: string
+    confirm_follow_up_checked: boolean
+    case_version: number
+  }
 ): Promise<void> {
   await apiRequest(`/care-cases/${caseId}/close`, {
     method: 'POST',
@@ -393,10 +503,13 @@ export async function closeCareCase(
   })
 }
 
-export async function reopenCareCase(caseId: number, reason: string): Promise<void> {
+export async function reopenCareCase(
+  caseId: number,
+  payload: { reason: string; case_version: number }
+): Promise<void> {
   await apiRequest(`/care-cases/${caseId}/reopen`, {
     method: 'POST',
-    body: JSON.stringify({ reason })
+    body: JSON.stringify(payload)
   })
 }
 
@@ -576,6 +689,17 @@ export interface TaskCompletionItem {
    */
   total_level: string | null
   total_score: number | null
+  /**
+   * 目标行的 id —— 标记参与状态要拿它去寻址（`markTargetParticipation`）。
+   *
+   * 「答没答」与「该不该答」是两个维度：`status` 说的是前者，下面三列说的是后者。
+   * 一名请假的学生在这一行上是「未完成」，而他不进完成率的分母。
+   */
+  target_id: number
+  /** `REQUIRED` / `LEAVE` / `EXEMPT` / `EXCLUDED`（§18.10）。 */
+  participation_disposition: string
+  /** 三个减项各自的原因。标回 `REQUIRED` 时服务端把它清成 null。 */
+  disposition_reason: string | null
 }
 
 export async function getAssessmentTasks(): Promise<AssessmentTaskItem[]> {
@@ -607,6 +731,74 @@ export async function updateAssessmentTask(
 export async function getTaskCompletion(taskId: number): Promise<TaskCompletionItem[]> {
   const data = await apiRequest<{ items: TaskCompletionItem[] }>(`/assessment-tasks/${taskId}/completion`)
   return data.items
+}
+
+// --- 目标学生（V1.2 第 1 期）---
+
+export interface TaskTargetItem {
+  student_no: string
+  student_name: string
+  grade: string
+  class_name: string
+  gender: string | null
+  age: number | null
+  status: string
+  /** TASK_SCOPE = 建任务时按对象范围发放，SUPPLEMENT = 后来补发的（CLAUDE.md §18.2）。 */
+  target_source: string
+  assigned_at: string | null
+  completed_at: string | null
+}
+
+export interface TaskTargetList {
+  task_id: number
+  task_no: string
+  name: string
+  /**
+   * 这场测评**当初是按什么范围发的**。可能是 `null`——那表示**没有这份记录**，
+   * 不是「全校」：2026-09-19 之前建的任务没有这一行，外部导入的批次任务也从来不
+   * 是「发给全校」的（它是照着一份文件建的）。所以调用方**不要** `?? 'SCHOOL'`
+   * 兜底，而要照着 `null` 分岔显示「未记录发放范围」。
+   */
+  scope_type: string | null
+  items: TaskTargetItem[]
+}
+
+export async function getTaskTargets(taskId: number): Promise<TaskTargetList> {
+  return apiRequest<TaskTargetList>(`/assessment-tasks/${taskId}/targets`)
+}
+
+export interface SupplementPreview {
+  /** 补发前 / 补发后这场测评的目标行总数。预览时只有 `before` 有值。 */
+  before: number
+  after?: number
+  added?: number
+  /** 候选（或已补发）的人数——**不是** `candidates.length`，截断时两者不等。 */
+  total: number
+  truncated: boolean
+  limit: number
+  candidates: {
+    student_no: string
+    student_name: string
+    grade: string
+    class_name: string
+  }[]
+}
+
+/**
+ * 补发目标学生：`confirm=false` 只看候选，`confirm=true` 才落行（§8.1 / §16.2）。
+ *
+ * 两次调用之间**没有状态**：`confirm=true` 时服务端会重新算一遍候选集，不依赖
+ * 上一次预览的结果。所以界面上的预览只是一次「让你确认要补哪些人」，它不是一份
+ * 拿在手里的清单——提交前名册上又转进来一个学生，他会被一起补进去。
+ */
+export async function supplementTaskTargets(
+  taskId: number,
+  payload: { reason: string; confirm: boolean }
+): Promise<SupplementPreview> {
+  return apiRequest<SupplementPreview>(`/assessment-tasks/${taskId}/targets/supplement`, {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  })
 }
 
 // --- 量表版本 ---
@@ -835,6 +1027,47 @@ export interface UpdateAccountPayload {
   active?: boolean
 }
 
+/** 重置密码的返回值：**只有后果，没有密码**（见 `resetAccountPassword`）。 */
+export interface ResetPasswordResult {
+  must_change_password: boolean
+  revoked_sessions: number
+}
+
+/**
+ * 一条登录会话。`status` 是服务端**现算**的（`REVOKED` 是库里真发生过的动作，
+ * `EXPIRED` 由 `expires_at` 推出来），与 §12 那条「状态是现算的」同一口径。
+ */
+export interface SessionItem {
+  id: number
+  token_type: string
+  status: string
+  issued_at: string
+  expires_at: string
+  last_seen_at: string | null
+  revoked_at: string | null
+  revoked_reason: string | null
+  ip: string | null
+  user_agent: string | null
+  /** 由服务端算，不让前端猜——猜错的后果是用户把自己踢下线。 */
+  is_current: boolean
+}
+
+export async function getMySessions(): Promise<SessionItem[]> {
+  const data = await apiRequest<{ items: SessionItem[] }>('/auth/sessions')
+  return data.items
+}
+
+export async function revokeSession(sessionId: number): Promise<void> {
+  await apiRequest(`/auth/sessions/${sessionId}/revoke`, { method: 'POST' })
+}
+
+export async function revokeOtherSessions(): Promise<number> {
+  const data = await apiRequest<{ revoked_sessions: number }>('/auth/sessions/revoke-others', {
+    method: 'POST'
+  })
+  return data.revoked_sessions
+}
+
 export interface StudentItem {
   id: number
   student_no: string
@@ -874,29 +1107,99 @@ export interface StudentImportPreviewRow {
   conflicts: StudentImportConflict[]
 }
 
+/**
+ * 名册导入的预览结果（V1.2 阶段 3 起）。
+ *
+ * 与 V1.0 的那一份**只差一个字段**，而那个字段是整件事的关键：这里交出去的是
+ * `batch_id`，不是 `preview_token`。上传时后端就把这一批（批次行 + 逐行明细）落进库，
+ * 确认导入读的是库里那一批——操作员上传完被叫走、回来接着提交时，他提交的正是屏幕上
+ * 那一批，而不是浏览器内存里一份可能已经过期的副本。
+ *
+ * `submittable_count` 是「这一批还有没有东西可提交」的**判据**，由服务端算一次原样
+ * 发下来（选了覆盖时冲突行也要写、选了放弃时它们被跳过，两种情况下它们都属于「这一批
+ * 要处理的行」）。前端**不要自己拿 valid_count + conflict_count 再算一遍**——两边各算
+ * 一次就会漂。
+ */
 export interface StudentImportPreview {
+  batch_id: number
+  batch_no: string
   total: number
   valid_count: number
   conflict_count: number
   error_count: number
+  submittable_count: number
   rows: StudentImportPreviewRow[]
-  preview_token: string | null
 }
 
 /** 与测评导入共用两个码（后端也是同一套常量）。含义不同：那边「覆盖」替换上次导入的那一场。 */
 export type StudentImportResolution = 'overwrite' | 'skip'
+
+/**
+ * 一批名册导入（`GET /student-roster/import/batches`）。
+ *
+ * `status` 两个取值都会真的出现：上传一份文件落一行 `PREVIEW`，确认导入改成
+ * `COMMITTED`。所以这一列不能直接打印——`importBatchStatusLabel` 翻成中文。
+ */
+export interface RosterImportBatch {
+  id: number
+  batch_no: string
+  file_name: string
+  status: string
+  total_rows: number
+  created_rows: number
+  updated_rows: number
+  skipped_rows: number
+  error_rows: number
+  created_at: string
+}
+
+/** 某一批里的**一行**，记的是它落进系统时的样子与结论（`GET .../batches/{id}/rows`）。 */
+export interface RosterImportBatchRow {
+  row_no: number
+  student_no: string | null
+  name: string | null
+  grade_name: string | null
+  class_name: string | null
+  /** 归一化之后的编码（`MALE`/`FEMALE`），界面上走 `genderLabel`。 */
+  gender: string | null
+  age: number | null
+  processing_status: string
+  /** 冲突码只在**冲突**时有值，与错误分开：冲突要人拍板，错误不用。 */
+  conflict_code: string | null
+  /** 需要解释时的中文原因（错误原文 / 「放弃」的理由）。 */
+  message: string | null
+  /** 落到了哪个学生身上；`ERROR` 与 `SKIPPED` 的行是 `null`。 */
+  student_id: number | null
+}
+
+/**
+ * 批次历史**不拆成裸数组**（§10 的第三个例外，与 `getAuditLogs` / `getCounselorReminders`
+ * 同形）：服务端封顶 20 批，`items.length` 回答不了「我一共导过几批」。
+ */
+export interface RosterImportBatchPage {
+  items: RosterImportBatch[]
+  total: number
+  truncated: boolean
+}
 
 export async function getAccounts(): Promise<AccountItem[]> {
   const data = await apiRequest<{ items: AccountItem[] }>('/admin/accounts')
   return data.items
 }
 
-export async function resetAccountPassword(accountId: number, temporaryPassword: string, purpose: string): Promise<string> {
-  const data = await apiRequest<{ temporary_password: string }>(`/admin/accounts/${accountId}/reset-password`, {
+/**
+ * 管理员重置别人的密码。
+ *
+ * **返回值里没有密码**：服务端不回传明文（§16.5），它只回答「那个人的登录会话
+ * 被撤销了几条」。密码是操作员在这个表单里自己敲的，界面显示的是他刚填的那一个。
+ * 顺带把服务端的两个必然后果带回来给界面说清楚：那个人下次登录必须改密码，
+ * 而且他此刻在别的设备上已经掉线了。
+ */
+export async function resetAccountPassword(accountId: number, temporaryPassword: string, purpose: string): Promise<ResetPasswordResult> {
+  return apiRequest<ResetPasswordResult>(`/admin/accounts/${accountId}/reset-password`, {
     method: 'POST',
     body: JSON.stringify({ temporary_password: temporaryPassword, purpose })
   })
-  return data.temporary_password
 }
 
 export async function getScopeOptions(): Promise<ScopeOption[]> {
@@ -966,137 +1269,412 @@ export async function getStudentResults(): Promise<StudentResultItem[]> {
   return data.items
 }
 
+/**
+ * 上传一份名册文件做校验预览（**同时落下这一批**）。
+ *
+ * 走裸 `fetch` 而不是 `apiRequest`：这是唯一的 multipart 上传，`apiRequest` 会给
+ * 每个请求套上 `Content-Type: application/json`，而那会把 multipart 的 boundary 一起
+ * 按 JSON 发出去，后端解不出文件。`assessment_import` 的两个上传同理。
+ */
 export async function previewStudentImport(file: File): Promise<StudentImportPreview> {
   const form = new FormData()
   form.append('file', file)
   const headers = new Headers()
   const token = getToken()
   if (token) headers.set('Authorization', `Bearer ${token}`)
-  const response = await fetch(`${API_BASE}/students/import/preview`, { method: 'POST', headers, body: form })
+  const response = await fetch(`${API_BASE}/student-roster/import/preview`, { method: 'POST', headers, body: form })
   const body = await response.json()
   if (!response.ok || !body.success) throw new Error(body.error?.message || '导入预览失败')
   return body.data as StudentImportPreview
 }
 
+/** 提交时回的是这一批的五个计数，外加批次号（审计与提示语都要说出是哪一批）。 */
+export interface StudentImportCommitResult {
+  batch_id: number
+  batch_no: string
+  created: number
+  updated: number
+  skipped: number
+  error_count: number
+}
+
 export async function commitStudentImport(
-  previewToken: string,
+  batchId: number,
   resolution?: StudentImportResolution
-): Promise<{ created: number; updated: number; skipped: number }> {
-  return apiRequest<{ created: number; updated: number; skipped: number }>('/students/import/commit', {
+): Promise<StudentImportCommitResult> {
+  return apiRequest<StudentImportCommitResult>('/student-roster/import/commit', {
     method: 'POST',
     // `resolution` 只在文件里真的有冲突时才必需；没有它时后端不会问，
     // 传 `undefined` 会被 JSON.stringify 整个丢掉，正是要的。
-    body: JSON.stringify({ preview_token: previewToken, resolution })
+    body: JSON.stringify({ batch_id: batchId, resolution })
   })
+}
+
+/** 最近导入过哪几批。逐行明细不在这里——一批是一所学校的人，那是几万行。 */
+export async function getStudentRosterBatches(): Promise<RosterImportBatchPage> {
+  const data = await apiRequest<RosterImportBatchPage>('/student-roster/import/batches')
+  return { items: data.items, total: data.total, truncated: data.truncated }
+}
+
+/** 某一批的逐行明细。批次不存在时后端 404，不返回空列表（§14）。 */
+export async function getStudentRosterBatchRows(batchId: number): Promise<RosterImportBatchRow[]> {
+  const data = await apiRequest<{ items: RosterImportBatchRow[] }>(
+    `/student-roster/import/batches/${batchId}/rows`
+  )
+  return data.items
 }
 
 /**
  * 外部平台的 MHT 普查结果导入（数据中心 → MHT测评记录导入）。
  *
- * 与另两个导入同形：预览（`preview_token` + 逐行 errors/warnings），确认后提交令牌。
- * 批次名称与测评日期是**请求级**的字段，不在文件里，所以随预览一起提交，
- * 由后端签进令牌——确认导入时只发令牌，操作员改不了已在预览里确认过的那两项。
- */
-/**
- * 待确认项 —— 记录本身是好的，难的是「以文件为准还是以库里为准」。
+ * V1.2 第 4 期起与名册导入同形：**上传即建批次**，逐行匹配结论落进
+ * `assessment_import_row`，提交时只发 `batch_id`。V1.0 那个 `preview_token`
+ * （把整份预览签成一个令牌）整个去掉了——令牌是死的，操作员没法在有问题的行上
+ * 做任何事，唯一出路是重传一次文件；而重传拿到的是同一个批次（同操作者 + 同文件
+ * 指纹 + 仍未提交的会被复用），所以令牌能表达的东西批次 id 一样表达得了，而且它
+ * 还能被查、能被别人接手、「上传完被叫走了回来接着提交」也才成立。
  *
- * 两类：`AGE_MISMATCH`（文件里的年龄与名册不符）与 `DUPLICATE`（同一个月里这个
- * 学生已经有导入记录）。一行可能同时带两条，一次处置（覆盖 / 放弃）同时回答它们。
+ * 三条与 V1.0 的实质差别，界面必须跟着变：
+ *
+ *   1. **逐行的结论是一句话，不是一个数组**。行表上没有 `errors` / `warnings` /
+ *      `conflicts` 三类格子，只有 `match_status`（匹配到什么程度）、`conflict_code`
+ *      （撞上了哪一类）与 `message`（后端拼好的一句人话）。V1.0 那种「三个都只有
+ *      半句的碎片」在屏幕上要读者自己拼，而它们本来是一起读才成立的。
+ *   2. **两个数各说各的**：`total_rows` 是这一批一共几行，`row_total` 是**读者可见**
+ *      的行数（逐行明细按数据范围过滤，见 §9）。界面上分开写、各自标明口径。
+ *   3. **可提交性由服务端算**（`row_counts`），前端不要自己拿几个数再算一遍。
  */
-export interface AssessmentImportConflict {
-  type: 'AGE_MISMATCH' | 'DUPLICATE'
-  message: string
-  /** 名册上那个数与文件里那个数（AGE_MISMATCH）。 */
-  roster_age?: number
-  file_age?: number
-  /** 上一次导入的那一场（DUPLICATE）。 */
-  existing_session_id?: number
-  existing_tested_on?: string | null
-}
 
-export interface AssessmentImportPreviewRow {
+/**
+ * 逐行明细里的一行（`GET /assessment-imports/{id}/rows`，以及上传那一次的响应）。
+ *
+ * 两套值都发：`raw_*` 是文件里印的那些字，`normalized_*` 是拿去找人的那些值。
+ * 少了前者，操作员看不出「七年级一班」为什么没匹配上「701」；少了后者，他改不对。
+ */
+export interface AssessmentImportRow {
+  id: number
+  /**
+   * 这一行是哪一批传上来的。
+   *
+   * 逐行明细那一屏（只看一批）用不到它；而**任务详情页的「未匹配行」是跨批的**
+   * （一场任务下可以有好几批，先初一、隔几天再初二），而 `row_no` 是**批内**编号
+   * ——少了这一列，那一屏会出现两行「第 2 行」，看起来像丢了一行或者重了一行。
+   * 服务端取不到批次时是 `null`（见 `_row_payload`），界面照 `—` 渲染。
+   */
+  batch_id: number
+  batch_no: string | null
+  /** **文件里的行号**（表头是第 1 行，所以第一条数据是 2），不是数组下标。 */
   row_no: number
-  name: string
-  grade: string
-  class_name: string
-  /** 文件里的 1/2 已归一化成 MALE / FEMALE；填错或没填时为 null。 */
-  gender: string | null
-  age: number | null
-  duration_seconds: number | null
+  raw_name: string | null
+  raw_grade_name: string | null
+  raw_class_name: string | null
+  raw_age: number | null
+  normalized_name: string | null
+  normalized_grade_name: string | null
+  normalized_class_name: string | null
+  /** 九个码之一（含初始值 `PENDING`），走 `matchStatusLabel`。 */
+  match_status: string
+  match_confidence: number | null
+  /** 同名候选的**可见**人数（别人班上的同名人不在里面）。 */
+  candidate_count: number
   matched_student_no: string | null
+  /** 展示名（`student.masked_name`），与逐行列表一致；不是遮蔽手段。 */
   matched_name: string | null
-  errors: string[]
-  warnings: string[]
-  conflicts: AssessmentImportConflict[]
+  /** `AGE_MISMATCH` / `DUPLICATE` / `IN_SYSTEM_RESULT`，走 `importConflictLabel`。 */
+  conflict_code: string | null
+  /**
+   * 只有 `match_status === 'OUT_OF_SCOPE'` 的行才有这一列，走 `outOfScopeReasonLabel`。
+   * 它把两种「任务外」分开，而两者的**出路完全不同**：`SUPPLEMENT_CANDIDATE` 可以补发
+   * 目标学生，`NOT_IN_TASK_SCOPE` 什么都不用做（§18.7，中文见 `labels.ts` 那张表）。
+   */
+  out_of_scope_reason: string | null
+  /** 提交之后这一行去哪了（PENDING / CREATED / UPDATED / SKIPPED），走 `importRowStatusLabel`。 */
+  processing_status: string
+  resolution: string | null
+  /**
+   * **来源冲突**怎么裁的（`KEEP_ONLINE` / `USE_EXTERNAL` / `REJECT_EXTERNAL` /
+   * `KEEP_BOTH_BUT_ONE_EFFECTIVE`），走 `conflictResolutionLabel`。
+   *
+   * 只有 `match_status === 'CONFLICT'` 的行才有这一列，所以 `null` 是**「这个问题没问过」**
+   * 而不是「选了某一档」——它与 `resolution` 是两个问题（那一列答「这一行写不写进去」，
+   * 这一列答「以哪一份为准、另一份留不留」），界面上两格都要显示。
+   */
+  conflict_resolution: string | null
+  /** 年龄覆盖前后的两个数（`AGE_MISMATCH` 选了覆盖时才有）。 */
+  age_before: number | null
+  age_after: number | null
+  /** 年龄冲突怎么处置的（`keep_roster` / `overwrite` / `session_only`），走 `ageResolutionLabel`。 */
+  age_resolution: string | null
+  /** 文件里的用时；没写就是 `null`——`0` 秒是一次真实存在的用时（§3 数值列约定）。 */
+  duration_seconds: number | null
+  session_id: number | null
+  /** 这一行为什么这样。**单元格里渲染的就是它**，不是若干个半句拼起来的。 */
+  message: string | null
 }
 
-export interface AssessmentImportPreview {
-  batch: { name: string; tested_on: string }
+/**
+ * 一批行**此刻**的状态分档，现算（上传那一次与 `GET .../rows` 都有）。
+ *
+ * 四个数对应四种动作，边界不能混：`needing_resolution` 与 `conflict` 是「有人拍板就
+ * 写得进去」，`error` 是「选什么都不会写」。界面上的措辞要与后端 `batch_row_counts`
+ * 的 docstring 同源，否则屏幕上那两句话会各自承诺一件做不到的事。
+ *
+ * **`conflict` 是 `needing_resolution` 的一个子集，不是并列的第五档**：整批那一次
+ * 「覆盖 / 放弃」管得着的是 `needing_resolution - conflict`，`CONFLICT` 那几条必须
+ * 逐行选四种处置之一（§18.8）。所以**那个单选项的显示与置灰判据，以及提交按钮的
+ * 硬门槛，用的都是这个差额**——用 `needing_resolution` 会让一批只有冲突行的批次
+ * 逼着操作员在两个按屏幕上的话「管不着这些行」的选项里挑一个，才肯点亮提交按钮。
+ * 「待确认」那个**标题**仍然数 `needing_resolution`（那几条确实还需要他做点事）。
+ *
+ * **数的是整批，不套读者的数据范围**（与逐行明细刻意不同）：这四个数坐在提交按钮旁边，
+ * 而提交时的判据是整批的。
+ */
+export interface AssessmentRowCounts {
+  ready: number
+  needing_resolution: number
+  /** 其中 `CONFLICT` 那几条（`needing_resolution` 的子集，见上）。 */
+  conflict: number
+  error: number
+}
+
+/**
+ * 一批导入 —— 上传响应、批次历史、以及「继续处理」拉回来的都是它。
+ *
+ * 逐行明细**只在两处**在响应里：上传那一次（`rows` + `row_total`，屏幕上要立刻显示
+ * 每一行的结论，再让前端多发一次请求是白等一个往返）与 `GET .../rows`。批次历史那一页
+ * 20 行，把每一批的行全带上会让它为了显示 20 行而传输几万行。
+ *
+ * `row_counts` 同理：批次列表那一路是 **`null`**——不是 `0`。`null` 是「这一页没算」，
+ * `0` 是「算过了，一行都没有」，两者在界面上必须长得不一样（与 §11 那条 `None` ≠ `0`
+ * 同源）。
+ */
+export interface AssessmentImportBatch {
+  id: number
+  batch_no: string
+  /**
+   * 这一批叫什么（提交后它会成为任务名）。与 `file_name` **分开**显示：只发一个的话，
+   * 操作员看到 `结果(3).csv` 会以为自己在界面上填的那一格没保存住。
+   */
+  batch_name: string
+  file_name: string
+  source_system: string | null
+  /** 文件里的测评日期（表单字段，不是文件里的一格）。 */
+  tested_on: string | null
+  /**
+   * 这份文件里装的是什么（`EXTERNAL_FULL_ANSWER` / `EXTERNAL_SUMMARY`），走
+   * `importModeLabel`。**与 `source` 是两个轴**：`source` 长在会话上说「在哪测的」，
+   * 这一列长在批次上说「文件里有没有逐题答案」。
+   *
+   * 它决定后果，界面要跟着分岔：汇总档不产生答卷、不进 `assessment_result`，
+   * 所以按结果说话的页面看不到它，而任务完成率会把它算成已完成。
+   */
+  import_mode: string
+  status: string
+  /** `NONE` / `overwrite` / `skip`；没提交过是 `null`。走 `assessmentResolutionLabel`。 */
+  resolution: string | null
+  task_id: number | null
+  total_rows: number
+  /**
+   * 下面四列回答「提交之后写进去了几条」。预览态下 `created/updated/skipped` 全是 `0`
+   * ——**`0` 与「还没提交」不是一回事**，界面按 `status` 分岔（预览态显示 `—`）。
+   */
+  created_rows: number
+  updated_rows: number
+  skipped_rows: number
+  /** 这一列在**匹配时**就写好了，所以预览态下它也有值。 */
+  error_rows: number
+  row_counts: AssessmentRowCounts | null
+  imported_by: number | null
+  /** 姓名与账号分两个字段发，界面自己拼「姓名 · 账号」（与审计页第一列逐字同形），
+   *  这样只有一个时还能降级显示。 */
+  imported_by_name: string | null
+  imported_by_account: string | null
+  created_at: string | null
+  /** 只有上传那一次的响应里带。 */
+  rows?: AssessmentImportRow[]
+  /** 同上：**读者可见**的行数（`rows.length` 就是它，除非被截断）。 */
+  row_total?: number
+}
+
+/** 批次历史不拆成裸数组：服务端封顶 20 批，`items.length` 回答不了「我一共导过几批」。 */
+export interface AssessmentImportBatchPage {
+  items: AssessmentImportBatch[]
   total: number
-  /** 不需要任何决定的行。有冲突的行**不**算在里面。 */
-  valid_count: number
-  /** 需要操作员选「覆盖」或「放弃」的行数。 */
-  conflict_count: number
-  error_count: number
-  warning_count: number
-  /** 列级/批次级问题。非空时不发预览令牌，逐行的 errors 也就无从谈起。 */
-  global_errors: string[]
-  rows: AssessmentImportPreviewRow[]
-  preview_token: string | null
 }
 
-/** 导入的处置方式：覆盖上次 / 放弃这几条。整份文件共用一次选择。 */
+/** 导入的处置方式：覆盖上次 / 放弃这几条。整批共用一次选择。 */
 export type AssessmentImportResolution = 'overwrite' | 'skip'
 
+/**
+ * 上传一份外部测评记录（**同时落下这一批与逐行明细**）。
+ *
+ * `taskId` 是**选填**的，而它决定判重口径（§18.7 / §18.8）：绑定了任务就按「这场任务里
+ * 这个人有没有有效卷子」判（`OUT_OF_SCOPE` / `CONFLICT` 两档只在这种情况下才可能出现），
+ * 不绑定就按自然月（同一名学生同一个月只能有一次外部导入）。两种口径都在，各有各的道理，
+ * 界面上要选。
+ *
+ * `sourceSystem` 也是选填：这批数据是从哪个平台导出来的。后端取不到时写 `UNKNOWN`。
+ */
 export async function previewAssessmentImport(
   file: File,
   batchName: string,
-  testedOn: string
-): Promise<AssessmentImportPreview> {
+  testedOn: string,
+  taskId?: number | null,
+  sourceSystem?: string
+): Promise<AssessmentImportBatch> {
   const form = new FormData()
   form.append('file', file)
   form.append('batch_name', batchName)
   form.append('tested_on', testedOn)
+  // 空串就是「没填」——后端按 `strip() or None` 读这两项。表单字段一律 append，
+  // 免得「键不在」与「键是空」在后端成为两种形状。
+  form.append('task_id', taskId ? String(taskId) : '')
+  form.append('source_system', sourceSystem ?? '')
   const headers = new Headers()
   const token = getToken()
   if (token) headers.set('Authorization', `Bearer ${token}`)
-  const response = await fetch(`${API_BASE}/assessment-import/preview`, { method: 'POST', headers, body: form })
+  const response = await fetch(`${API_BASE}/assessment-imports/preview`, { method: 'POST', headers, body: form })
   const body = await response.json()
   if (!response.ok || !body.success) throw new Error(body.error?.message || '导入预览失败')
-  return body.data as AssessmentImportPreview
+  return body.data as AssessmentImportBatch
 }
 
 export interface AssessmentImportResult {
+  batch_id: number
+  /** 这一批唯一的名字（`BATCH-20260919-1`），审计记的也是它。 */
+  batch_no: string
   /**
-   * `null` 表示这次**一条都没写进去**（全部冲突行都选了「放弃」），此时后端不建批次任务
+   * `null` 表示这次**一条都没写进去**（全部待确认的行都选了「放弃」），此时后端不建批次任务
    * ——空任务在列表上永远显示「进行中」，还会被同月的下一次导入复用。
    */
   task_id: number | null
   /** 同上：没有批次任务时是空串，所以别写死「（批次 ${task_no}）」。 */
   task_no: string
+  /** 这一批一共几行（含被放弃的），不是写进去的条数。 */
+  total: number
   created: number
-  /** 「覆盖上次」就地重写的条数（`conflicts` 里有 DUPLICATE 的那些）。 */
+  /** 「覆盖上次」就地重写的条数。 */
   updated: number
   skipped: number
-  /** 按文件的年龄写回名册的条数（`conflicts` 里有 AGE_MISMATCH 的那些）。 */
+  /**
+   * 处置过了、但外部结果**没有落成一场测评**的条数（第 6 期加的）。
+   *
+   * 它填的是 `created + updated + skipped` **之外**的那一块——冲突行选了「保留系统内
+   * 作答」或「不采纳外部结果」时，这一批刻意不建任何测评记录（学生本人答的那一份
+   * 已经在库里了）。少了它，上面三个数加起来小于总行数，而屏幕上没有任何东西解释
+   * 差额去哪了：**静默丢数据与「这里就只有这么多」在屏幕上一模一样**（§10）。
+   */
+  not_applied: number
+  /** 按文件的年龄写回名册的条数。 */
   age_updated: number
+  /** 覆盖时从那一场收回的、**还没人处理过**的风险待办条数（老师复核过的不动）。 */
+  withdrawn_risk_events: number
 }
 
 /**
- * `resolution` 只在文件里**真的有冲突**时才是必需的（后端会以 422 回一句中文，
+ * `resolution` 只在批次里**真的有需要拍板的行**时才是必需的（后端会以 422 回一句中文，
  * 前端把它原样弹出来）。没有冲突的文件照旧一次提交——要求 99% 的正常导入先回答
  * 一个不该问的问题，只会让人乱点。
+ *
+ * `ageResolution` 是**整批的年龄处置**，只在文件里有 `AGE_MISMATCH` 的行时才问得出答案
+ * （§18.5）。它与 `resolution` 是两个独立的问题（「这一行要不要写进去」与「年龄按谁的记」），
+ * 而**逐行处置过的行不受这两个参数影响**——逐行覆盖整批（`resolveAssessmentImportRow`）。
  */
 export async function commitAssessmentImport(
-  previewToken: string,
-  resolution?: AssessmentImportResolution
+  batchId: number,
+  resolution?: AssessmentImportResolution,
+  ageResolution?: string
 ): Promise<AssessmentImportResult> {
-  return apiRequest<AssessmentImportResult>('/assessment-import/commit', {
+  return apiRequest<AssessmentImportResult>(`/assessment-imports/${batchId}/commit`, {
     method: 'POST',
-    body: JSON.stringify(
-      resolution ? { preview_token: previewToken, resolution } : { preview_token: previewToken }
-    )
+    // 缺省时 `JSON.stringify` 会把这几个键整个丢掉，正是要的（后端按「键不在」读）。
+    body: JSON.stringify({ resolution, age_resolution: ageResolution })
   })
+}
+
+/**
+ * 逐行处置一条待拍板的导入行（§18.6）。
+ *
+ * 三个字段都可选，**缺省 = 保持这一次之前的值不变**（后端按 `is not None` 判），
+ * 所以「只改年龄那一项」不必把 `resolution` 再发一遍。没有清空的写法——后端没有这一档，
+ * 而它也不需要：处置是「拿个主意」，不是一个可以撤回的开关。
+ *
+ * **`conflictResolution` 是第三个问题**（第 6 期）：来源冲突的行（学生自己答过这一场，
+ * 学校里又导进来一份同场结果）要回答的是「以哪一份为准、另一份留不留」，而它既不是
+ * 「这一行写不写进去」（`resolution`），也不是「年龄按谁的记」（`ageResolution`）。
+ * 后端按 `match_status !== 'CONFLICT'` 拒收它——所以界面只在冲突行上摆这一栏。
+ *
+ * **它不写任何测评记录**（后端 docstring 逐字如此）：真正的落库仍然全部发生在提交那一刻，
+ * 所以界面上处置完那一行的 `processing_status` 仍然停在 `PENDING`——那不是没生效。
+ */
+export async function resolveAssessmentImportRow(
+  rowId: number,
+  payload: {
+    resolution?: AssessmentImportResolution
+    ageResolution?: string
+    conflictResolution?: string
+  }
+): Promise<{ row_id: number; row_no: number; batch_no: string; match_status: string }> {
+  return apiRequest(`/assessment-import-rows/${rowId}/resolve`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      resolution: payload.resolution,
+      age_resolution: payload.ageResolution,
+      conflict_resolution: payload.conflictResolution
+    })
+  })
+}
+
+/** 最近导入过哪几批（最近的在前，服务端封顶 20 条）。逐行明细走 `getAssessmentImportRows`。 */
+export async function getAssessmentImportBatches(): Promise<AssessmentImportBatchPage> {
+  return apiRequest<AssessmentImportBatchPage>('/assessment-imports')
+}
+
+/**
+ * 某一批的逐行明细，**按读者的数据范围过滤**（批次是共享的，而它逐行给出姓名与学号）。
+ *
+ * 返回的 `total` 是**可见**行数，`row_counts` 是**整批**的——两个数各有各的口径，
+ * 界面上都写，不互相顶替。这个「不同源」是有意的：那三个数坐在提交按钮旁边，必须与
+ * 提交时的整批判据一致。
+ */
+export async function getAssessmentImportRows(batchId: number): Promise<{
+  items: AssessmentImportRow[]
+  total: number
+  rowCounts: AssessmentRowCounts | null
+}> {
+  const data = await apiRequest<{
+    items: AssessmentImportRow[]
+    total: number
+    row_counts: AssessmentRowCounts | null
+  }>(`/assessment-imports/${batchId}/rows`)
+  return { items: data.items, total: data.total, rowCounts: data.row_counts }
+}
+
+/**
+ * 一场任务下**没进得去**的那些导入行（§18.10）。
+ *
+ * 判据是**并集**：`match_status` 落在进不去的那四档里，**或者**这一行在提交时被放弃了
+ * （选了「放弃」的行匹配得上，但这一批没有把它写进去——对这场任务而言它与没匹配上是
+ * 同一件事：这个学生的这一场缺着）。
+ *
+ * `reason_counts` 与 `total` 的**口径故意不同**：前者数整场（不套读者的数据范围），
+ * 后者是**你可见**的行数。两个数都要显示、各自标明口径——它们坐在同一句话里的
+ * 两个位置，而读的人会以为它们在数同一件事（§9 / §11）。
+ *
+ * 逐行封顶 200（`UNMATCHED_ROW_LIMIT`），超出的部分界面上要说出来（§10：凡是截断，
+ * 都要自己说出来）。
+ */
+export async function getUnmatchedImportRows(taskId: number): Promise<{
+  items: AssessmentImportRow[]
+  total: number
+  reasonCounts: Record<string, number>
+}> {
+  const data = await apiRequest<{
+    items: AssessmentImportRow[]
+    total: number
+    reason_counts: Record<string, number>
+  }>(`/assessment-tasks/${taskId}/unmatched-import-rows`)
+  return { items: data.items, total: data.total, reasonCounts: data.reason_counts }
 }
 
 /**
@@ -1207,21 +1785,63 @@ export async function getAuditLogs(query: AuditLogQuery = {}): Promise<AuditLogP
   return { items: data.items, total: data.total }
 }
 
-async function downloadCsv(path: string, filename: string, payload: unknown): Promise<void> {
+/**
+ * 一份导出作业 —— 后端 `ExportJob`（§16.3，2026-09-19 第 8 期）。
+ *
+ * **导出在这个系统里是两跳**：创建作业的端点只登记一行并落一份文件，字节一律从
+ * `GET /export-jobs/{id}/download` 出去。`status` 是服务端**现算**的（`EXPIRED`
+ * 由 `expires_at` 推出来，`REVOKED` 是库里真发生过的动作），照 §12 那条现算口径。
+ *
+ * `downloadable` 由服务端算，**不让前端从状态码推**：三个判据里有一个是「文件还在
+ * 不在盘上」，那是界面看不见的。按钮亮不亮和点下去会不会成功是同一句话的两个说法。
+ */
+export interface ExportJob {
+  id: number
+  job_no: string
+  export_type: string
+  requested_by: number
+  requested_by_name: string | null
+  purpose: string
+  mask_level: string
+  status: string
+  columns: string[]
+  row_count: number
+  download_count: number
+  downloadable: boolean
+  expires_at: string | null
+  downloaded_at: string | null
+  revoked_at: string | null
+  created_at: string | null
+}
+
+/** 建一份导出作业。**它不回文件**——字节走 `downloadExportJob`。 */
+export async function createExportJob(path: string, payload: unknown): Promise<ExportJob> {
+  return apiRequest<ExportJob>(path, { method: 'POST', body: JSON.stringify(payload) })
+}
+
+/** 取回一份作业的字节并让浏览器存盘。 */
+export async function downloadExportJob(jobId: number, filename: string): Promise<void> {
   const headers = new Headers()
-  headers.set('Content-Type', 'application/json')
   const token = getToken()
   if (token) headers.set('Authorization', `Bearer ${token}`)
-  const response = await fetch(`${API_BASE}${path}`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(payload)
-  })
+  const response = await fetch(`${API_BASE}/export-jobs/${jobId}/download`, { headers })
   if (!response.ok) {
-    const body = await response.json()
-    throw new Error(body.error?.message || '导出失败')
+    // 服务端的 `error.message` 本来就是写给用户看的（「这份文件已经过期」/「已被
+    // 撤销」/「文件已不在服务器上，请重新导出」），照搬过来比另编一句准确（§2）。
+    let message = '导出失败'
+    try {
+      const body = await response.json()
+      message = body.error?.message || message
+    } catch {
+      // 响应体不是 JSON（网关那张 HTML 错误页）——保住上面那句兜底，不要在这里抛
+      // 一个 SyntaxError 把真正的原因盖掉。
+    }
+    throw new Error(message)
   }
-  const blob = await response.blob()
+  saveBlob(await response.blob(), filename)
+}
+
+function saveBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = url
@@ -1231,33 +1851,125 @@ async function downloadCsv(path: string, filename: string, payload: unknown): Pr
 }
 
 /**
+ * 文件名带上作业编号：`care-cases-EXPORT-20260919-3.csv`。
+ *
+ * 作业编号是**给人念的**（操作员报故障时说的就是它，审计页搜的也是它），而浏览器
+ * 下载目录里那一串 `care-cases.csv`、`care-cases(1).csv` 谁也认不出是哪一次导出。
+ * 语义名留着是因为它仍然是最快能认出来的那半截。
+ */
+export function exportFileName(stem: string, jobNo: string): string {
+  return `${stem}-${jobNo}.csv`
+}
+
+/**
+ * 建作业 + 立刻把文件取回来——**界面上仍然是一次点击**。
+ *
+ * 两跳是服务端的事：一次点击如果变成「先建作业、再去导出中心点下载」，那是把一个
+ * 记录动作变成了第二道工序，而用户要的只是一份文件。导出中心留给「再看一眼当时
+ * 导了什么」和「过期前重下一次」。
+ */
+async function runExport(path: string, stem: string, payload: unknown): Promise<ExportJob> {
+  const job = await createExportJob(path, payload)
+  await downloadExportJob(job.id, exportFileName(stem, job.job_no))
+  return job
+}
+
+export async function listExportJobs(): Promise<ExportJob[]> {
+  const data = await apiRequest<{ items: ExportJob[] }>('/export-jobs')
+  return data.items
+}
+
+export async function revokeExportJob(jobId: number, reason: string): Promise<ExportJob> {
+  return apiRequest<ExportJob>(`/export-jobs/${jobId}/revoke`, {
+    method: 'POST',
+    body: JSON.stringify({ reason })
+  })
+}
+
+/**
  * 任务完成明细的 CSV。
  *
- * 这个端点一直在（`GET /assessment-tasks/{id}/completion/export`），但界面从来没有
- * 入口——于是一所 1000 人学校的普查明细只能在 340px 高的弹层里滚。明细表格因此
- * 只渲染前若干行（见 `TasksPage` 的 `DETAIL_RENDER_LIMIT`），而「全部」的出路就是
- * 这里：截断必须有一条出路，否则就是静默丢数据。
+ * 这个端点一直在，但界面从来没有入口——于是一所 1000 人学校的普查明细只能在 340px
+ * 高的弹层里滚。明细表格因此只渲染前若干行（见 `TasksPage` 的 `DETAIL_RENDER_LIMIT`），
+ * 而「全部」的出路就是这里：截断必须有一条出路，否则就是静默丢数据。
  *
- * 与 `downloadCsv` 分开写是因为那个 helper 走 POST 带 body，而这一个是 GET。
+ * 2026-09-19 第 8 期起它从 `GET` 改成 `POST /completion/export`：这条路**不再只读**
+ * （每次调用建一行 `export_job`、占一个编号、在盘上落一份文件），而 GET 的语义是
+ * 「可以重复取、没有副作用」。
  */
-export async function downloadTaskCompletionCsv(taskId: number, filename: string): Promise<void> {
-  const headers = new Headers()
-  const token = getToken()
-  if (token) headers.set('Authorization', `Bearer ${token}`)
-  const response = await fetch(`${API_BASE}/assessment-tasks/${taskId}/completion/export`, {
-    headers
+export async function downloadTaskCompletionCsv(
+  taskId: number,
+  stem: string,
+  purpose: string
+): Promise<ExportJob> {
+  return runExport(`/assessment-tasks/${taskId}/completion/export`, stem, { purpose })
+}
+
+/**
+ * 未参与名单（这场测评里应测但没完成的人）。
+ *
+ * 三档身份（学号/姓名/年级/班级/性别/年龄）加参与状态，所以服务端有两道门槛
+ * （§18.11）：`CONTROLLED_EXPORT` 与 `STUDENT_PSYCH_DETAIL: {SCOPED}`。
+ */
+export async function downloadNonParticipantsCsv(
+  taskId: number,
+  stem: string,
+  purpose: string
+): Promise<ExportJob> {
+  return runExport(`/assessment-tasks/${taskId}/non-participants/export`, stem, { purpose })
+}
+
+/**
+ * 未匹配行清单（§20#14 的「导出」那一半）：这场任务下没进得去的那几类导入行。
+ *
+ * 与「未参与名单」是**两批不同的人**：那一份导的是应测没完成的学生，这一份导的是
+ * 压根没进到学生身上（或进来了又被放弃）的行——所以列也不一样，这里给的是
+ * 「哪一批、第几行、文件里写的是谁、为什么没进来」。
+ *
+ * 门槛与未参与名单逐字同一对（服务端也是同一个函数），但对**德育领导**一样是 403：
+ * 两种取值都要求 `STUDENT_PSYCH_DETAIL: {SCOPED}`，而它是 `SUMMARY`。
+ */
+export async function downloadUnmatchedRowsCsv(
+  taskId: number,
+  stem: string,
+  purpose: string
+): Promise<ExportJob> {
+  return runExport(`/assessment-tasks/${taskId}/unmatched-import-rows/export`, stem, { purpose })
+}
+
+/**
+ * 一场测评的参与口径六个数（§18.10）：目标 / 请假免测已排除 / 应测 / 已完成 / 完成率，
+ * 外加 `unimported_records`（任务外、重复、未匹配、冲突的导入记录——它们**不进**
+ * 完成率，因为那批行从来不在目标行里）。
+ */
+export interface TaskParticipation {
+  total_targets: number
+  excluded_targets: number
+  expected_targets: number
+  completed_targets: number
+  completion_rate: number
+  unimported_records: number
+}
+
+export async function getTaskParticipation(taskId: number): Promise<TaskParticipation> {
+  return apiRequest<TaskParticipation>(`/assessment-tasks/${taskId}/participation`)
+}
+
+/**
+ * 标记一名目标学生在**这一场**里该不该参加。
+ *
+ * 它一行答题事实都不动：目标行的 `status`、会话、答卷、结果一个不碰——「该不该参加」
+ * 与「参没参加」是两个维度。三个减项都要填原因，服务端会挡下没填的那种。
+ */
+export async function markTargetParticipation(
+  taskId: number,
+  targetId: number,
+  payload: { disposition: string; reason?: string | null; note?: string | null }
+): Promise<{ participation_disposition: string; disposition_reason: string | null }> {
+  return apiRequest(`/assessment-tasks/${taskId}/targets/${targetId}/participation`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload)
   })
-  if (!response.ok) {
-    const body = await response.json()
-    throw new Error(body.error?.message || '导出失败')
-  }
-  const blob = await response.blob()
-  const url = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = filename
-  anchor.click()
-  URL.revokeObjectURL(url)
 }
 
 export interface ExportOptions {
@@ -1276,31 +1988,40 @@ export async function getAssignableOwners(): Promise<AssignableOwner[]> {
   return data.items
 }
 
-export async function batchAssignOwner(caseIds: number[], ownerId: number): Promise<{ updated: number }> {
+/**
+ * 批量转派负责人。
+ *
+ * **载荷是逐行带版本号的，不是一串 case id**（§16.4：转派也要走乐观锁）。一个
+ * `number[]` 只表达得了「我要改这几条」，表达不了「我读到的是这几条的哪一版」——
+ * 而列表上每一行的版本各不相同（有些行是十分钟前拉的），所以号必须跟着行走。
+ */
+export async function batchAssignOwner(
+  assignments: Array<{ case_id: number; case_version: number }>,
+  ownerId: number
+): Promise<{ updated: number }> {
   return apiRequest<{ updated: number }>('/care-cases/batch-assign', {
     method: 'POST',
-    body: JSON.stringify({ case_ids: caseIds, owner_id: ownerId })
+    body: JSON.stringify({ assignments, owner_id: ownerId })
   })
 }
 
-export async function exportCareCases(options: ExportOptions): Promise<void> {
+export async function exportCareCases(options: ExportOptions): Promise<ExportJob> {
   const { studentIds, ...rest } = options
-  if (studentIds && studentIds.length > 0) {
-    await downloadCsv('/care-cases/export', 'care-cases.csv', { ...rest, student_ids: studentIds })
-  } else {
-    await downloadCsv('/care-cases/export', 'care-cases.csv', rest)
-  }
+  // 勾选了几个人就只导这几个人——那一支本来就是学生 id 的集合，服务端照它筛。
+  // 不勾选是「整个范围」，不是「一个都不导」，所以两个分支的载荷不同而不是同一个。
+  const payload = studentIds && studentIds.length > 0 ? { ...rest, student_ids: studentIds } : rest
+  return runExport('/care-cases/export', 'care-cases', payload)
 }
 
-export async function exportHighRiskCareCases(options: ExportOptions): Promise<void> {
+export async function exportHighRiskCareCases(options: ExportOptions): Promise<ExportJob> {
   const { studentIds: _ignored, ...rest } = options
-  await downloadCsv('/care-cases/high-risk/export', 'high-risk-care-cases.csv', rest)
+  return runExport('/care-cases/high-risk/export', 'high-risk-care-cases', rest)
 }
 
 /** Single-student controlled export — the prototype's `exportOne`. */
-export async function exportCareCase(studentId: number, options: ExportOptions): Promise<void> {
+export async function exportCareCase(studentId: number, options: ExportOptions): Promise<ExportJob> {
   const { studentIds: _ignored, ...rest } = options
-  await downloadCsv(`/care-cases/${studentId}/export`, 'care-case.csv', rest)
+  return runExport(`/care-cases/${studentId}/export`, 'care-case', rest)
 }
 
 /**

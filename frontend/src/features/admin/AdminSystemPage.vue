@@ -117,7 +117,12 @@ function onFormCancel() {
 // A freshly minted password is a credential: show it in a dedicated dialog the
 // operator dismisses, never in a toast that lingers in the DOM.
 const showPasswordResult = ref(false)
-const resetResult = ref<{ title: string; name: string; password: string } | null>(null)
+/**
+ * `note` 是重置密码那条路独有的：服务端把那个人的会话全撤销了，而这件事在屏幕上
+ * 必须说出来——两位老师同时在用同一个账号、其中一位被重置密码，另一位会突然掉线，
+ * 而他会以为是系统坏了。新建账号没有这一句（那个人还没有任何会话）。
+ */
+const resetResult = ref<{ title: string; name: string; password: string; note?: string } | null>(null)
 
 async function resetPassword(account: AccountItem) {
   const values = await showFormDialog(
@@ -131,8 +136,17 @@ async function resetPassword(account: AccountItem) {
   )
   if (!values.purpose || !values.temp_password) return
   try {
-    const password = await resetAccountPassword(account.id, values.temp_password, values.purpose)
-    resetResult.value = { title: '临时密码已重置', name: account.display_name, password }
+    const result = await resetAccountPassword(account.id, values.temp_password, values.purpose)
+    resetResult.value = {
+      title: '临时密码已重置',
+      name: account.display_name,
+      // 服务端不回传明文，这里显示的是操作员刚在表单里敲的那一个。
+      password: values.temp_password,
+      note:
+        result.revoked_sessions > 0
+          ? `该账号原来的登录会话已全部撤销（${result.revoked_sessions} 条），此刻在其它设备上已经掉线，需要用这个密码重新登录。`
+          : '该账号此前没有登录中的会话。'
+    }
     showPasswordResult.value = true
     await load()
   } catch (err) {
@@ -637,6 +651,7 @@ onMounted(loadVersionLabel)
         <div class="notice warn">
           请立即通过安全渠道告知该用户，并要求其首次登录后修改密码。关闭本窗口后将无法再次查看。
         </div>
+        <div class="notice" v-if="resetResult.note" style="margin-top:10px">{{ resetResult.note }}</div>
         <div class="detail-grid" style="margin-top:14px">
           <div class="detail-row"><span>账号</span><b>{{ resetResult.name }}</b></div>
           <div class="detail-row"><span>临时密码</span><b>{{ resetResult.password }}</b></div>

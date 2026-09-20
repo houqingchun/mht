@@ -20,6 +20,7 @@ from app.models.organization import School, Student
 from app.models.scale import AssessmentScale
 from app.services.task_service import effective_task_status
 from app.tests.conftest import auth_headers
+from app.tests.factories import make_target
 from app.tests.test_data_scope import (
     make_same_school_student_in_another_class,
     replace_scopes,
@@ -60,13 +61,24 @@ def _make_task(
     )
     db.add(task)
     db.flush()
-    db.add(AssessmentTarget(task_id=task.id, student_id=student.id, status="NOT_STARTED"))
+    make_target(db, student, task)
     db.commit()
     return task
 
 
-def _set_target_status(db, task_id: int, status: str) -> None:
-    target = db.scalar(select(AssessmentTarget).where(AssessmentTarget.task_id == task_id))
+def _set_target_status(db, task_id: int, status: str, *, student_no: str = "S001") -> None:
+    """把**指名道姓**那一名学生的目标行改掉。
+
+    `student_no` 是必给的（默认 S001，也就是 `_make_task` 发的那个人）：`_make_task`
+    只发一个人时「按 task_id 取第一行」恰好就是它，而 `test_the_status_is_not_scoped_
+    to_the_reader` 会给同一场任务再发一个人——那时「第一行是谁」由物理次序决定，
+    用例会随存储引擎的不同而绿或红。判据写成「哪个人」就不依赖那次序。
+    """
+    target = db.scalar(
+        select(AssessmentTarget)
+        .join(Student, Student.id == AssessmentTarget.student_id)
+        .where(AssessmentTarget.task_id == task_id, Student.student_no == student_no)
+    )
     target.status = status
     db.commit()
 
@@ -121,7 +133,7 @@ def test_a_task_that_has_not_started_reads_as_not_started(client, db_session):
 
 
 def test_a_batch_without_a_deadline_closes_on_completion(client, db_session):
-    """外部导入的批次没有截止日期（`commit_assessment_import` 刻意留空），
+    """外部导入的批次没有截止日期（`commit_batch` 刻意留空），
     只能由「全都答完了」收尾——否则它会永远停在「进行中」。"""
     task = _make_task(db_session, start_at=NOW - timedelta(days=1), end_at=None)
     _set_target_status(db_session, task.id, "COMPLETED")
@@ -181,7 +193,7 @@ def test_the_status_is_not_scoped_to_the_reader(client, db_session):
     seeded = seed_student(db_session)  # S001，青禾 1班
     other_class = make_same_school_student_in_another_class(db_session)  # 同校 2班
     task = _make_task(db_session, start_at=NOW - timedelta(days=7), end_at=NOW + timedelta(days=7))
-    db_session.add(AssessmentTarget(task_id=task.id, student_id=other_class.id, status="NOT_STARTED"))
+    make_target(db_session, other_class, task)
     _set_target_status(db_session, task.id, "COMPLETED")  # S001 那条已完成
 
     user = seed_counselor(db_session)

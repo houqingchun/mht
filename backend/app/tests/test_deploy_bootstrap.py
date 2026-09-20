@@ -2,7 +2,9 @@
 
 这里钉的都是**纯函数与无副作用的判断**：URL 怎么拆、密码怎么解码、改密码改了哪几列、
 清理脚本在不加 `--yes` 时动不动手。真正连 MySQL 的那几条路（建库、跑那份 SQL）在
-`make deploy-package` 之后由人工在临时库上走一遍，这里跑不了——conftest 是内存 sqlite。
+`make deploy-package` 之后由人工在临时库上走一遍——它们各自要一个**自己的库**，
+而这里的 `db_session` 是被一层事务罩住的（`mysql_support.throwaway_database` 能给出
+那种库，但这两条至今仍走人工，理由见 `deploy/README.md`）。
 
 **变异验证**：把 `mysql_url.parse_database_url` 里的 `unquote` 摘掉 →
 `test_the_password_is_percent_decoded` 红；把 `set_password_in` 改成直接写

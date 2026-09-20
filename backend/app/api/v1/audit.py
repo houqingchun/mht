@@ -1,12 +1,11 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import Response
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_role
-from app.core.errors import AppError, ok
+from app.core.errors import ok
 from app.db.session import get_db
 from app.models.account import UserAccount
 from app.models.audit import AuditLog
@@ -16,7 +15,16 @@ from app.schemas.export import CareCaseExportRequest
 from app.security.data_scope import ensure_student_in_scope, student_scope_predicate
 from app.security.permissions import CONTROLLED_EXPORT, PROGRESS_SUMMARY, PSYCH_SUMMARY, require_capability
 from app.services.audit_service import write_audit
-from app.services.export_service import export_care_cases_csv
+from app.services.export_service import (
+    EXPORT_TYPE_CARE_CASES,
+    EXPORT_TYPE_HIGH_RISK_CASES,
+    EXPORT_TYPE_SINGLE_CASE,
+    MASK_LEVEL_IDENTIFIED,
+    MASK_LEVEL_MASKED,
+    create_export_job,
+    export_care_cases_csv,
+    serialize_export_jobs,
+)
 
 router = APIRouter(tags=["audit-export"])
 
@@ -37,6 +45,64 @@ def _export_detail(mask_names: bool, scope: str) -> str:
     answer: was this file identified? `purpose` is free text and cannot carry it.
     """
     return f"{scope} · {'实名' if not mask_names else '姓名遮蔽'}"
+
+
+def _create_controlled_export(
+    db: Session,
+    current_user: UserAccount,
+    request: Request,
+    *,
+    action: str,
+    export_type: str,
+    export_scope: str,
+    payload: CareCaseExportRequest,
+    student_id: int | None = None,
+) -> dict:
+    """三个受控导出的共同后段：建作业 → 写审计 → 返回作业载荷。**不发文件。**
+
+    抽成一个函数不是省行数，是**让「导出的产物是一份作业」只有一个形状**：三条路由
+    各写一遍 `create_export_job` + `write_audit` + `serialize` 时，其中一条漏掉
+    `mask_level`（或把它写反）不会有任何东西报错——那一份文件在库里的遮蔽等级会说
+    一句关于它自己的假话，而 `mask_level` 存在的全部理由就是它是那句真话。
+
+    用途的判据在 `create_export_job` 里（`PURPOSE_REQUIRED`）。三条路由本来各有一句
+    「某某导出必须填写用途」，那是同一件事的三种说法：判据只该有一处，否则加第四个
+    导出端点时总会漏掉那一句。
+
+    `resource_id` 沿用这三条路由一直以来的口径：批量导出是 `None`（它不对应某一个
+    对象），单个学生是学号。作业编号进 `detail`——编号是给人念的，而审计的 `q` 匹配
+    的是 action / resource_type / resource_id 三列，把编号挤进其中一列会改掉一次
+    既有搜索的结果集。
+    """
+    document = export_care_cases_csv(
+        db,
+        current_user,
+        high_risk_only=export_type == EXPORT_TYPE_HIGH_RISK_CASES,
+        student_ids=[student_id] if student_id is not None else payload.student_ids,
+        mask_names=payload.mask_names,
+        include_score=payload.include_score,
+    )
+    job = create_export_job(
+        db,
+        current_user,
+        export_type=export_type,
+        purpose=payload.purpose or "",
+        document=document,
+        mask_level=MASK_LEVEL_MASKED if payload.mask_names else MASK_LEVEL_IDENTIFIED,
+    )
+    write_audit(
+        db,
+        action=action,
+        resource_type="EXPORT",
+        resource_id=str(student_id) if student_id is not None else None,
+        purpose=job.purpose,
+        actor=current_user,
+        request=request,
+        detail=f"{_export_detail(payload.mask_names, export_scope)} · 作业 {job.job_no}",
+        student_id=student_id,
+    )
+    db.commit()
+    return ok(serialize_export_jobs(db, current_user, [job])[0])
 
 
 @router.get("/audit-logs")
@@ -143,30 +209,22 @@ def care_case_export(
     current_user: ControlledExporter,
     db: Annotated[Session, Depends(get_db)],
 ):
-    if not payload.purpose:
-        raise AppError("PURPOSE_REQUIRED", "受控导出必须填写用途", 422)
-    csv_text = export_care_cases_csv(
+    """关注档案摘要导出——**创建作业**，文件由 `/export-jobs/{id}/download` 发。
+
+    返回的是作业载荷而不是 CSV 字节（§16.3：导出文件默认短期有效、可撤销、可数下载
+    次数——三条都要求下载经过一道门）。客户端拿到 `id` 之后自己走那一步。
+    """
+    return _create_controlled_export(
         db,
         current_user,
-        student_ids=payload.student_ids,
-        mask_names=payload.mask_names,
-        include_score=payload.include_score,
-    )
-    write_audit(
-        db,
+        request,
         action="导出关注档案摘要",
-        resource_type="EXPORT",
-        resource_id=None,
-        purpose=payload.purpose,
-        actor=current_user,
-        request=request,
-        detail=_export_detail(
-            payload.mask_names,
-            f"学生 {len(payload.student_ids)} 人" if payload.student_ids else "全部档案",
+        export_type=EXPORT_TYPE_CARE_CASES,
+        export_scope=(
+            f"学生 {len(payload.student_ids)} 人" if payload.student_ids else "全部档案"
         ),
+        payload=payload,
     )
-    db.commit()
-    return Response(content=csv_text, media_type="text/csv; charset=utf-8")
 
 
 @router.post("/care-cases/high-risk/export")
@@ -176,27 +234,18 @@ def high_risk_export(
     current_user: ControlledExporter,
     db: Annotated[Session, Depends(get_db)],
 ):
-    if not payload.purpose:
-        raise AppError("PURPOSE_REQUIRED", "高度关注导出必须填写用途", 422)
-    csv_text = export_care_cases_csv(
+    """高度关注导出。**「高度关注」就是关注等级里的「重点关注」（同一档）**——
+    这句话在界面上那三个入口各写了一遍（§3），这里是它的服务端口径：筛的是
+    `AssessmentResult.total_level == KEY_ATTENTION`。"""
+    return _create_controlled_export(
         db,
         current_user,
-        high_risk_only=True,
-        mask_names=payload.mask_names,
-        include_score=payload.include_score,
-    )
-    write_audit(
-        db,
+        request,
         action="导出高度关注摘要",
-        resource_type="EXPORT",
-        resource_id=None,
-        purpose=payload.purpose,
-        actor=current_user,
-        request=request,
-        detail=_export_detail(payload.mask_names, "高度关注"),
+        export_type=EXPORT_TYPE_HIGH_RISK_CASES,
+        export_scope="高度关注",
+        payload=payload,
     )
-    db.commit()
-    return Response(content=csv_text, media_type="text/csv; charset=utf-8")
 
 
 @router.post("/care-cases/{student_id}/export")
@@ -213,26 +262,14 @@ def single_care_case_export(
     same reason the case endpoints do: holding the export capability says a
     counselor may export psych summaries, not which students' summaries.
     """
-    if not payload.purpose:
-        raise AppError("PURPOSE_REQUIRED", "受控导出必须填写用途", 422)
     ensure_student_in_scope(db, current_user, student_id)
-    csv_text = export_care_cases_csv(
+    return _create_controlled_export(
         db,
         current_user,
-        student_ids=[student_id],
-        mask_names=payload.mask_names,
-        include_score=payload.include_score,
-    )
-    write_audit(
-        db,
+        request,
         action="导出单个学生摘要",
-        resource_type="EXPORT",
-        resource_id=str(student_id),
-        purpose=payload.purpose,
-        actor=current_user,
-        request=request,
-        detail=_export_detail(payload.mask_names, f"学生 {student_id}"),
+        export_type=EXPORT_TYPE_SINGLE_CASE,
+        export_scope=f"学生 {student_id}",
+        payload=payload,
         student_id=student_id,
     )
-    db.commit()
-    return Response(content=csv_text, media_type="text/csv; charset=utf-8")

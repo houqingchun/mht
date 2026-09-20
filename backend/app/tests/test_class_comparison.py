@@ -21,8 +21,8 @@ from app.models.assessment import AssessmentResult, AssessmentSession, Dimension
 from app.models.audit import AuditLog
 from app.models.enums import ScopeType
 from app.models.organization import ClassGroup, Grade, School, Student
-from app.models.scale import AssessmentScale
 from app.tests.conftest import auth_headers
+from app.tests.factories import make_sitting, published_scale
 
 DIMENSION = "LEARNING_ANXIETY"
 
@@ -53,14 +53,8 @@ def add_students(db, count: int, class_group: ClassGroup, grade: Grade, school: 
 
 def add_sitting(db, student: Student, score: int) -> AssessmentSession:
     """一场已交卷的测评，带一条 `LEARNING_ANXIETY` 的维度结果。"""
-    scale = db.scalar(select(AssessmentScale).where(AssessmentScale.status == "PUBLISHED"))
-    session = AssessmentSession(
-        student_id=student.id,
-        scale_id=scale.id,
-        scale_version=scale.version,
-        status="SUBMITTED",
-        submitted_at=datetime.now(UTC) - timedelta(days=1),
-    )
+    scale = published_scale(db)
+    session = make_sitting(db, student, submitted_at=datetime.now(UTC) - timedelta(days=1))
     db.add(session)
     db.flush()
     db.add(
@@ -203,15 +197,7 @@ def test_a_student_who_has_not_submitted_gets_no_rows(client, db_session):
     """
     school, grade, class_group = seed_school(db_session)
     (student,) = add_students(db_session, 1, class_group, grade, school)
-    scale = db_session.scalar(select(AssessmentScale).where(AssessmentScale.status == "PUBLISHED"))
-    db_session.add(
-        AssessmentSession(
-            student_id=student.id,
-            scale_id=scale.id,
-            scale_version=scale.version,
-            status="IN_PROGRESS",
-        )
-    )
+    make_sitting(db_session, student, status="IN_PROGRESS", submitted_at=None)
     db_session.commit()
 
     data = comparison(client, student.id)

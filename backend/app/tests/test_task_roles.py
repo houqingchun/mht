@@ -11,6 +11,12 @@
 断言拿不到的东西，等于没断言。
 
 本文件只断言角色矩阵，不碰业务逻辑，所以任何一次把它改回去的动作都会立刻变红。
+
+**2026-09-20 补（缺口 12）**：角色的读权之内还有一层——**同一场测评，看得到它不等于
+看得到这一个个的人**。完成明细逐行给出学号 / 姓名 / 班级**与关注等级 / MHT总分**，
+所以它比任务列表严一档（`STUDENT_PSYCH_DETAIL: {SCOPED}`）。这一层不是角色矩阵，
+但它落在同一条线上（`test_task_participation.py` 那几条逐角色的用例也一起改了），
+所以记在这里，改任务角色的那五条时别只看 `NON_READERS` 那一张表。
 """
 
 import pytest
@@ -69,9 +75,14 @@ def test_the_counselor_owns_the_whole_task_cycle(client, seeded_task):
         client.get(f"/api/v1/assessment-tasks/{task_id}/completion", headers=counselor).status_code
         == 200
     )
+    # 导出从 GET 改成 POST（阶段 8：它现在建一行作业、落一份文件，有副作用），
+    # 所以即使这里只关心「能不能调」，也得把一个合法请求体带上——否则拿到的 422
+    # 是「请求体不合法」，而不是我们要断的权限。
     assert (
-        client.get(
-            f"/api/v1/assessment-tasks/{task_id}/completion/export", headers=counselor
+        client.post(
+            f"/api/v1/assessment-tasks/{task_id}/completion/export",
+            headers=counselor,
+            json={"purpose": "完成情况核对"},
         ).status_code
         == 200
     )
@@ -111,15 +122,30 @@ def test_nobody_else_can_read_tasks_or_their_completion(client, seeded_task, rol
         == 403
     )
     assert (
-        client.get(
-            f"/api/v1/assessment-tasks/{seeded_task.id}/completion/export", headers=headers
+        client.post(
+            f"/api/v1/assessment-tasks/{seeded_task.id}/completion/export",
+            headers=headers,
+            json={"purpose": "完成情况核对"},
         ).status_code
         == 403
     )
 
 
-def test_the_leader_reads_completion_but_does_not_write(client, db_session, seeded_task):
-    """德育领导的两面：它要按年级看完成率（`/leader/tasks`），但那不是运营权限。"""
+def test_the_leader_reads_the_task_but_not_the_people_in_it(client, db_session, seeded_task):
+    """德育领导的两面：它要按年级看完成率（`/leader/tasks`），但那不是运营权限。
+
+    **2026-09-20 收窄（CLAUDE.md 缺口 12）**：这一天之前这条用例断的是「领导读得到完成
+    明细」，而完成明细那一页里同时有**身份列**（学号 / 姓名 / 班级）与**等级列**
+    （关注等级 / MHT总分）——逐人的心理结果，而领导的能力集是**聚合与摘要**
+    （`STUDENT_PSYCH_DETAIL: SUMMARY`）。一条断言「读得到」的用例**看不见载荷里装了
+    什么**：它只断 200，所以往那一页里加逐人等级时不会有任何东西变红（§11 记着那两列
+    正是后来加的）。现在断言反过来：**看得到这场测评，看不到这一个个的人**。
+
+    「领导按年级看完成率」这件事**没有因此失去落点**，三条都不经过逐人明细：
+    `GET /assessment-tasks`（每行带 `total_targets` / `completed_targets` /
+    `completion_rate`，`/leader/tasks` 就是这一页）、本用例第二段的
+    `GET …/participation`（六个数，不含任何逐人数据）、以及 `/leader/analytics`。
+    """
     leader = headers_for(client, "leader")
     name_before = seeded_task.name
     target_count_before = len(
@@ -128,11 +154,27 @@ def test_the_leader_reads_completion_but_does_not_write(client, db_session, seed
         ).all()
     )
 
+    # 看得到这场测评本身：列表带聚合口径，参与口径那一页是纯计数。
     assert client.get("/api/v1/assessment-tasks", headers=leader).status_code == 200
-    completion = client.get(
-        f"/api/v1/assessment-tasks/{seeded_task.id}/completion", headers=leader
+    assert (
+        client.get(
+            f"/api/v1/assessment-tasks/{seeded_task.id}/participation", headers=leader
+        ).status_code
+        == 200
     )
-    assert completion.status_code == 200
+
+    # 看不到这一个个的人：读与导出各一条，判据是同一句
+    # （`task_service.ensure_detail_reader`，`STUDENT_PSYCH_DETAIL: {SCOPED}`）。
+    for response in (
+        client.get(f"/api/v1/assessment-tasks/{seeded_task.id}/completion", headers=leader),
+        client.post(
+            f"/api/v1/assessment-tasks/{seeded_task.id}/completion/export",
+            headers=leader,
+            json={"purpose": "完成情况核对"},
+        ),
+    ):
+        assert response.status_code == 403, response.text
+        assert response.json()["error"]["code"] == "ROLE_FORBIDDEN"
 
     assert (
         client.post("/api/v1/assessment-tasks", headers=leader, json=TASK_BODY).status_code == 403

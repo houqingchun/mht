@@ -20,8 +20,8 @@ from sqlalchemy import select
 
 from app.models.assessment import AssessmentResult, AssessmentSession
 from app.models.organization import ClassGroup, Grade, School, Student
-from app.models.scale import AssessmentScale
 from app.tests.conftest import auth_headers
+from app.tests.factories import make_sitting, published_scale
 
 ATTENTION = "NEEDS_ATTENTION"
 KEY = "KEY_ATTENTION"
@@ -41,16 +41,8 @@ def add_sitting(db, student: Student, level: str, days_ago: int) -> AssessmentSe
     `submitted_at` 是显式的：这三条用例的**全部要点**就是「哪一场算最近」，
     由夹具的插入顺序或 id 决定的话，测的就不是排序规则了。
     """
-    scale = db.scalar(select(AssessmentScale).where(AssessmentScale.status == "PUBLISHED"))
-    session = AssessmentSession(
-        student_id=student.id,
-        scale_id=scale.id,
-        scale_version=scale.version,
-        status="SUBMITTED",
-        submitted_at=datetime.now(UTC) - timedelta(days=days_ago),
-    )
-    db.add(session)
-    db.flush()
+    scale = published_scale(db)
+    session = make_sitting(db, student, submitted_at=datetime.now(UTC) - timedelta(days=days_ago))
     db.add(
         AssessmentResult(
             session_id=session.id,
@@ -229,15 +221,7 @@ def test_a_student_who_has_not_submitted_has_no_level(client, db_session):
     students = add_students(db_session, 2, class_group, grade, school)
     add_sitting(db_session, students[0], NORMAL, days_ago=1)
 
-    scale = db_session.scalar(select(AssessmentScale).where(AssessmentScale.status == "PUBLISHED"))
-    db_session.add(
-        AssessmentSession(
-            student_id=students[1].id,
-            scale_id=scale.id,
-            scale_version=scale.version,
-            status="IN_PROGRESS",
-        )
-    )
+    make_sitting(db_session, students[1], status="IN_PROGRESS", submitted_at=None)
     db_session.commit()
 
     data = overview(client)

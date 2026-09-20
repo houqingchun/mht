@@ -8,6 +8,20 @@ from app.tests.conftest import auth_headers
 from app.tests.test_assessment_api import create_student_session, save_answers
 
 
+def export_and_download(client, path: str, headers: dict, json: dict):
+    """建作业 → 取文件，两步走完，返回**取文件那一步**的响应。
+
+    2026-09-19 阶段 8 起，导出是两跳：建作业那一步只回作业载荷（§16.3 要求文件有
+    有效期、可撤销、可数下载次数——三条都要求下载经过一道门），字节一律从
+    `GET /export-jobs/{id}/download` 出去。所以断言 CSV 内容的用例必须走完第二跳，
+    而不是拿建作业那一步的 `response.text` 去断言（那里现在是一段 JSON）。
+    """
+    created = client.post(path, headers=headers, json=json)
+    assert created.status_code == 200, created.text
+    job_id = created.json()["data"]["id"]
+    return client.get(f"/api/v1/export-jobs/{job_id}/download", headers=headers)
+
+
 def rename_seeded_student(db_session, name: str) -> None:
     """Give the seeded student a name that is not already in masked form.
 
@@ -105,7 +119,9 @@ def test_anonymous_audit_rows_keep_the_attempted_account_out_of_the_actor_column
 
 def test_care_case_export_is_masked_and_writes_audit(client, db_session):
     headers = create_case_with_followup(client)
-    response = client.post("/api/v1/care-cases/export", headers=headers, json={"purpose": "阶段工作统计"})
+    response = export_and_download(
+        client, "/api/v1/care-cases/export", headers, {"purpose": "阶段工作统计"}
+    )
     assert response.status_code == 200
     body = response.text
     assert "林同学" in body
@@ -133,11 +149,14 @@ def test_masking_mode_changes_the_file(client, db_session):
     headers = create_case_with_followup(client)
     rename_seeded_student(db_session, "王小明")
 
-    masked = client.post("/api/v1/care-cases/export", headers=headers, json={"purpose": "阶段工作统计"})
-    named = client.post(
+    masked = export_and_download(
+        client, "/api/v1/care-cases/export", headers, {"purpose": "阶段工作统计"}
+    )
+    named = export_and_download(
+        client,
         "/api/v1/care-cases/export",
-        headers=headers,
-        json={"purpose": "阶段工作统计", "mask_names": False},
+        headers,
+        {"purpose": "阶段工作统计", "mask_names": False},
     )
     assert masked.status_code == named.status_code == 200
     assert "王同学" in masked.text
@@ -152,10 +171,11 @@ def test_single_care_case_export_masks_too(client, db_session):
     rename_seeded_student(db_session, "王小明")
     case = client.get("/api/v1/care-cases", headers=headers).json()["data"]["items"][0]
 
-    response = client.post(
+    response = export_and_download(
+        client,
         f"/api/v1/care-cases/{case['student_id']}/export",
-        headers=headers,
-        json={"purpose": "转介材料"},
+        headers,
+        {"purpose": "转介材料"},
     )
     assert response.status_code == 200
     assert "王同学" in response.text

@@ -14,6 +14,10 @@ import { useSettings } from '../../composables/useSettings'
 import { daysFromNow, formatDuration, today } from '../../services/dates'
 import {
   ageLabel,
+  calculationStatusLabel,
+  calculationStatusTone,
+  careEventLabel,
+  careEventTone,
   genderLabel,
   dimensionLabel,
   dimensionPercent,
@@ -23,6 +27,7 @@ import {
   sourceLabel,
   statusLabel,
   statusTone,
+  testedAtSourceLabel,
   validityLabel,
   validityTone
 } from '../../services/labels'
@@ -37,6 +42,7 @@ import {
   exportCareCase,
   getKeyQuestionAnswers,
   getClassComparison,
+  retrySessionCalculation,
   type CareCaseDetail,
   type ClassComparison
 } from '../../services/api'
@@ -123,6 +129,11 @@ const tabs = [
   // （见 docs/phase0_rule_freeze.md §7）。页签里的**复测计划卡片保留**，
   // 学校仍然用它登记「下学期再看一次」。
   { key: 'trend', label: '历次趋势' },
+  // 档案事件排在「访问审计」旁边：这两块都是**关于这份档案本身的记录**，
+  // 而不是关于这名学生的临床内容。两者分开是有意的（§16.4）——审计回答
+  // 「谁在什么时候调了哪个接口」，事件回答「这份档案经历了什么」，
+  // 读者、保留期、权限都不同，所以是两个页签而不是一张合并的表。
+  { key: 'events', label: '档案事件' },
   { key: 'auditStudent', label: '访问审计' }
 ]
 
@@ -155,6 +166,41 @@ async function load() {
     error.value = err instanceof Error ? err.message : '加载失败'
   } finally {
     loading.value = false
+  }
+}
+
+/**
+ * 重算这一场的评分 —— 「评分状态：计算失败」那一行下面的按钮。
+ *
+ * 三个细节都有理由：
+ *
+ * * **先 `await load()` 再报结果**。这一页上「评分状态」「筛查分类」「规则版本」
+ *   都是**这一场**的值，重算之后它们会一起变；只弹一句 toast 而不重取，屏幕上就
+ *   留着「计算失败」和一个已经算出来的结果，两句话各说各的。
+ * * **`recalculated === false` 不是失败**：它说的是「已经有结果了，这一次什么都没写」
+ *   （两个人同时点了，或者页面停在旧状态上）。照实说，别报成一次成功。
+ * * 重算是一次**敏感读取**，后端每一次都写审计（读满整份答卷）——所以界面上的措辞
+ *   不承诺「什么都没有记录」。
+ */
+const retrying = ref(false)
+
+async function retryCalculation() {
+  const sessionId = detail.value?.assessment.session_id
+  if (!sessionId || retrying.value) return
+  retrying.value = true
+  try {
+    const outcome = await retrySessionCalculation(sessionId)
+    if (outcome.recalculated) {
+      showToast('success', '已重新计算，评分结果已更新')
+    } else {
+      showToast('info', `这一次没有重算：这份答卷当前是「${calculationStatusLabel(outcome.calculation_status)}」`)
+    }
+    await load()
+  } catch (err) {
+    // 失败原因由后端的统一封装给出（统一封装里那句 error.message 本来就是写给用户看的）。
+    showToast('error', err instanceof Error ? err.message : '重算失败')
+  } finally {
+    retrying.value = false
   }
 }
 
@@ -290,11 +336,24 @@ async function closeCase() {
 
   if (!values.close_note) return
 
-  await closeCareCase(detail.value.case_id, {
-    close_reason: values.close_reason,
-    close_note: values.close_note,
-    confirm_follow_up_checked: true
-  })
+  try {
+    await closeCareCase(detail.value.case_id, {
+      close_reason: values.close_reason,
+      close_note: values.close_note,
+      confirm_follow_up_checked: true,
+      // 乐观锁（§16.4）：把这个页面上读到的版本带回去。别人在这中间改过
+      // （复核、跟进、转派都会 +1）时服务端回 409 与一句人话，而不是改掉
+      // 一个已经过时的状态。
+      case_version: detail.value.case_version
+    })
+  } catch (err) {
+    // 409 那句原文本来就是写给用户看的（§2：「服务端答了话」的那一支）。
+    showToast('error', err instanceof Error ? err.message : '关闭失败')
+    // 版本对不上时要重取一次：页面上那个版本号已经过期，不刷新的话
+    // 用户再点一次还是同一句话。
+    await load()
+    return
+  }
   showToast('success', '关注档案已关闭，历史记录保留')
   await load()
 }
@@ -311,7 +370,19 @@ async function reopenCase() {
 
   if (!values.reason) return
 
-  await reopenCareCase(detail.value.case_id, values.reason)
+  try {
+    await reopenCareCase(detail.value.case_id, {
+      reason: values.reason,
+      case_version: detail.value.case_version
+    })
+  } catch (err) {
+    // 这里最可能的 409 不是版本冲突，而是「这名学生已经有一条在办档案」——
+    // 秋季关档、春季再开是学校每年都会遇到的时序（§1），此时点开这条旧的会被
+    // 明确拒绝，服务端那句话里带着现在那条在办档案的编号。原样转达给用户。
+    showToast('error', err instanceof Error ? err.message : '重新打开失败')
+    await load()
+    return
+  }
   showToast('success', '关注档案已重新打开')
   await load()
 }
@@ -504,10 +575,54 @@ const comparisonSuppressed = computed(() =>
               <span>当前阶段</span>
               <span :class="['pill', statusTone(detail.case_status)]">{{ statusLabel(detail.case_status) }}</span>
             </div>
-            <div class="detail-row"><span>提交时间</span><b>{{ detail.assessment.submitted_at || '—' }}</b></div>
+            <!-- 「提交时间」原本在这一行。它对外部导入的那一场是**错的**：那一场没有人在
+                 本系统里提交过任何东西，`submitted_at` 存的是文件里的测评日期，而这一页
+                 上面另有一行「来源」写着「外部导入」——同一个日期在两种读法下不叫一个名字。
+                 所以改叫「测评日期」（在线作答时它就是交卷那一刻，两者本来相同），
+                 并在下一行说明这个日期**是谁给的**。历史行两个字段都是 null：0013 刻意没有
+                 回填真实测评日（CLAUDE.md §21），所以那时按 `submitted_at` 兜底，
+                 日期来源照实说「待核实」。 -->
+            <div class="detail-row">
+              <span>测评日期</span>
+              <b>{{ detail.assessment.tested_at || detail.assessment.submitted_at || '—' }}</b>
+            </div>
+            <div class="detail-row">
+              <span>日期来源</span>
+              <span class="pill">{{ testedAtSourceLabel(detail.assessment.tested_at_source) }}</span>
+            </div>
+            <!-- 评分状态不条件渲染：它对**每一场**都成立，而它与此前那几行的区别正是
+                 「算出来了没有」与「算出来是什么」。评分没成功时上面三行（筛查分类 /
+                 效度状态 / 规则版本）都会显示「未测评 / —」，那与「这个学生还没测」
+                 长得一模一样——这一行是那两者之间唯一的字，也是下面那个按钮的判据。 -->
+            <div class="detail-row">
+              <span>评分状态</span>
+              <span :class="['pill', calculationStatusTone(detail.assessment.calculation_status)]">{{
+                calculationStatusLabel(detail.assessment.calculation_status)
+              }}</span>
+            </div>
             <!-- 首次作答 → 交卷的墙钟时长。明显偏快是复核时要追的信号，
                  但它说明的是作答过程，不是任何结论。 -->
             <div class="detail-row"><span>作答用时</span><b>{{ formatDuration(detail.assessment.duration_seconds) }}</b></div>
+          </div>
+          <!-- 评分没成功：把这件事说成一次**需要人动手**的状态，而不是一句故障提示。
+               答卷与交卷时间都原样留着（四层事实模型：人工复核不得修改原始答卷，
+               重算改的也只是结果那一层），所以那个动作是安全的，说清楚这一点，
+               心理老师才敢点。 -->
+          <div v-if="detail.assessment.calculation_status === 'CALCULATION_FAILED'" class="notice danger" style="margin-top:14px">
+            <div>这份答卷已经收到并保存，但评分没有算出来，所以上面几项是空的。</div>
+            <div style="margin-top:6px">重新计算不会改动学生的任何一题答案。</div>
+            <div v-if="detail.assessment.calculation_error" class="muted-text" style="margin-top:6px">
+              失败原因（供排查）：{{ detail.assessment.calculation_error }}
+            </div>
+            <!-- 按钮上的词与写进审计动作码的那个词**共用一个「重算」**
+                 （服务端写的是「重算测评评分」）。审计页的搜索匹配的是动作码，
+                 所以操作员照着按钮去找的时候，得搜得到——缺口 7 那一族（「把看不懂
+                 换成了搜不到」）栽过三次，这里是第四次的位置，提前对齐。 -->
+            <div class="toolbar" style="margin-top:12px">
+              <button class="btn primary" :disabled="retrying" @click="retryCalculation">
+                {{ retrying ? '正在重算评分…' : '重算评分' }}
+              </button>
+            </div>
           </div>
         </div>
         <div class="card pad">
@@ -728,6 +843,35 @@ const comparisonSuppressed = computed(() =>
             </div>
             <div v-if="!detail.retest_plans.length" class="empty">暂无复测计划</div>
           </div>
+        </div>
+      </div>
+
+      <!-- 档案事件（§16.4）——「这份档案经历了什么」 -->
+      <div v-if="activeTab === 'events'" class="card pad" style="margin-top: 17px">
+        <h2>档案事件</h2>
+        <p class="muted tiny" style="margin:6px 0 0">
+          这份档案从开档到现在的每一步：谁复核过、谁跟进过、什么时候关的、什么时候又打开的。
+          <b>只列这一份档案</b>——这名学生更早那条已关闭档案上的事件不在这里，但那些记录本身
+          一条都没删（见「跟进记录」「家庭回访」两个页签，它们按学生跨档案取全部历史）。
+        </p>
+        <div class="timeline" style="margin-top:21px">
+          <div v-for="event in detail.events" :key="event.id" class="timeline-item">
+            <div class="timeline-dot" :class="careEventTone(event.event_type)"></div>
+            <div class="timeline-title">
+              <span :class="['pill', careEventTone(event.event_type)]">{{ careEventLabel(event.event_type) }}</span>
+              <span class="muted tiny">
+                {{ event.operator_name || '系统' }} · {{ event.created_at || '—' }}
+              </span>
+            </div>
+            <!-- 转派是这张表上唯一不涉及状态迁移的事件，它的两列都为空，这一行就不出现。 -->
+            <div v-if="event.to_status" class="timeline-text">
+              状态：{{ event.from_status ? statusLabel(event.from_status) : '—' }}
+              → {{ statusLabel(event.to_status) }}
+            </div>
+            <div v-if="event.reason" class="timeline-text">{{ event.reason }}</div>
+            <div v-if="event.confirmed_facts" class="timeline-text">{{ event.confirmed_facts }}</div>
+          </div>
+          <div v-if="!detail.events.length" class="empty">暂无档案事件</div>
         </div>
       </div>
 

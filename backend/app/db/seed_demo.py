@@ -36,6 +36,7 @@ prevent.
 
 from __future__ import annotations
 
+import hashlib
 import random
 from datetime import UTC, date, datetime, timedelta
 from typing import NamedTuple
@@ -51,6 +52,7 @@ from app.models.organization import ClassGroup, Grade, School, Student
 from app.models.scale import AssessmentScale, ScaleRule
 from app.scale_engine.engine import DEFAULT_RULE_CONFIG, rule_config_to_json
 from app.schemas.care import (
+    BatchAssignItem,
     CloseCaseRequest,
     FamilyContactRequest,
     FollowUpRequest,
@@ -355,8 +357,10 @@ def seed_demo_data(db: Session) -> dict:
         for task in (main_task, retest_task):
             if task is retest_task and student.grade_id != grade9.id:
                 continue
+            # `school_id_snapshot` 没有默认值，见 `seed.py` 里同一条注释。
             _get_or_create(db, AssessmentTarget, {"status": "NOT_STARTED"},
-                           task_id=task.id, student_id=student.id)
+                           task_id=task.id, student_id=student.id,
+                           school_id_snapshot=student.school_id)
 
         # 主任务：大部分学生已完成
         already = db.scalar(
@@ -414,17 +418,28 @@ def seed_demo_data(db: Session) -> dict:
     if earlier_rows and not db.scalar(
         select(AssessmentTask).where(AssessmentTask.name == LAST_SEMESTER_SURVEY)
     ):
-        assessment_import_service.commit_assessment_import(
+        # V1.2 起导入是**两步**（批次 → 提交），与之配套的是一张真的批次表：
+        # 走这条路而不是直接建会话，好处是演示库里从此有了一条 `assessment_import_batch`
+        # 与它的一批行——「导入批次」那一页在演示数据上不再是空的（§22 起这条链路
+        # 的每一个状态都要有东西可看，否则 e2e 只能退化成一个恒绿的断言）。
+        #
+        # `start_historical_import` 是这条链路上**唯一**接受「已经知道每行是谁」的入口，
+        # 它存在的理由写在那个函数的 docstring 里（演示名册的班级叫 `1班`，而外部文件
+        # 的班级列按学校编号规则要写 `701`，走文件匹配会整批落空）。
+        earlier_batch = assessment_import_service.start_historical_import(
             db,
-            {
-                "rows": earlier_rows,
-                "batch": {
-                    "name": LAST_SEMESTER_SURVEY,
-                    "tested_on": (today - timedelta(days=LAST_SEMESTER_DAYS_AGO)).date().isoformat(),
-                },
-            },
-            counselor,
+            earlier_rows,
+            school=school,
+            actor=counselor,
+            batch_name=LAST_SEMESTER_SURVEY,
+            file_name="2026春季MHT普查结果.csv",
+            # 指纹按批次名算：种子要可重复执行，而固定的串让「这一批有没有导过」
+            # 在两台机器上给出同一个答案
+            file_sha256=hashlib.sha256(LAST_SEMESTER_SURVEY.encode()).hexdigest(),
+            tested_on=(today - timedelta(days=LAST_SEMESTER_DAYS_AGO)).date(),
+            source_system="校外普查平台",
         )
+        assessment_import_service.commit_batch(db, earlier_batch, counselor)
         summary["earlier_sittings"] = len(earlier_rows)
 
     # ---- 关怀档案闭环 ----
@@ -435,9 +450,29 @@ def seed_demo_data(db: Session) -> dict:
         summary["cases"] += 1
         stage = position % 5
 
+        # **已关闭的档案不再往前走**（阶段 7 加的，与 `care_service._ensure_open` 成对）。
+        # 下面那一整段是「把这份档案推进到下一个阶段」，而一份关掉的档案没有下一个阶段：
+        # 四个写入入口（复核 / 跟进 / 家庭回访 / 复测）现在对 CLOSED 一律 409。不加这一行
+        # 它会在一种真实可达的状态下崩——**实测过**：给一份 `stage != 0` 的档案（position 1）
+        # 置 CLOSED、把它名下的风险事件置 PENDING，下面那个 `create_manual_review` 当场抛
+        # `AppError: 这份关注档案已经关闭，不能直接新增记录`，而这个脚本叫「可重复执行」，
+        # 崩出来的那句话却与种子毫无关系。
+        # 位置在转派**之前**：那一块也是在「推进」这份档案，而关过的档案本来就有负责人。
+        # `cases` 那个计数留在这一行之上——它数的是「库里有多少份档案」，不是「推进了几份」。
+        if case.status == "CLOSED":
+            continue
+
         # 大部分档案分配负责人，留少数「未分配」——它本身是需要被看到的信号
         if position % 4 != 0 and case.owner_id is None:
-            care_service.batch_assign_owner(db, counselor, [case.id], counselor.id)
+            # 逐行带版本号（§16.4）：转派走乐观锁，而这里手上就是那一行本身，
+            # 版本号自然是 `case.case_version` —— 服务层在这个 session 里改过它
+            # （上面那次复核/跟进），identity map 里就是最新的那个数。
+            care_service.batch_assign_owner(
+                db,
+                counselor,
+                [BatchAssignItem(case_id=case.id, case_version=case.case_version)],
+                counselor.id,
+            )
 
         pending = db.scalars(
             select(RiskEvent).where(RiskEvent.student_id == case.student_id, RiskEvent.status == "PENDING")
@@ -495,6 +530,8 @@ def seed_demo_data(db: Session) -> dict:
                 close_reason="完成阶段跟进并进入一般观察",
                 close_note="阶段闭环，转入一般观察，保留历史记录。",
                 confirm_follow_up_checked=True,
+                # 同上：这一行就在手上，版本号从它自己读。
+                case_version=case.case_version,
             ))
             summary["closed"] += 1
 

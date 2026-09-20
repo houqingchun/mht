@@ -71,6 +71,8 @@ def test_leader_progress_lists_only_open_cases(client):
             "close_reason": "完成阶段跟进并进入一般观察",
             "close_note": "已检查后续安排。",
             "confirm_follow_up_checked": True,
+            # 乐观锁（§16.4），取自上面那一行——列表接口发 `case_version`。
+            "case_version": case_item["case_version"],
         },
     )
     assert closed.status_code == 200

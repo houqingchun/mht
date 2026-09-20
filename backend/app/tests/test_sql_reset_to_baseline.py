@@ -7,9 +7,13 @@
    ——`ASSESSMENT_TABLES`（Python）与脚本里的 `DELETE` 清单（SQL）。两边必然漂移，
    所以这里比一次：Python 那边说该删的表，SQL 里必须都出现。
 2. **顺序是子先父后。** 全库没有一个 `ondelete=`，每个外键都是 RESTRICT，父行先删
-   在 MySQL 上是必然的 1451——而内存 sqlite 不检查外键（缺口 3），所以这个错误
-   **只有真库会报**。人眼核对外键会错（第一版就把 `student` 排在了 `user_scope` 前面），
-   `information_schema` 与 `Base.metadata` 不会。
+   在 MySQL 上是必然的 1451。2026-09-19 之前测试跑在内存 sqlite 上，它不检查外键
+   （缺口 3），所以这个错误**只有真库会报**，而这份脚本的正确性只能在临时库上手跑一遍。
+   现在测试链自己就在 MySQL 上，但**这一条仍然是静态推的**：它拿 `Base.metadata`
+   的外键图去核那份 SQL 的语句次序，不需要连库。人眼核对外键会错（第一版就把
+   `student` 排在了 `user_scope` 前面），`Base.metadata` 不会。
+   真要连库跑，出口是 `throwaway_database()`（`mysql_support`）——那才是
+   「开着 `FOREIGN_KEY_CHECKS=1` 真跑一遍」的样子，至今仍走人工。
 3. **每一条 `DELETE` 都挂在 admin 那一行上。** 找不到 admin 时整份脚本必须一条都不删：
    最坏的失败不是「少删了」（再跑一次的事），而是「删完没有人能登录」。
 """
@@ -20,7 +24,7 @@ import re
 from pathlib import Path
 
 from app.db.base import Base
-from app.db.purge import ASSESSMENT_TABLES
+from app.db.purge import ASSESSMENT_TABLES, CLEARED_BEFORE_DELETE
 
 SQL_PATH = Path(__file__).resolve().parents[2] / "sql" / "reset_to_baseline.sql"
 
@@ -99,6 +103,23 @@ def test_it_deletes_every_table_purge_py_deletes() -> None:
     expected = {model.__tablename__ for model in ASSESSMENT_TABLES}
     missing = expected - set(deleted_tables())
     assert not missing, f"purge.py 要删、而这个脚本没删的表：{sorted(missing)}"
+
+
+def test_it_clears_every_column_purge_py_clears() -> None:
+    """覆盖面与 `purge.py` 的 `CLEARED_BEFORE_DELETE` 对齐（同一条判据的第二半）。
+
+    「先摘指针再删行」这件事也在两处各写了一份，所以也在这里比一次。
+    单向断言的理由与上面那条相同：SQL 多摘几列（三处「谁动过这条配置」的出处列，
+    `purge.py` 那两条路都不删那些父行，所以它不需要）是它自己的职责，少一列才是错的
+    —— `purge.py` 那边新加一处指针而这份脚本没跟上，新环境上那一条 DELETE 就是 1451。
+
+    顺序由 `test_delete_order_is_child_before_parent` 把关（它认这条出路），
+    这里只管**有没有**。
+    """
+    nulled = set(nulled_columns())
+    expected = {(model.__tablename__, column) for model, column in CLEARED_BEFORE_DELETE}
+    missing = expected - nulled
+    assert not missing, f"purge.py 要摘、而这个脚本没摘的列：{sorted(missing)}"
 
 
 def test_delete_order_is_child_before_parent() -> None:

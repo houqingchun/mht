@@ -218,10 +218,25 @@ async function resetStudentSession(page: ReturnType<typeof test.extend>) {
   });
 }
 
+/**
+ * 第一张**可以作答**的任务卡里的那个按钮。
+ *
+ * 不能再用 `.task-card').first()`（2026-09-19 改）：任务列表按 id 倒序，而演示
+ * 数据里 id 最大的那场「初三年级复测任务」的窗口由 `seed_demo` 按 today+20 天
+ * 算出来——是一场**还没开始**的测评。后端据此拒开卷子（`effective_task_status`，
+ * §12），前端现在也不给这场渲染可点的按钮，所以旧写法会在那张卡上点一个
+ * 禁用的按钮，然后停在登录页之外的地方。
+ *
+ * 这条用例的主题是「学生能开始答题」，按「可点」定位才是它真正要说的事。
+ */
+function startableTask(page: ReturnType<typeof test.extend>) {
+  return page.locator('.task-card button:not([disabled])').first();
+}
+
 async function enterFirstAssessment(page: ReturnType<typeof test.extend>) {
   await loginAs(page, 'student');
   await page.waitForSelector('.task-list, .muted-text');
-  await page.locator('.task-card').first().locator('button').click();
+  await startableTask(page).click();
   await page.waitForURL(/\/student\/assessment/);
   await resetStudentSession(page);
   await page.reload();
@@ -246,9 +261,8 @@ test.describe('Student Assessment Flow', () => {
     await resetStudentSession(page);
     await page.reload();
     await page.waitForSelector('.task-list, .muted-text');
-    const taskRow = page.locator('.task-card').first();
-    await taskRow.waitFor({ timeout: 5000 });
-    await taskRow.locator('button').click();
+    await startableTask(page).waitFor({ timeout: 5000 });
+    await startableTask(page).click();
 
     await page.waitForURL(/\/student\/assessment/);
     // Progress moved into a slim bar above the card so the question itself
@@ -277,7 +291,7 @@ test.describe('Student Assessment Flow', () => {
   test('submit and next buttons exist in assessment', async ({ page }) => {
     await loginAs(page, 'student');
     await page.waitForSelector('.task-list, .muted-text');
-    await page.locator('.task-card').first().locator('button').click();
+    await startableTask(page).click();
     await page.waitForURL(/\/student\/assessment/);
 
     const nextBtn = page.getByRole('button', { name: '下一题' });
@@ -853,7 +867,7 @@ test.describe('学生端信任与进度', () => {
     const stemsResponse = page.waitForResponse((r) =>
       /\/assessment-sessions\/\d+\/questions$/.test(r.url()),
     );
-    await page.locator('.task-card').first().locator('button').click();
+    await startableTask(page).click();
     await page.waitForURL(/\/student\/assessment/);
     const stems = (await (await stemsResponse).json()).data.items as unknown[];
 
@@ -897,7 +911,7 @@ test.describe('学生端信任与进度', () => {
       localStorage.setItem('xlp_assessment_cursor:999999', '42');
     });
 
-    await page.locator('.task-card').first().locator('button').click();
+    await startableTask(page).click();
     await page.waitForURL(/\/student\/assessment/);
     await expect(page.locator('.question-text')).toBeVisible();
 
@@ -916,7 +930,7 @@ test.describe('学生端信任与进度', () => {
     await resetStudentSession(page);
     await page.reload();
     await page.waitForSelector('.task-list, .muted-text');
-    await page.locator('.task-card').first().locator('button').click();
+    await startableTask(page).click();
     await page.waitForURL(/\/student\/assessment/);
     await page.waitForTimeout(400);
 
@@ -951,7 +965,7 @@ test.describe('学生端信任与进度', () => {
       });
     });
 
-    await page.locator('.task-card').first().locator('button').click();
+    await startableTask(page).click();
     await page.waitForURL(/\/student\/assessment/);
 
     const bar = page.locator('.assessment-bar');
@@ -983,7 +997,7 @@ test.describe('学生端信任与进度', () => {
       }),
     );
 
-    await page.locator('.task-card').first().locator('button').click();
+    await startableTask(page).click();
     await page.waitForURL(/\/student\/assessment/);
 
     await expect(page.getByText('题库暂时不可用')).toBeVisible();
@@ -999,7 +1013,7 @@ test.describe('学生端信任与进度', () => {
     await resetStudentSession(page);
     await page.reload();
     await page.waitForSelector('.task-list, .muted-text');
-    await page.locator('.task-card').first().locator('button').click();
+    await startableTask(page).click();
     await page.waitForURL(/\/student\/assessment/);
     await page.waitForTimeout(400);
 
@@ -1190,7 +1204,15 @@ test.describe('缺陷回归', () => {
         await fetch(`/api/v1/care-cases/${closed.case_id}/reopen`, {
           method: 'POST',
           headers,
-          body: JSON.stringify({ reason: '回归测试前置：重新打开以验证关闭确认' })
+          // `case_version` 是乐观锁（§16.4），**从列表行上现取**、不写死：它每被
+          // 改一次就 +1（复核、跟进、关档、重开都会），写死一个数会在某一天静默失效。
+          // 少了它服务端不认这一次重开，而这里没有断言它的返回值——前置于是变成
+          // 一次「赌这条档案此刻的状态」，下面那句「关闭按钮应该在」会红在一个
+          // 与关闭流程无关的地方。
+          body: JSON.stringify({
+            reason: '回归测试前置：重新打开以验证关闭确认',
+            case_version: closed.case_version
+          })
         });
       }
     });
@@ -1904,9 +1926,15 @@ test.describe('MHT测评记录导入', () => {
       buffer: Buffer.from(`${header}\n${cell('')}\n${cell('e2e查无此人')}\n`, 'utf-8')
     });
 
-    await expect(card.getByText('错误 2')).toBeVisible();
+    // 三个数走 `row_counts` 那三个（**整批**，不套读者的数据范围）。两行都进不去，
+    // 所以可导入 0、待确认 0、无法导入 2。数的是「无法导入」而不是旧版那句「错误」：
+    // 第 4 期把「这一行进不去」与「这一行要你拍板」分成了两档（`match_status` 的九
+    // 个码各归哪一档由后端测试钉住），界面上照这两档各报一个数。
+    await expect(card.getByText('无法导入 2')).toBeVisible();
 
     await card.getByRole('button', { name: '查看明细' }).click();
+    // 逐行明细里那一格是服务端拼好的**一句** `message`（`_row_message`），不是一串
+    // `errors`：它在界面上是一个单元格，读起来是一句「这一行为什么进不去」的话。
     await expect(page.getByText('缺少姓名')).toBeVisible();
 
     // 这一行**刻意不断言**是「班级不存在」还是「学生不存在」两种文案里的哪一种：那取决于
@@ -1916,8 +1944,26 @@ test.describe('MHT测评记录导入', () => {
     // 「两种原因分开报」这件事由后端测试逐字钉住（tests/test_assessment_import_api.py）。
     await expect(page.getByText(/「初一 704」/)).toBeVisible();
 
-    // 定位不到就一行都不写：确认导入没有令牌可提交。
+    // 定位不到就一行都不写：这一批里没有任何一行可提交，确认导入是灰的。
     await expect(card.getByRole('button', { name: '确认导入' })).toBeDisabled();
+
+    // 第 4 期起，上传那一刻这一批就**已经落库**了（预览不再只是内存里的一个 token），
+    // 所以卡片上印着服务端给的批次号，而「导入批次」里找得到同一批——那正是「上传完被
+    // 叫走了，回来接着提交」这条路的人口。批次号**从屏幕上读，不写死**：它按天编号
+    // （`BATCH-20260919-1`），写死的那一天这条用例就会红在一个与功能无关的地方。
+    const batchLine = card.locator('p', { hasText: /批次 BATCH-/ });
+    await expect(batchLine).toBeVisible();
+    const batchNo = (await batchLine.textContent())?.match(/BATCH-[0-9-]+/)?.[0] ?? '';
+    expect(batchNo).not.toBe('');
+
+    const historyCard = page
+      .locator('.card')
+      .filter({ has: page.getByRole('heading', { name: '导入批次' }) });
+    const historyRow = historyCard.locator('tr', { hasText: batchNo });
+    // 先证明这一批在历史里（恰好一行——批次号是唯一的），再断言它带着「继续处理」：
+    // 顺序反过来的话，一个空表格也能让下面那一条通过。
+    await expect(historyRow).toHaveCount(1);
+    await expect(historyRow.getByRole('button', { name: '继续处理' })).toBeVisible();
   });
 });
 
@@ -1965,12 +2011,68 @@ test.describe('学生信息导入', () => {
     await card.getByRole('button', { name: '确认导入' }).click();
     await page.getByRole('button', { name: '确认', exact: true }).click();
 
-    await expect(page.locator('.toast', { hasText: '已导入 0 名学生，放弃 1 条' })).toBeVisible();
+    // 提示里现在夹着批次号（V1.2 阶段 3：提示与审计都要说出是**哪一批**），所以这条
+    // 断言不能按字面串起来——用正则跨过中间那一段，两头的结论照旧逐字钉住。
+    await expect(page.locator('.toast', { hasText: /已导入 0 名学生（批次 [^）]+），放弃 1 条/ })).toBeVisible();
 
     // 要点四：「放弃」是真的没动他——那个名字一个单元格都不该出现。
     await expect(page.getByText('e2e不该出现')).toHaveCount(0);
+
+    // 要点五：这一批在「导入批次」里看得见（V1.2 阶段 3）。名册导入此前是一次
+    // **无痕动作**：导完之后库里只有一条审计，而「这次导的是哪份文件、哪几行没落上、
+    // 为什么没落上」在界面上没有任何落点。
+    const batches = page
+      .locator('.card')
+      .filter({ has: page.getByRole('heading', { name: '导入批次' }) });
+    // 按文件名定位到**这一批**那一行，不靠「第一行就是最新的」——那份文件在上面那条
+    // 用例里也被传过一次，而两次运行留下的同名行都在这张表里。
+    const batchRow = batches.locator('tbody tr', { hasText: 'e2e-students.csv' }).first();
+    await expect(batchRow).toBeVisible();
+    await expect(batchRow.getByText('已导入')).toBeVisible();
+
+    // 逐行明细：那一行说的是谁、撞上了什么、拿它怎么办。
+    await batchRow.getByRole('button', { name: '查看明细' }).click();
+    const modal = page.locator('.modal-panel').first();
+    // 先证明有东西可扫，再断言它干净（本文件里那条教训的第五例）：明细在弹层里，
+    // 而弹层是先开出来再拉数据的，扫到骨架屏那一帧的话下面两条都是绿的空断言。
+    await expect(modal.locator('tbody tr').first()).toBeVisible();
+    await expect(modal.getByText('已放弃')).toBeVisible();
+    // 冲突码是**落库的编码**，界面上必须走 `rosterConflictLabel`——这一条同时也是
+    // `ROSTER_CONFLICT_LABELS` 那份词表在屏幕上唯一能被扫到的地方。
+    await expect(modal.getByText('学号已在名册上')).toBeVisible();
   });
 });
+
+/**
+ * 挑行数最多的那个任务，点开它的明细弹层。
+ *
+ * 哪个任务最大取决于库里的演示数据，所以按「已完成 / 总人数」现场挑，不写死任务名。
+ * **先等表渲染出来再数**：任务列表是异步拉的，`count()` 在那一帧拿到 0 行，循环就
+ * 什么也没挑到（这一步第一次写漏了，报的是「应当至少有一个任务」）。
+ *
+ * 完成明细与目标学生两个弹层用例共用它——它们要的是同一件前提：这个弹层里
+ * 真的有行可扫。返回弹层本身，免得每个用例各写一遍 `.modal-panel` 的定位。
+ */
+async function openLargestTaskModal(page: Page, path = '/counselor/tasks') {
+  // 路径可传：同一个组件挂两条路由（`/counselor/tasks` 与 `/leader/tasks`），而
+  // 缺口 12 那一组要断的正是**两个角色看到的东西不一样**，所以两边都得走一遍。
+  await page.goto(path);
+  const rows = page.locator('tbody tr');
+  await expect(rows.first()).toBeVisible();
+  const count = await rows.count();
+  let target = 0;
+  let most = -1;
+  for (let i = 0; i < count; i++) {
+    const m = (await rows.nth(i).innerText()).match(/(\d+)\s*\/\s*(\d+)/);
+    if (m && Number(m[2]) > most) [most, target] = [Number(m[2]), i];
+  }
+  expect(most, '演示数据里应当至少有一个带目标行的任务').toBeGreaterThan(0);
+
+  await page.getByRole('button', { name: '查看明细' }).nth(target).click();
+  const modal = page.locator('.modal-panel').first();
+  await expect(modal).toBeVisible();
+  return modal;
+}
 
 /**
  * 完成明细是一所千人学校里最长的一张表——一场普查一千多行，而弹层里那个窗口只有
@@ -1979,28 +2081,10 @@ test.describe('学生信息导入', () => {
 test.describe('测评任务的完成明细', () => {
   test('明细能按学生筛选，并能导出完整名单', async ({ page }) => {
     await loginAs(page, 'counselor');
-    await page.goto('/counselor/tasks');
-
-    // 挑行数最多的那个任务：明细里得真有人可搜。哪个任务最大取决于库里的演示数据，
-    // 所以按「已完成 / 总人数」现场挑，不写死任务名。
-    //
-    // 先等表渲染出来再数：任务列表是异步拉的，`count()` 在那一帧拿到 0 行，
-    // 循环就什么也没挑到（这一步第一次写漏了，报的是「应当至少有一个任务」）。
-    const rows = page.locator('tbody tr');
-    await expect(rows.first()).toBeVisible();
-    const count = await rows.count();
-    let target = 0;
-    let most = -1;
-    for (let i = 0; i < count; i++) {
-      const m = (await rows.nth(i).innerText()).match(/(\d+)\s*\/\s*(\d+)/);
-      if (m && Number(m[2]) > most) [most, target] = [Number(m[2]), i];
-    }
-    expect(most, '演示数据里应当至少有一个带目标行的任务').toBeGreaterThan(0);
-
-    await page.getByRole('button', { name: '查看明细' }).nth(target).click();
+    const modal = await openLargestTaskModal(page);
 
     // 先证明有东西可扫，再断言筛选的结果——空表也能「筛出 0 行」。
-    const detailRows = page.locator('.modal-panel tbody tr');
+    const detailRows = modal.locator('tbody tr');
     await expect(detailRows.first()).toBeVisible();
     const before = await detailRows.count();
 
@@ -2013,14 +2097,190 @@ test.describe('测评任务的完成明细', () => {
     await expect(detailRows).toHaveCount(before);
 
     // 「全部」的出路：导出真的下一份 CSV，表头里有关注等级与总分两列。
+    //
+    // 2026-09-19 起导出是**两跳**：点「导出CSV」先问用途 → 建一份作业 → 立刻把字节
+    // 取回来。所以 `waitForEvent('download')` 不能再和点击并发等——中间多了一步
+    // 填表。中间那个用途问题不是走过场，它是这一份文件唯一的事后解释（§8）。
+    await page.getByRole('button', { name: '导出CSV' }).click();
+
+    const dialog = page.locator('.form-dialog-form');
+    await expect(dialog).toBeVisible();
+    await dialog.locator('input').fill('E2E：完成明细导出');
+
+    const createRequest = page.waitForResponse(
+      (r) =>
+        r.request().method() === 'POST' &&
+        /\/assessment-tasks\/\d+\/completion\/export$/.test(new URL(r.url()).pathname)
+    );
     const [download] = await Promise.all([
       page.waitForEvent('download'),
-      page.getByRole('button', { name: '导出CSV' }).click(),
+      dialog.getByRole('button', { name: '导出' }).click(),
     ]);
+
+    // 建作业那一步**不回文件**——它回的是一份作业载荷。这一条是整块设计的地基
+    // （`test_export_jobs.py::test_creating_an_export_returns_a_job_and_no_bytes` 是它
+    // 在后端那一侧的同一句），而它是**界面**上唯一能证伪它的地方：把文件塞回这一步，
+    // 这份载荷会变成 CSV，下面那句 `job_no` 立刻读不出来。
+    const job = (await createRequest).json();
+    expect((await job).data.job_no).toMatch(/^EXPORT-/);
+
     const path = await download.path();
     const csv = readFileSync(path!, 'utf-8');
     expect(csv.split('\n')[0]).toContain('关注等级');
     expect(csv.split('\n')[0]).toContain('MHT总分');
+  });
+});
+
+/**
+ * 缺口 12 的**前端那一面**（2026-09-20）：同一场测评，看得到它 ≠ 看得到这一个个的人。
+ *
+ * 后端在那一天给完成明细的两条路径加了 `STUDENT_PSYCH_DETAIL: {SCOPED}`（见
+ * `test_task_roles.py::test_the_leader_reads_the_task_but_not_the_people_in_it` 与
+ * `test_permissions.py` 那两条）。这一条断的是**界面有没有跟着分岔**——后端隐藏从来
+ * 不是安全问题（§4：前端隐藏不是安全措施），但一枚必然 403 的页签与一枚必然 403 的
+ * 按钮不是「一种提示」，它们是一处空白：用户会以为完成明细这一场没数据。
+ *
+ * 两个方向各断一次，缺一条都不完整：
+ *   - 领导：页签**不在**，而且有一句说得出理由与出路的话（§17：灰掉的按钮必须说得出为什么）；
+ *   - 心理老师：页签**在**。少了这一半，一个把页签对所有角色都收起来的实现也是绿的。
+ *     它由上面那条「明细能按学生筛选」顺带证明（那个用例一进弹层就在完成明细上，
+ *     因为心理老师的默认页签就是它），所以这里不再重复一次。
+ */
+test('德育领导读得到这场测评，但明细里没有完成明细页签', async ({ page }) => {
+  await loginAs(page, 'leader');
+  const modal = await openLargestTaskModal(page, '/leader/tasks');
+
+  // 先证明**有东西可看**，再断言它不在——否则一个整块没渲染出来的弹层也满足下面那句。
+  // 六格是整场口径的纯计数，**领导读得到**（缺口 12 关掉的是逐人明细，不是这一组数）。
+  // 断在 `.detail-grid` 这个容器上，不按那两个字去 `getByText`：下面那段口径说明里
+  // 也写着「应测人数」（在一段长正文里），按文字找会同时命中两处而撞上严格模式——
+  // 而那不是「它不该在那儿」，是定位器挑错了。
+  await expect(modal.locator('.detail-grid')).toContainText('发放人数');
+  await expect(modal.locator('.detail-grid')).toContainText('应测人数');
+  await expect(modal.getByRole('button', { name: '目标学生' })).toBeVisible();
+
+  await expect(modal.getByRole('button', { name: '完成明细' })).toHaveCount(0);
+  // 默认页签因此落在「目标学生」上（心理老师那边是完成明细）。
+  await expect(modal.locator('tbody tr').first()).toBeVisible();
+  // 收起来的页签要说得出为什么，并给出替代落点。两句各取**同一行内**的片段：
+  // 跨行的正则在原始 textContent 上匹配不到（换行与缩进都在里面），而这里要断的
+  // 只是那两句话在不在，不必把整段拼成一条。
+  await expect(modal.getByText(/完成明细逐行给出学号、姓名与关注等级/)).toBeVisible();
+  await expect(
+    modal.getByText(/（发放 \/ 应测 \/ 已完成 \/ 有效完成率）不受影响/)
+  ).toBeVisible();
+  await expect(modal.getByText(/「目标学生」与「未匹配行」两个页签照常可查/)).toBeVisible();
+
+  // 「导出CSV」（完成明细那一枚）也必须不在：它此前只有 `:disabled` 没有 `v-if`，
+  // 门加上去之后它就是领导手上的一枚必然 403 的按钮。
+  await expect(modal.getByRole('button', { name: '导出CSV' })).toHaveCount(0);
+});
+
+/**
+ * 「目标学生」页签（V1.2 第 1 期）：这场测评**发给了谁**。
+ *
+ * 它与同一个弹层里的「完成明细」读的是同一张表、同一批行，回答的却是另一个问题：
+ * 完成明细说「这一批人这次测出了什么」，这一页说「谁在这份名单上、他是怎么进来的」。
+ *
+ * **这两条用例一行数据都不写**，是有意的。补发的「确认」会在共享的开发库里
+ * 真的落下目标行——而那会让演示任务的发放人数与完成率每跑一次变一次，后面的用例
+ * 看到的就是另一份统计口径（缺口 8 那条规矩的又一例）。后端那两条
+ * （`test_task_targets.py` 的 §20#9）把「确认才写入」逐列钉住了，e2e 这里要看的是
+ * **界面有没有接上**：页签在不在、行数与摘要对不对得上、预览弹层出不出来、
+ * 取消之后有没有多出一行。
+ */
+test.describe('测评任务的目标学生', () => {
+  test('页签列出的行数与摘要里的发放人数对得上，并能按学生筛选', async ({ page }) => {
+    await loginAs(page, 'counselor');
+    const modal = await openLargestTaskModal(page);
+
+    // 摘要在页签之外，两边是**两个接口**：发放人数来自 `/assessment-tasks/{id}/participation`
+    // （V1.2 阶段 8 起），下面这些行来自 `/assessment-tasks/{id}/targets`。两个口径
+    // **不一样，而且是有意的**：那六格是**整场测评**的数（`/participation` 不套读者的
+    // 数据范围，弹层下面那句小字写着这一句），明细表逐行给出姓名、随范围缩。对一位
+    // 范围是全校的心理老师两者相等——这一条断言的正是那个「相等」，不是断言某个写死的数。
+    // （§11 那条指标卡教训：屏上两处指向同一个东西时必须同源；不同源就得各写各的口径，
+    // 而这一页写的是「整场」。）
+    //
+    // **那个数要等它落下来。** 六格是懒加载的，`/participation` 回来之前每一格都是 `—`，
+    // 而 `Number('—')` 是 `NaN`——先等那一格不再是占位符，再读它。这与本文件别处的
+    // 「先证明有东西可扫」是同一条：少了这一步，这一条断言的就是一个还没到的答案。
+    const sentCell = modal.locator('.detail-row', { hasText: '发放人数' }).locator('b');
+    await expect(sentCell, '发放人数一直没读出来，明细表那一趟就没有可比的对象').not.toHaveText('—');
+    const sent = Number(await sentCell.innerText());
+    expect(sent, '演示数据里应当至少有一个带目标行的任务').toBeGreaterThan(0);
+
+    await modal.getByRole('button', { name: '目标学生' }).click();
+    const targetRows = modal.locator('tbody tr');
+    // 先证明有东西可扫：目标行还没渲染时，下面两条断言扫的是一块空区域。
+    await expect(targetRows.first()).toBeVisible();
+    await expect(targetRows).toHaveCount(sent);
+
+    // 范围那一句是口径声明（§9）：没有「发放范围」记录时说的是「未记录」，
+    // 而不是替它猜一个「全校」。
+    await expect(modal.getByText(/发放范围：(全校|按年级|按班级|指定学生|未记录发放范围)/)).toBeVisible();
+
+    await modal.locator('input[type=search]').fill('zzz查无此人zzz');
+    await expect(modal.getByText(/没有匹配「zzz查无此人zzz」的记录，共 \d+ 条/)).toBeVisible();
+    await modal.locator('input[type=search]').fill('');
+    await expect(targetRows).toHaveCount(sent);
+  });
+
+  test('补发是「先看后补」：原因必填，取消之后一行都没多', async ({ page }) => {
+    await loginAs(page, 'counselor');
+    const modal = await openLargestTaskModal(page);
+    await modal.getByRole('button', { name: '目标学生' }).click();
+    const targetRows = modal.locator('tbody tr');
+    await expect(targetRows.first()).toBeVisible();
+    const before = await targetRows.count();
+
+    await modal.getByRole('button', { name: '补发学生' }).click();
+    // 按**可访问名**定位，不用 `.last()`：`.modal-panel` 的先后是模板里各组件的
+    // 声明次序（`<FormDialog>` 排在详情弹层**前面**），不是它们的打开次序——两者都
+    // Teleport 到 body，先声明的那一个于是永远排在前面。写成 `.last()` 拿到的是详情
+    // 弹层，等一个它里面根本不存在的按钮会一直等到超时。
+    const form = page.getByRole('dialog', { name: '补发目标学生' });
+    const submit = form.getByRole('button', { name: '查看将补发哪些人' });
+
+    // 原因是必填：空着提交只会得到一行错误，**一个请求都不会发**。
+    await submit.click();
+    await expect(form.getByText('补发原因不能为空')).toBeVisible();
+    await expect(page.locator('.modal-panel')).toHaveCount(2);
+
+    await form.getByLabel(/补发原因/).fill('e2e：只预览，不确认');
+    await submit.click();
+
+    // 第二步的弹层与第一步**同名**（都叫「补发目标学生」），而且表单是**渐隐着**退场的
+    // ——那几百毫秒里两个弹层同时在 DOM 里，`getByRole('dialog', { name })` 会一次匹配到
+    // 两个，Playwright 的严格模式直接判失败。所以先把「表单已经关掉」钉死：它既是这一步
+    // 的真实行为，也让下面每个定位器都不必在两个同名弹层之间挑一个。
+    await expect(page.locator('.form-dialog-form')).toHaveCount(0);
+
+    const preview = page.getByRole('dialog', { name: '补发目标学生' });
+    // 弹层里的两个按钮都在页脚里（表单那个「取消」在 `<form>` 里），按页脚收窄一层，
+    // 与上面那条防的是同一件事。
+    const footer = preview.locator('.modal-footer');
+    // 演示任务的名册早就发满了，所以这里跑的是「没有可补发的人」那一支；两支都算通过
+    // ——这一条钉的是「界面有没有地方回答这个问题」，不是演示数据此刻的形状。
+    const empty = preview.getByText(/没有可补发的人/);
+    await expect(preview.getByText(/将新增|没有可补发的人/)).toBeVisible();
+    // 一支曾经的样子是「将新增 **0** 名学生」，紧接着下面再跟一句「没有可补发的人」
+    // ——同一屏两句话各说各的，而第一句读起来像一件真会发生的事。所以「将新增」后面
+    // 那个数必须是正的：这一条钉的是**这两句互斥**，与演示数据此刻有几个人无关。
+    await expect(preview.getByText(/将新增\s*0\s*名/)).toHaveCount(0);
+    // 「一个人都没有」与「那个按钮能不能按」必须是同一件事的两个说法，所以两个方向
+    // 都断言：空着一份名单却给一个能按的「确认补发」，按下去只会得到一句
+    // 「已补发 0 名学生」——一次什么也没做的写入被报成了成功。
+    const confirm = footer.getByRole('button', { name: '确认补发' });
+    if (await empty.isVisible()) {
+      await expect(confirm).toBeDisabled();
+    } else {
+      await expect(confirm).toBeEnabled();
+    }
+
+    // 取消 = 什么都没发生。这是这一条的**判据**：预览写得像个提交按钮的实现在这里变红。
+    await footer.getByRole('button', { name: '取消' }).click();
+    await expect(targetRows).toHaveCount(before);
   });
 });
 
@@ -2143,7 +2403,7 @@ test.describe('失败与竞态不留下旧数据', () => {
       .filter({ has: page.getByRole('heading', { name: '学生导入' }) });
     await expect(card).toBeVisible();
 
-    // 第一份：S001 已在名册上，于是它会渲染出「待确认 1」与一个**可提交的令牌**。
+    // 第一份：S001 已在名册上，于是它会渲染出「待确认 1」与一个**可提交的批次**。
     await card.locator('input[type=file]').setInputFiles({
       name: 'e2e-第一份.csv',
       mimeType: 'text/csv',
@@ -2152,14 +2412,14 @@ test.describe('失败与竞态不留下旧数据', () => {
     await expect(card.getByText('待确认 1')).toBeVisible();
 
     // 第二份：请求**本身**失败（服务端 500），不是「文件里有错误」。
-    await failApiPaths(page, { '/api/v1/students/import/preview': '导入预览失败' });
+    await failApiPaths(page, { '/api/v1/student-roster/import/preview': '导入预览失败' });
     await card.locator('input[type=file]').setInputFiles({
       name: 'e2e-第二份.csv',
       mimeType: 'text/csv',
       buffer: Buffer.from('student_no,name,grade,class_name\nS002,e2e预演2,初二,801\n', 'utf-8'),
     });
 
-    // 上一份的预览必须消失：留着它，「确认导入」交出去的是**上一份文件**的令牌，
+    // 上一份的预览必须消失：留着它，「确认导入」交出去的是**上一份文件**的批次 id，
     // 而屏幕上写着刚选的那一份——这不是显示错了，是导错了文件。
     // 失败要说话（提示条在卡片外面，它是全站那一个容器），并且**不留**上一份预览。
     await expect(page.locator('.toast', { hasText: '导入预览失败' })).toBeVisible();

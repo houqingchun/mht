@@ -1,13 +1,22 @@
 """表结构校对（`app/db/ensure_schema.py`）。
 
-这个模块只在**真库**上跑（内存 sqlite 不跑 Alembic，缺口 3），所以这里测的是两件事：
+这个模块只在**真库**上跑，所以这里测的是三件事：
 
-1. `compare_schema` —— 纯函数，拿**两份临时的小 metadata** 在内存 sqlite 上逐种差集钉它。
-   刻意不碰真实那 24 张表：那样每加一张表、每加一列都要回来改这里的期望值，而这条
-   测试要钉的是「差集算得对不对」，不是「这张表长什么样」。
+1. `compare_schema` —— 纯函数，拿**两份临时的小 metadata** 逐种差集钉它。刻意不碰真实
+   那 24 张表：那样每加一张表、每加一列都要回来改这里的期望值，而这条测试要钉的是
+   「差集算得对不对」，不是「这张表长什么样」。
 2. `decide` —— 那张判据表。**这是这个文件里最值钱的一半**：判据一旦写反，安装器会在
    「表结构是旧的」的库上盖一个 head 的版本戳，而之后每一处读新列的地方都 500，屏幕上
    写着「安装完成」。那些状态在真库上很难摆出来，在这里是一个参数。
+3. `test_the_migrated_database_matches_the_models_exactly` —— 缺口 3 关闭之后新长出来的
+   能力：**库由 `alembic upgrade head` 建、判据是模型**，两者漂移的那一刻它就红。
+
+2026-09-19 之前 1 与 2 跑在内存 sqlite 上，理由是「内存 sqlite 不跑 Alembic」（缺口 3）
+——那句话说的是**别人**（`conftest.py`），而这里那些库是这两条测试自己建的。真正该问的
+是 `inspect()` 的行为逐方言会不会不同：`compare_schema` 只读表名与列名，所以 sqlite 与
+MySQL 在它面前本该一样。既然整条测试链现在都在 MySQL 上，那就让它也在 MySQL 上验——
+`throwaway_database(with_schema=False)` 给的就是「一个真的建了库、但一张表都没有」的
+起点，比 sqlite 那个「换一条连接就是另一个库」的内存库还直接。
 
 `alembic_config()` 那两条是**跨目录**的：它在 `monkeypatch.chdir(tmp_path)` 下跑，
 所以「不依赖当前工作目录」是被证过的，不是注释里的一句声明。
@@ -18,16 +27,17 @@ from __future__ import annotations
 import ast
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 from alembic.script import ScriptDirectory
-from sqlalchemy import Column, Integer, MetaData, String, Table, create_engine, inspect
+from sqlalchemy import Column, Integer, MetaData, String, Table, create_engine, inspect, text
 from sqlalchemy.engine import Engine
-from sqlalchemy.pool import StaticPool
 
 from app.core.config import Settings
 from app.db import ensure_schema
+from app.db.base import Base
 from app.db.ensure_schema import (
     ABSENT,
     BLOCK,
@@ -41,6 +51,7 @@ from app.db.ensure_schema import (
     compare_schema,
     decide,
 )
+from app.tests.mysql_support import throwaway_database
 
 # 两份小 metadata 里那张表和它的列。**`age` 是刻意挑的**：0011 迁移给 `student` 加的就是
 # 它、同时 drop 了 `birth_date`——「缺列」与「多列」这两个方向在这一张表上都有真事对应。
@@ -82,21 +93,46 @@ def _actual(*, columns: tuple[str, ...] = EXPECTED_COLUMNS, tables: tuple[str, .
     return metadata
 
 
-def _engine(metadata: MetaData) -> Engine:
-    # StaticPool：`sqlite://` 是内存库，换一条连接就是另一个库了，而 `inspect` 会自己开连接。
-    engine = create_engine(
-        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
-    )
-    metadata.create_all(engine)
-    return engine
-
-
 def _diff(*, columns: tuple[str, ...] = EXPECTED_COLUMNS, tables: tuple[str, ...] = ("school", "student")):
-    engine = _engine(_actual(columns=columns, tables=tables))
-    try:
-        return compare_schema(inspect(engine), _expected())
-    finally:
-        engine.dispose()
+    """在一个一次性库里建出 `_actual()` 那两张表，再拿 `_expected()` 去比。
+
+    `with_schema=False`：这个库要装的是**这两张假表**，所以一条迁移都不该跑
+    （迁移建出来的是真实那 24 张，与这里的 `_expected()` 毫无关系）。
+    """
+    with throwaway_database(with_schema=False) as url:
+        engine = create_engine(url)
+        try:
+            _actual(columns=columns, tables=tables).create_all(engine)
+            return compare_schema(inspect(engine), _expected())
+        finally:
+            engine.dispose()
+
+
+def test_the_migrated_database_matches_the_models_exactly():
+    """★ 这条是缺口 3 关闭之后新长出来的能力，也是阶段 1 全部的产出。
+
+    库由 `alembic upgrade head` 建（`throwaway_database()`），判据是 **ORM 模型**。
+    两者漂移的那一刻它就红：给某个模型加一列而不给迁移加，模型要的列在库里没有 →
+    `missing_columns` 非空；反过来迁移多建了一列 → `extra_columns` 非空。
+
+    在此之前这一对命题没有任何机器判据——`conftest.py` 用 `Base.metadata.create_all`
+    建表，于是「模型和自己一致」永远成立，而它跟真库没有关系。2026-09-19 那天
+    开发库是 V1.2 的 35 张表、代码是 V1.0，学生一开卷子就是 MySQL 1364，523 个测试全绿。
+
+    `alembic_version` 不会被误报：`compare_schema` 只走 `metadata.sorted_tables`，
+    库里多出来的表不在判据里。
+    """
+    with throwaway_database() as url:
+        engine = create_engine(url)
+        try:
+            diff = compare_schema(inspect(engine), Base.metadata)
+        finally:
+            engine.dispose()
+
+    assert diff.missing_tables == [], "迁移没建出模型要的表"
+    assert diff.missing_columns == {}, "模型要的列在迁移建出来的库里不存在"
+    assert diff.extra_columns == {}, "迁移多建了模型里没有的列"
+    assert diff.exactly_matches is True
 
 
 # ---------------------------------------------------------------- compare_schema
@@ -182,19 +218,33 @@ def test_the_module_sees_the_models_in_an_interpreter_of_its_own(module):
 
 # ---------------------------------------------------------------- read_version_state
 #
-# 这一段拿**真的** `ScriptDirectory`（读的就是仓库里那 12 份迁移）在内存 sqlite 上跑。
+# 这一段拿**真的** `ScriptDirectory`（读的就是仓库里那 12 份迁移）跑。
 # `decide` 那组用例把它当成一个入参，所以它自己的分支一条都覆盖不到——而 2026-09-18
 # 真机上炸的正是其中一条：`script.get_revision()` 认不出时**抛 CommandError**，
 # 于是 UNKNOWN 这个状态根本到不了，报出来是一句「连不上数据库」。
 
 
+@contextmanager
 def _version_table_engine(*rows: str):
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    with engine.begin() as connection:
-        connection.exec_driver_sql(f"CREATE TABLE {ensure_schema.VERSION_TABLE} (version_num VARCHAR(32) NOT NULL)")
-        for row in rows:
-            connection.exec_driver_sql(f"INSERT INTO {ensure_schema.VERSION_TABLE} VALUES (?)", (row,))
-    return engine
+    """一个只有 `alembic_version` 的库——版本表本身由这里手写、**不跑迁移**。
+
+    这才是那四种状态要的形状：真库上摆出「表在但是空的」「版本号是未来某版」都不容易，
+    而这里 `with_schema=False` 给的正是「一张应用表都没有」的起点。
+    """
+    with throwaway_database(with_schema=False) as url:
+        engine = create_engine(url)
+        try:
+            with engine.begin() as connection:
+                connection.exec_driver_sql(
+                    f"CREATE TABLE {ensure_schema.VERSION_TABLE} (version_num VARCHAR(32) NOT NULL)"
+                )
+                for row in rows:
+                    connection.execute(
+                        text(f"INSERT INTO {ensure_schema.VERSION_TABLE} VALUES (:v)"), {"v": row}
+                    )
+            yield engine
+        finally:
+            engine.dispose()
 
 
 def _read_state(engine):
@@ -205,27 +255,22 @@ def _read_state(engine):
 
 
 def test_a_missing_version_table_is_absent():
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    try:
-        assert _read_state(engine) == (ABSENT, None)
-    finally:
-        engine.dispose()
+    with throwaway_database(with_schema=False) as url:
+        engine = create_engine(url)
+        try:
+            assert _read_state(engine) == (ABSENT, None)
+        finally:
+            engine.dispose()
 
 
 def test_an_empty_version_table_is_empty():
-    engine = _version_table_engine()
-    try:
+    with _version_table_engine() as engine:
         assert _read_state(engine) == (EMPTY, None)
-    finally:
-        engine.dispose()
 
 
 def test_a_revision_this_version_knows_is_known():
-    engine = _version_table_engine(HEAD, "0010_import_source")
-    try:
+    with _version_table_engine(HEAD, "0010_import_source") as engine:
         assert _read_state(engine) == (KNOWN, HEAD), "表里有多行时取第一行——alembic 自己的表也只有一行"
-    finally:
-        engine.dispose()
 
 
 def test_a_revision_this_version_does_not_know_is_a_state_not_an_exception():
@@ -236,21 +281,15 @@ def test_a_revision_this_version_does_not_know_is_a_state_not_an_exception():
     「连不上数据库或者读不动表结构：CommandError: Can't locate revision identified by …」
     ——把「这份库来自另一个版本」说成了「连不上库」，而操作员会去查密码。
     """
-    engine = _version_table_engine("0099_from_the_future")
-    try:
+    with _version_table_engine("0099_from_the_future") as engine:
         assert _read_state(engine) == (UNKNOWN, "0099_from_the_future")
-    finally:
-        engine.dispose()
 
 
 def test_the_older_revision_is_the_real_one_in_the_repo():
     """`decide` 那组用例里的 `OLDER` 得真的是一个存在的迁移，否则那些用例证的是别的事。"""
-    engine = _version_table_engine(OLDER)
-    try:
+    with _version_table_engine(OLDER) as engine:
         assert _read_state(engine) == (KNOWN, OLDER)
         assert OLDER != HEAD
-    finally:
-        engine.dispose()
 
 
 def test_the_two_kinds_of_trouble_get_different_advice(capsys):
@@ -308,7 +347,9 @@ def _nothing_yet() -> SchemaDiff:
     return SchemaDiff(missing_tables=["school", "student"], present_tables=0)
 
 
-HEAD = "0012_drop_care_case_unique"
+#: 跟着 `alembic/versions/` 的 head 走。加一条迁移就改它——`_read_state` 会在
+#: `ScriptDirectory.get_current_head()` 与它不一致时当场喊出来，所以它不会悄悄过期。
+HEAD = "0018_row_conflict_resolution"
 OLDER = "0010_import_source"
 
 
@@ -425,8 +466,12 @@ def test_every_place_that_hands_a_url_to_alembic_escapes_the_percent_sign():
     `env.py` 里还有第二处 `set_main_option("sqlalchemy.url", …)`——那是 `alembic upgrade
     head` 真正走的那一条（`ensure_schema` 那份只喂给 `stamp`）。两处漏掉任何一处，
     含符号口令的机器都会在安装中途撞一句与原因无关的
-    `invalid interpolation syntax`，而**没有任何别的测试看得见它**：`make test` 不跑
-    Alembic（缺口 3），内存 sqlite 的连接串里也没有 `%`。
+    `invalid interpolation syntax`。
+
+    2026-09-19 起这条守卫**自己就会执行到**：`make test` 现在真的跑 Alembic
+    （`mysql_support.run_migrations`）。而它仍然要留着——那条路走的是本机开发库的
+    口令，口令里没有 `%` 时它照样是绿的，只有安装到一所口令带符号的学校才会撞。
+    静态扫描是这里唯一看得见两个调用点的地方。
     """
     sites: list[tuple[str, str, bool]] = []
     for path in sorted(BACKEND_DIR.rglob("*.py")):

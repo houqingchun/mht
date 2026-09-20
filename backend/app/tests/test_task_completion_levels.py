@@ -37,6 +37,7 @@ from app.models.assessment import (
 from app.models.organization import School, Student
 from app.models.scale import AssessmentScale
 from app.tests.conftest import auth_headers
+from app.tests.factories import make_sitting, make_target
 
 COUNSELOR = ("counselor", "13800000001")
 
@@ -59,7 +60,7 @@ def make_task(db, task_no: str, days_ago: int = 0) -> AssessmentTask:
     )
     db.add(task)
     db.flush()
-    db.add(AssessmentTarget(task_id=task.id, student_id=student.id, status="NOT_STARTED"))
+    make_target(db, student, task)
     db.flush()
     return task
 
@@ -76,16 +77,13 @@ def add_result(
     """给这名学生在**这一场**任务里加一场已交卷的测评。"""
     scale = db.scalar(select(AssessmentScale).where(AssessmentScale.code == "MHT"))
     student = db.scalar(select(Student).where(Student.student_no == "S001"))
-    session = AssessmentSession(
-        student_id=student.id,
+    session = make_sitting(
+        db,
+        student,
+        scale=scale,
         task_id=task.id,
-        scale_id=scale.id,
-        scale_version=scale.version,
-        status="SUBMITTED",
         submitted_at=datetime.now(UTC) - timedelta(days=days_ago),
     )
-    db.add(session)
-    db.flush()
     db.add(
         AssessmentResult(
             session_id=session.id,
@@ -114,9 +112,16 @@ def completion(client, task_id: int, account: str = COUNSELOR[1]) -> list[dict]:
 
 
 def completion_csv(client, task_id: int) -> list[list[str]]:
-    response = client.get(
+    """建作业 → 取文件（2026-09-19 阶段 8 起导出是两跳，见 `test_audit_export_api`）。"""
+    headers = auth_headers(client, *COUNSELOR)
+    created = client.post(
         f"/api/v1/assessment-tasks/{task_id}/completion/export",
-        headers=auth_headers(client, *COUNSELOR),
+        headers=headers,
+        json={"purpose": "完成情况核对"},
+    )
+    assert created.status_code == 200, created.text
+    response = client.get(
+        f"/api/v1/export-jobs/{created.json()['data']['id']}/download", headers=headers
     )
     assert response.status_code == 200, response.text
     text = response.content.decode("utf-8-sig")

@@ -131,6 +131,105 @@ def test_granting_scope_opens_access(client, db_session):
     assert client.get("/api/v1/care-cases", headers=leader_headers).status_code == 200
 
 
+def test_revoking_psych_detail_also_blocks_the_task_detail_endpoints(client, db_session):
+    """§4 那句「受控导出不能成为绕过心理详情的旁路」，在**三份任务级明细**上各验一次。
+
+    为什么这里要单独一条：这三处的门槛是**三道**，默认角色能各自挡住一个——德育领导
+    被心理详情挡、系统管理员被受控导出与任务读者挡（`test_task_participation.py` 与
+    `test_task_roles.py` 里各有逐角色的用例）。但那些用例**构造不出**
+    「有导出许可、没有心理详情明细」这个组合，而它恰恰是这句承诺要挡的那一格：
+    一个心理老师手上拿着 `CONTROLLED_EXPORT`，把 `STUDENT_PSYCH_DETAIL` 降成 `NONE`
+    之后还导得动逐行印着姓名的文件，那这条旁路就是通的。
+
+    **第三处（完成明细导出）是 2026-09-20 补的**（缺口 12）：它此前**一道能力门槛都
+    没有**，连 `CONTROLLED_EXPORT` 都不查，而它的载荷比前两份还多两列逐人等级。
+    同一处还有它的**读**法（`GET …/completion`），那一条没有导出许可这一档，
+    所以由 `test_task_roles.py::test_the_leader_reads_the_task_but_not_the_people_in_it`
+    与下一节那条提级用例钉住。
+
+    先断一次**能拿到**（否则下面三个 403 在一个端点根本没实现的库上也成立），
+    再断降级之后三条都 403——`NONE` 在 `scope_allows` 里比 `allow` 还早一步拒绝，
+    所以这一条同时钉住那句「先拒 `NONE`」。
+
+    三处都指向**同一场真实任务**（`/assessment-tasks` 现取，不写死 id）：被拒的判据
+    必须是权限，而一个错的 task_id 会给出 404——那与 403 在屏幕上不是一回事。
+    """
+    headers = auth_headers(client, "counselor", "13800000001")
+    items = client.get("/api/v1/assessment-tasks", headers=headers).json()["data"]["items"]
+    assert items, "种子里那场任务应该读得到"
+    task_id = items[0]["id"]
+    exports = (
+        f"/api/v1/assessment-tasks/{task_id}/non-participants/export",
+        f"/api/v1/assessment-tasks/{task_id}/unmatched-import-rows/export",
+        f"/api/v1/assessment-tasks/{task_id}/completion/export",
+    )
+
+    for path in exports:
+        allowed = client.post(path, headers=headers, json={"purpose": "权限矩阵用例"})
+        assert allowed.status_code == 200, f"{path} 现在应该拿得到：{allowed.text}"
+
+    db_session.add(
+        RolePermission(
+            role_code=RoleCode.COUNSELOR.value,
+            capability_key=STUDENT_PSYCH_DETAIL,
+            scope_level=NONE,
+        )
+    )
+    db_session.commit()
+
+    for path in exports:
+        response = client.post(path, headers=headers, json={"purpose": "权限矩阵用例"})
+        assert response.status_code == 403, f"{path} 应该被心理详情那一档挡住"
+        assert response.json()["error"]["code"] == "ROLE_FORBIDDEN"
+
+
+def test_the_completion_gate_is_a_capability_not_a_hardcoded_role(client, db_session):
+    """缺口 12 加的那道门是**能力矩阵**上的格子，不是「领导一律不行」写死在代码里。
+
+    这条与上面那条是同一个形状的两面，缺一条就不完整：上面证明「撤掉就进不来」，
+    这一条证明「授上就进得来」。少了下半句，一个把判据写成
+    `if user.role_code == LEADER: raise` 的实现**照样全绿**——而那种写法会让学校
+    在权限页上给领导开了这一格之后什么都不发生，却看不出是为什么。
+
+    德育领导的默认值是 `SUMMARY`（聚合，不是逐人明细），所以两个端点都 403；
+    把它提到 `SCOPED` 之后两条都放行。**导出那一条还会过 `CONTROLLED_EXPORT`**，
+    而领导的默认值是 `PROGRESS_SUMMARY`，本来就在 `allow` 里——所以这一条断的是
+    「多出来的那一道心理详情」按矩阵走。
+    """
+    leader = auth_headers(client, "leader", "13800000002")
+    items = client.get("/api/v1/assessment-tasks", headers=leader).json()["data"]["items"]
+    assert items, "种子里那场任务应该读得到"
+    task_id = items[0]["id"]
+
+    completion = f"/api/v1/assessment-tasks/{task_id}/completion"
+    completion_export = f"{completion}/export"
+
+    assert client.get(completion, headers=leader).status_code == 403
+    assert (
+        client.post(
+            completion_export, headers=leader, json={"purpose": "权限矩阵用例"}
+        ).status_code
+        == 403
+    )
+
+    db_session.add(
+        RolePermission(
+            role_code=RoleCode.LEADER.value,
+            capability_key=STUDENT_PSYCH_DETAIL,
+            scope_level="SCOPED",
+        )
+    )
+    db_session.commit()
+
+    assert client.get(completion, headers=leader).status_code == 200
+    assert (
+        client.post(
+            completion_export, headers=leader, json={"purpose": "权限矩阵用例"}
+        ).status_code
+        == 200
+    )
+
+
 # --- 3. Matrix endpoints ---
 
 

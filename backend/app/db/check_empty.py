@@ -45,7 +45,7 @@ ROOT_TABLES = ("school", "user_account", "student")
 
 
 def count_rows(engine: Engine, tables: tuple[str, ...] = ROOT_TABLES) -> dict[str, int]:
-    """逐表数行数。纯查询，不改任何东西——`test_check_empty.py` 在内存 sqlite 上钉它。"""
+    """逐表数行数。纯查询，不改任何东西——`test_check_empty.py` 拿一次性 MySQL 库钉它。"""
     counts: dict[str, int] = {}
     with engine.connect() as connection:
         for name in tables:

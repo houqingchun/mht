@@ -35,6 +35,7 @@ from app.models.permission import RolePermission
 from app.models.scale import AssessmentScale
 from app.security.permissions import NONE, ORG_ACCOUNT
 from app.tests.conftest import auth_headers
+from app.tests.factories import make_sitting
 from app.tests.test_care_api import create_risk_case
 from app.tests.test_data_scope import make_other_school_population
 
@@ -64,16 +65,12 @@ def add_sitting(
     决定的话，测的就不是排序规则了（`test_analytics_basis.add_sitting` 同一条理由）。
     """
     scale = _scale(db)
-    session = AssessmentSession(
-        student_id=student.id,
-        scale_id=scale.id,
-        scale_version=scale.version,
-        status="SUBMITTED",
+    session = make_sitting(
+        db,
+        student,
         submitted_at=datetime.now(UTC) - timedelta(days=days_ago),
         source=source,
     )
-    db.add(session)
-    db.flush()
     db.add(
         AssessmentResult(
             session_id=session.id,
@@ -90,17 +87,7 @@ def add_sitting(
 
 def add_open_sitting(db, student: Student) -> AssessmentSession:
     """一场「开了卷子、还没交」的会话——没有结果行。"""
-    scale = _scale(db)
-    session = AssessmentSession(
-        student_id=student.id,
-        scale_id=scale.id,
-        scale_version=scale.version,
-        status="IN_PROGRESS",
-        submitted_at=None,
-    )
-    db.add(session)
-    db.flush()
-    return session
+    return make_sitting(db, student, status="IN_PROGRESS", submitted_at=None)
 
 
 def results(client, account: str = COUNSELOR[1], role: str = COUNSELOR[0]) -> list[dict]:

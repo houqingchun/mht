@@ -341,11 +341,22 @@ async function closeCase() {
   ], '确认关闭')
 
   if (!values.close_note) return
-  await closeCareCase(detail.value.case_id, {
-    close_reason: values.close_reason,
-    close_note: values.close_note,
-    confirm_follow_up_checked: true
-  })
+  try {
+    await closeCareCase(detail.value.case_id, {
+      close_reason: values.close_reason,
+      close_note: values.close_note,
+      confirm_follow_up_checked: true,
+      // 乐观锁（§16.4）：把这一页读到的版本带回去。中间有人复核/跟进/转派过就回 409。
+      case_version: detail.value.case_version
+    })
+  } catch (err) {
+    // 服务端 409 那句原文就是写给用户看的（§2）。这里**不能**把它吞成一句
+    // 「关闭失败」——那句话里写着别人改了什么、当前版本是几。
+    showToast('error', err instanceof Error ? err.message : '关闭失败')
+    detail.value = null
+    await load()
+    return
+  }
   showToast('success', '关注档案已关闭，历史记录保留')
   detail.value = null
   await load()
@@ -361,7 +372,19 @@ async function reopenCase() {
   ], '确认打开')
 
   if (!values.reason) return
-  await reopenCareCase(detail.value.case_id, values.reason)
+  try {
+    await reopenCareCase(detail.value.case_id, {
+      reason: values.reason,
+      case_version: detail.value.case_version
+    })
+  } catch (err) {
+    // 最可能的 409 是「这名学生已经有一条在办档案」（秋季关档、春季再开，§1）——
+    // 原样转达，那句话里带着现在那条在办档案的编号。
+    showToast('error', err instanceof Error ? err.message : '重新打开失败')
+    await load()
+    await openDetail(detail.value.student.id).catch(() => {})
+    return
+  }
   showToast('success', '关注档案已重新打开')
   await load()
   await openDetail(detail.value.student.id)

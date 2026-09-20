@@ -7,10 +7,24 @@ import DataTable, { type Column } from '../../components/DataTable.vue'
 import Modal from '../../components/Modal.vue'
 import ConfirmDialog from '../../components/ConfirmDialog.vue'
 import { useDataImport } from '../../composables/useDataImport'
-import { getMe, getStudents, type StudentItem } from '../../services/api'
+import {
+  getMe,
+  getStudentRosterBatchRows,
+  getStudentRosterBatches,
+  getStudents,
+  type RosterImportBatch,
+  type RosterImportBatchRow,
+  type StudentItem
+} from '../../services/api'
 import {
   STUDENT_STATUS_ORDER,
+  ageLabel,
   genderLabel,
+  importBatchStatusLabel,
+  importBatchStatusTone,
+  rosterConflictLabel,
+  importRowStatusLabel,
+  importRowStatusTone,
   studentStatusLabel,
   studentStatusTone
 } from '../../services/labels'
@@ -56,6 +70,27 @@ const {
 
 const showImportErrors = ref(false)
 const showConfirm = ref(false)
+
+/**
+ * 导入批次历史（V1.2 阶段 3）。
+ *
+ * 在此之前名册导入是一次**无痕动作**：导完之后库里只有一条审计，而「这次导的是哪份
+ * 文件、有几行没落上、为什么没落上」在界面上没有任何落点。批次表与逐行表就是那个落点，
+ * 不给它们读者等于没落库。
+ *
+ * 三态分开是 §14 那条约定：`batchesError` 排在空态**之前**——一次读取失败时落下
+ * 「暂无导入批次」，会让操作员以为自己从没导过，而真相是这一页没读到。
+ */
+const batches = ref<RosterImportBatch[]>([])
+const batchesTotal = ref(0)
+const batchesLoading = ref(true)
+const batchesError = ref('')
+
+const showBatchDetail = ref(false)
+const batchDetail = ref<RosterImportBatch | null>(null)
+const batchRows = ref<RosterImportBatchRow[]>([])
+const batchRowsLoading = ref(false)
+const batchRowsError = ref('')
 const importErrorRows = computed(() => (studentPreview.value?.rows || []).filter(r => r.errors.length > 0))
 // 待确认的行要单独列出来：`errors` 是空的，冲突在 `conflicts` 里，只看 `errors`
 // 的话这一行在明细里长得跟「没问题」一模一样。
@@ -104,11 +139,54 @@ async function load() {
       return
     }
     students.value = await getStudents()
+    await loadBatches()
   } catch (err) {
     error.value = err instanceof Error ? err.message : '加载失败'
   } finally {
     loading.value = false
   }
+}
+
+async function loadBatches() {
+  batchesLoading.value = true
+  batchesError.value = ''
+  try {
+    const page = await getStudentRosterBatches()
+    batches.value = page.items
+    batchesTotal.value = page.total
+  } catch (err) {
+    // 读不到批次历史**不能**让整页变成错误页：名册与学生列表在同一个屏幕上，
+    // 而它们的接口是另一个。所以这一处的失败只落在这一块卡片里。
+    batchesError.value = err instanceof Error ? err.message : '批次历史加载失败'
+  } finally {
+    batchesLoading.value = false
+  }
+}
+
+/**
+ * 打开某一批的逐行明细。
+ *
+ * **取数之前先清空**（§14）：换一批时留着上一批的行，面板上就会标题写着 B、正文是 A。
+ * 明细在弹层里，而弹层是同一个（`showBatchDetail`）复用的，切批次不重建组件。
+ */
+async function openBatchDetail(batch: RosterImportBatch) {
+  batchDetail.value = batch
+  batchRows.value = []
+  batchRowsError.value = ''
+  showBatchDetail.value = true
+  batchRowsLoading.value = true
+  try {
+    batchRows.value = await getStudentRosterBatchRows(batch.id)
+  } catch (err) {
+    batchRowsError.value = err instanceof Error ? err.message : '明细加载失败'
+  } finally {
+    batchRowsLoading.value = false
+  }
+}
+
+/** 明细那一条失败之后的「重试」：重开当前这一批（`batchDetail` 此刻就是它）。 */
+async function retryBatchDetail() {
+  if (batchDetail.value) await openBatchDetail(batchDetail.value)
 }
 
 async function handleStudentFile(file: File) {
@@ -118,8 +196,11 @@ async function handleStudentFile(file: File) {
 
 async function confirmImport() {
   showConfirm.value = false
-  await commitStudents()
+  const result = await commitStudents()
   await load()
+  // 只有真的写进去了才重新读批次历史：一次失败的提交没有改变任何东西，
+  // 重读只会让屏幕上那一行闪一下。
+  if (result) await loadBatches()
 }
 
 onMounted(load)
@@ -160,14 +241,22 @@ onMounted(load)
         </div>
         <p v-if="importingStudents" class="muted tiny" style="margin-top:12px">正在上传校验…</p>
         <div v-if="studentPreview" class="import-summary" style="margin-top: 16px">
+          <!-- 批次号要在**预览**这一屏上就出现：这一批此刻已经在库里了（预览是一次写），
+               下面的「导入批次」那张表里已经有它一行。不说出来的话，操作员点完确认
+               再回头看那张表，分不清哪一行是刚才这一批。 -->
+          <span class="muted tiny">批次 {{ studentPreview.batch_no }}</span>
           <strong>总数 {{ studentPreview.total }}</strong>
           <span>可导入 {{ studentPreview.valid_count }}</span>
           <span v-if="studentPreview.conflict_count" class="status-warn">
             待确认 {{ studentPreview.conflict_count }}
           </span>
           <span>错误 {{ studentPreview.error_count }}</span>
+          <!-- 判据是服务端算的 `submittable_count`（这一批有没有东西可提交），不是
+               `valid_count`：选「覆盖」时冲突行也要写进去，按 `valid_count` 判会把一份
+               只有冲突行的文件判成「没东西可导」。前后端各算一次就会漂，所以这里只用
+               服务端发下来的那一个数。 -->
           <button
-            :disabled="!studentPreview.preview_token || committingStudents || needsStudentResolution"
+            :disabled="!studentPreview.submittable_count || committingStudents || needsStudentResolution"
             @click="showConfirm = true"
           >
             {{ committingStudents ? '正在导入…' : '确认导入' }}
@@ -261,7 +350,119 @@ onMounted(load)
           </DataTable>
         </div>
       </section>
+
+      <!-- 导入批次历史。放在学生列表之后：它是**回头看**的东西，不是这一页的主任务。 -->
+      <section class="card" style="margin-top:17px">
+        <div class="card-head">
+          <h2>导入批次</h2>
+          <span class="muted tiny">
+            最近 {{ batches.length }} 批<template v-if="batchesTotal > batches.length"
+              >，共 {{ batchesTotal }} 批</template
+            >
+          </span>
+        </div>
+        <div class="card-body">
+          <!-- 三态分开（§14）：错误分支排在空态**之前**——一次读取失败时落下
+               「暂无导入批次」，会让操作员以为自己从没导过。 -->
+          <SkeletonBlock v-if="batchesLoading" variant="table" :rows="3" />
+          <ErrorState v-else-if="batchesError" :message="batchesError" :on-retry="loadBatches" />
+          <p v-else-if="!batches.length" class="muted tiny">暂无导入批次</p>
+          <div v-else class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>批次</th><th>文件</th><th>状态</th><th>总数</th>
+                  <th>新增</th><th>更新</th><th>放弃</th><th>错误</th><th>导入时间</th><th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="batch in batches" :key="batch.id">
+                  <td>{{ batch.batch_no }}</td>
+                  <td>{{ batch.file_name }}</td>
+                  <td>
+                    <span :class="['pill', importBatchStatusTone(batch.status)]">{{
+                      importBatchStatusLabel(batch.status)
+                    }}</span>
+                  </td>
+                  <td>{{ batch.total_rows }}</td>
+                  <td>{{ batch.created_rows }}</td>
+                  <td>{{ batch.updated_rows }}</td>
+                  <td>{{ batch.skipped_rows }}</td>
+                  <!-- 错误数只在**真的有问题**时标红：`0` 与 `3` 在同一列里长得一样的话，
+                       这一列就白留了。 -->
+                  <td :class="batch.error_rows ? 'status-bad' : ''">{{ batch.error_rows }}</td>
+                  <td>{{ batch.created_at }}</td>
+                  <td><button class="btn" @click="openBatchDetail(batch)">查看明细</button></td>
+                </tr>
+              </tbody>
+            </table>
+            <!-- 截断要自己说出来（§10）：这一页看的是「最近导入过什么」，而用了几年的库
+                 会有几百批。 -->
+            <p v-if="batchesTotal > batches.length" class="muted tiny" style="margin-top:8px">
+              仅显示最近 {{ batches.length }} 批，共 {{ batchesTotal }} 批。
+            </p>
+          </div>
+        </div>
+      </section>
     </template>
+
+    <Modal
+      :model-value="showBatchDetail"
+      :title="batchDetail ? `导入明细 · ${batchDetail.batch_no}` : '导入明细'"
+      size="lg"
+      @update:model-value="showBatchDetail = $event"
+    >
+      <p v-if="batchDetail" class="muted tiny">
+        {{ batchDetail.file_name }} · 共 {{ batchDetail.total_rows }} 行 ·
+        新增 {{ batchDetail.created_rows }} · 更新 {{ batchDetail.updated_rows }} ·
+        放弃 {{ batchDetail.skipped_rows }} · 错误 {{ batchDetail.error_rows }}
+      </p>
+      <SkeletonBlock v-if="batchRowsLoading" variant="table" :rows="4" />
+      <ErrorState v-else-if="batchRowsError" :message="batchRowsError" :on-retry="retryBatchDetail" />
+      <p v-else-if="!batchRows.length" class="muted tiny">这一批没有逐行记录</p>
+      <div v-else class="table-wrap" style="margin-top:12px">
+        <table>
+          <thead>
+            <tr>
+              <th>行</th><th>学号</th><th>姓名</th><th>年级班级</th><th>性别</th><th>年龄</th>
+              <th>结果</th><th>说明</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in batchRows" :key="row.row_no">
+              <td>{{ row.row_no }}</td>
+              <td>{{ row.student_no || '—' }}</td>
+              <td>{{ row.name || '—' }}</td>
+              <td>{{ row.grade_name || '' }}{{ row.class_name || '' }}</td>
+              <!-- 性别存的是归一化之后的**编码**（MALE/FEMALE），必须显式翻译：
+                   DataTable 的默认插槽直接打印 row[key]，而这里连默认插槽都没有。 -->
+              <td>{{ genderLabel(row.gender) }}</td>
+              <td>{{ ageLabel(row.age) }}</td>
+              <td>
+                <span :class="['pill', importRowStatusTone(row.processing_status)]">{{
+                  importRowStatusLabel(row.processing_status)
+                }}</span>
+              </td>
+              <!-- 两格合一列：「撞上了什么」与「拿它怎么办」是同一件事的两半，分开两列
+                   会让一行里出现两个空格子。`conflict_code` 落库了（选「覆盖」时它留着，
+                   因为那件事确实发生过），所以它得能读出来。 -->
+              <td>
+                <span v-if="row.conflict_code" class="status-warn">{{
+                  rosterConflictLabel(row.conflict_code)
+                }}</span>
+                <span v-if="row.message" :class="row.conflict_code ? '' : 'status-bad'">{{
+                  (row.conflict_code ? '：' : '') + row.message
+                }}</span>
+                <span v-if="!row.conflict_code && !row.message" class="muted">—</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <template #footer>
+        <button class="btn" @click="showBatchDetail = false">关闭</button>
+      </template>
+    </Modal>
 
     <Modal :model-value="showImportErrors" title="导入校验明细" size="lg" @update:model-value="showImportErrors = $event">
       <div class="table-wrap">

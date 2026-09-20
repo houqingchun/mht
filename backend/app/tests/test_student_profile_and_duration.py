@@ -28,8 +28,29 @@ from app.models.organization import Student
 from app.models.scale import ScaleQuestion
 from app.services import assessment_service
 from app.tests.conftest import auth_headers
+from app.tests.factories import make_target
 from app.tests.test_assessment_api import create_student_session, save_answers
-from app.tests.test_audit_export_api import create_case_with_followup
+from app.tests.test_audit_export_api import create_case_with_followup, export_and_download
+
+
+def _care_case_export_csv(client, headers: dict, **payload) -> list[list[str]]:
+    """受控导出走完两跳，拿到**文件里的**行。
+
+    2026-09-19 阶段 8 起导出是两跳（建作业 → `/export-jobs/{id}/download`）。这个
+    包装是必须的：建作业那一步回的是作业载荷 JSON，而那份 JSON 里带着 `columns`
+    （字段白名单摊平之后就是表头名），所以 `_csv_rows(response.text)` 会在一段 JSON
+    上解析出一行，`"性别" in rows[0]` 这类断言**照样能通过**——它命中的是载荷里那份
+    列名清单，不是文件的内容。比红更糟的是这种绿。
+    """
+    created = client.post(
+        "/api/v1/care-cases/export", headers=headers, json={"purpose": "阶段工作统计", **payload}
+    )
+    assert created.status_code == 200, created.text
+    downloaded = client.get(
+        f"/api/v1/export-jobs/{created.json()['data']['id']}/download", headers=headers
+    )
+    assert downloaded.status_code == 200, downloaded.text
+    return _csv_rows(downloaded.text)
 
 
 def _seeded_student(db_session) -> Student:
@@ -230,7 +251,7 @@ def test_import_writes_gender_and_age(client, db_session):
     headers = auth_headers(client, "admin", "admin")
     csv_content = "student_no,name,grade,class_name,性别,年龄\nS007,周同学,初二,803,女,13\n"
     preview = client.post(
-        "/api/v1/students/import/preview",
+        "/api/v1/student-roster/import/preview",
         headers=headers,
         files={"file": ("students.csv", csv_content, "text/csv")},
     )
@@ -238,9 +259,9 @@ def test_import_writes_gender_and_age(client, db_session):
     assert data["valid_count"] == 1
 
     commit = client.post(
-        "/api/v1/students/import/commit",
+        "/api/v1/student-roster/import/commit",
         headers=headers,
-        json={"preview_token": data["preview_token"]},
+        json={"batch_id": data["batch_id"]},
     )
     assert commit.json()["data"]["created"] == 1
 
@@ -256,16 +277,16 @@ def test_import_reads_an_age_written_with_the_character_sui(client, db_session):
     headers = auth_headers(client, "admin", "admin")
     csv_content = "student_no,name,grade,class_name,性别,年龄\nS011,许同学,初三,901,男,14岁\n"
     data = client.post(
-        "/api/v1/students/import/preview",
+        "/api/v1/student-roster/import/preview",
         headers=headers,
         files={"file": ("students.csv", csv_content, "text/csv")},
     ).json()["data"]
     assert data["valid_count"] == 1, data["rows"]
 
     client.post(
-        "/api/v1/students/import/commit",
+        "/api/v1/student-roster/import/commit",
         headers=headers,
-        json={"preview_token": data["preview_token"]},
+        json={"batch_id": data["batch_id"]},
     )
     db_session.expire_all()
     assert db_session.scalar(select(Student).where(Student.student_no == "S011")).age == 14
@@ -277,16 +298,16 @@ def test_import_without_the_optional_columns_stores_nulls(client, db_session):
     headers = auth_headers(client, "admin", "admin")
     csv_content = "student_no,name,grade,class_name\nS008,吴同学,初一,701\n"
     data = client.post(
-        "/api/v1/students/import/preview",
+        "/api/v1/student-roster/import/preview",
         headers=headers,
         files={"file": ("students.csv", csv_content, "text/csv")},
     ).json()["data"]
     assert data["valid_count"] == 1
 
     client.post(
-        "/api/v1/students/import/commit",
+        "/api/v1/student-roster/import/commit",
         headers=headers,
-        json={"preview_token": data["preview_token"]},
+        json={"batch_id": data["batch_id"]},
     )
     db_session.expire_all()
     student = db_session.scalar(select(Student).where(Student.student_no == "S008"))
@@ -305,14 +326,14 @@ def test_import_reports_a_bad_gender_or_age_per_row(client):
         "S013,陈同学,初一,701,FEMALE,2013\n"   # 是整数，但那是出生年份：越界
     )
     data = client.post(
-        "/api/v1/students/import/preview",
+        "/api/v1/student-roster/import/preview",
         headers=headers,
         files={"file": ("students.csv", csv_content, "text/csv")},
     ).json()["data"]
 
     assert data["valid_count"] == 0
     assert data["error_count"] == 3
-    assert data["preview_token"] is None
+    assert data["submittable_count"] == 0
     # 每行**恰好**一条错误：班级改成 701 就是为了让这几行不再顺带撞上校验收，
     # 否则「错的是性别那一格」这句话就没法从 error_count 上读出来。
     assert [len(row["errors"]) for row in data["rows"]] == [1, 1, 1]
@@ -335,13 +356,13 @@ def test_a_template_still_headed_birth_date_is_rejected_with_the_new_column_name
         "S012,蒋同学,初一,701,女,2013-09-01\n"
     )
     data = client.post(
-        "/api/v1/students/import/preview",
+        "/api/v1/student-roster/import/preview",
         headers=headers,
         files={"file": ("students.csv", csv_content, "text/csv")},
     ).json()["data"]
 
     assert data["valid_count"] == 0
-    assert data["preview_token"] is None
+    assert data["submittable_count"] == 0
     assert data["rows"][0]["errors"] == ["「出生日期」列已改为「年龄」，请填 13 这样的整数"]
 
 
@@ -358,16 +379,8 @@ def test_export_gates_the_quasi_identifiers_behind_unmasking(client):
     是 PROGRESS_SUMMARY、在 /students 上本来就是 403（CLAUDE.md §4）。
     """
     headers = create_case_with_followup(client)
-    masked = _csv_rows(
-        client.post("/api/v1/care-cases/export", headers=headers, json={"purpose": "阶段工作统计"}).text
-    )
-    named = _csv_rows(
-        client.post(
-            "/api/v1/care-cases/export",
-            headers=headers,
-            json={"purpose": "阶段工作统计", "mask_names": False},
-        ).text
-    )
+    masked = _care_case_export_csv(client, headers)
+    named = _care_case_export_csv(client, headers, mask_names=False)
 
     assert "用时(秒)" in masked[0]
     assert "性别" not in masked[0] and "年龄" not in masked[0]
@@ -378,12 +391,7 @@ def test_export_columns_line_up_with_their_values(client):
     """表头和数据行是两条各自拼出来的列表，插列错位不会让任何一条断言变红——
     值只是整体挪一格。所以逐行比对长度，再确认已知值落在自己的表头下。"""
     headers = create_case_with_followup(client)
-    response = client.post(
-        "/api/v1/care-cases/export",
-        headers=headers,
-        json={"purpose": "阶段工作统计", "mask_names": False},
-    )
-    rows = _csv_rows(response.text)
+    rows = _care_case_export_csv(client, headers, mask_names=False)
     header, body = rows[0], rows[1:]
     assert body
     assert all(len(row) == len(header) for row in body)
@@ -426,11 +434,7 @@ def test_export_reads_the_latest_assessment_when_there_are_two(client, db_sessio
     )
     db_session.add(second_task)
     db_session.flush()
-    db_session.add(
-        AssessmentTarget(
-            task_id=second_task.id, student_id=_seeded_student(db_session).id, status="NOT_STARTED"
-        )
-    )
+    make_target(db_session, _seeded_student(db_session), second_task)
     db_session.commit()
 
     student_headers = auth_headers(client, "student", "S001")
@@ -444,10 +448,7 @@ def test_export_reads_the_latest_assessment_when_there_are_two(client, db_sessio
     )
     assert submitted.json()["data"]["result"]["total_level"] == "KEY_ATTENTION"
 
-    response = client.post(
-        "/api/v1/care-cases/export", headers=counselor, json={"purpose": "阶段工作统计"}
-    )
-    rows = _csv_rows(response.text)
+    rows = _care_case_export_csv(client, counselor)
     index = {name: position for position, name in enumerate(rows[0])}
     row = next(item for item in rows[1:] if item[index["学号"]] == "S001")
     assert row[index["关注等级"]] == "重点关注"
@@ -461,9 +462,16 @@ def test_task_completion_csv_header_matches_its_rows(client):
     # 任务列表与完成明细是心理老师与德育领导的面（2026-09-17 起管理员整块退出）。
     counselor = auth_headers(client, "counselor", "13800000001")
     task_id = client.get("/api/v1/assessment-tasks", headers=counselor).json()["data"]["items"][0]["id"]
+    # 建作业 → 取文件（阶段 8：导出是两跳，字节只从 `/export-jobs/{id}/download` 出去）。
+    created = client.post(
+        f"/api/v1/assessment-tasks/{task_id}/completion/export",
+        headers=counselor,
+        json={"purpose": "完成情况核对"},
+    )
+    assert created.status_code == 200, created.text
     rows = _csv_rows(
         client.get(
-            f"/api/v1/assessment-tasks/{task_id}/completion/export", headers=counselor
+            f"/api/v1/export-jobs/{created.json()['data']['id']}/download", headers=counselor
         ).text
     )
     header, body = rows[0], rows[1:]

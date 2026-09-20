@@ -201,11 +201,18 @@ async function submit() {
 async function onConfirmSubmit() {
   if (!session.value) return
   try {
-    await submitAssessmentSession(session.value.id)
+    const outcome = await submitAssessmentSession(session.value.id)
     // 交完卷这张卷子的光标就没有意义了；不清的话，同一个学生会话 id 不会再出现，
     // 但那个键会一直躺在浏览器里。
     try { localStorage.removeItem(cursorKey(session.value.id)) } catch { /* ignore */ }
-    showToast('success', '测评已成功提交')
+    // 「提交成功」说的是他做的事（答卷存下来了），而**不是**成绩已经算出来。
+    // 评分那一步失败时，`result` 是 null，交卷仍然是成功的——所以两句话分开说：
+    // 一句「测评已成功提交」在这里是真的，但只留这一句，学生会以为一切都好了。
+    if (outcome.result === null) {
+      showToast('info', '答卷已提交；成绩处理还需要老师再看一下，你不需要重新作答')
+    } else {
+      showToast('success', '测评已成功提交')
+    }
     await router.push('/student/home')
   } catch (err) {
     showToast('error', err instanceof Error ? err.message : '提交失败')

@@ -5,7 +5,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.assessment import AssessmentTarget, AssessmentTask
+from app.models.assessment import AssessmentTarget, AssessmentTask, AssessmentTaskScope
 from app.models.account import UserAccount, UserScope
 from app.models.enums import AccountType, RoleCode, ScopeType
 from app.models.organization import ClassGroup, Grade, School, Student
@@ -13,6 +13,7 @@ from app.models.scale import AssessmentScale, ScaleQuestion, ScaleRule
 from app.scale_engine.engine import DEFAULT_RULE_CONFIG, default_mht_questions, rule_config_to_json
 from app.security.passwords import hash_password
 from app.services.scale_rule_service import rule_version_for
+from app.services.target_snapshot import target_snapshot
 
 # The version the seed ships. Kept in one place because three things have to
 # agree on it: the guard that decides whether to create the scale at all, the
@@ -214,7 +215,11 @@ def seed_assessment_task(db: Session) -> None:
     )
     school = db.scalar(select(School).where(School.code == "QH"))
     student = db.scalar(select(Student).where(Student.student_no == "S001"))
-    if not scale or not school or not student:
+    # 「当时是按什么范围发的」（`assessment_task_scope`）需要一行 `created_by`，而那一列
+    # 是 NOT NULL。任务是心理老师的业务（§4），所以这个人就是他。四个种子账号在
+    # `seed_identity_data` 里一起建出来，所以这一条与上面那三条不会各自成立。
+    counselor = db.scalar(select(UserAccount).where(UserAccount.account == "13800000001"))
+    if not scale or not school or not student or not counselor:
         return
     if db.scalar(select(AssessmentTask).where(AssessmentTask.task_no == "TASK-2026-FALL-MHT")):
         return
@@ -239,7 +244,27 @@ def seed_assessment_task(db: Session) -> None:
     )
     db.add(task)
     db.flush()
-    db.add(AssessmentTarget(task_id=task.id, student_id=student.id, status="NOT_STARTED"))
+    # 「当时是按什么范围发的」与下面那一行（「实际发给了谁」）是两张表、两个问题
+    # （§16.2）：发放之后名册上转进来一个学生，目标行会补、范围不会变。
+    db.add(
+        AssessmentTaskScope(
+            task_id=task.id,
+            scope_type=task.scope_type,
+            school_id=school.id,
+            created_by=counselor.id,
+        )
+    )
+    # 七个快照列走**与建任务、补发同一个**定义（`target_snapshot`）。`school_id_snapshot`
+    # 是 V1.2 那个没有默认值的 NOT NULL 列，另外六列（学号 / 姓名 / 年级名 / 班级名 /
+    # 性别 / 年龄）在 2026-09-19 之前每一行都是 NULL——填它们属于 V1.2 的功能实现。
+    db.add(
+        AssessmentTarget(
+            task_id=task.id,
+            student_id=student.id,
+            status="NOT_STARTED",
+            **target_snapshot(student),
+        )
+    )
 
 
 if __name__ == "__main__":

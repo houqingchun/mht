@@ -6,7 +6,7 @@ import SkeletonBlock from '../../components/SkeletonBlock.vue'
 import { showToast } from '../../services/toast'
 import { useSettings } from '../../composables/useSettings'
 import { getMe, getStudentTasks, type StudentTask } from '../../services/api'
-import { TARGET_STATUS_LABELS } from '../../services/labels'
+import { TARGET_STATUS_LABELS, taskStatusLabel } from '../../services/labels'
 
 const router = useRouter()
 
@@ -41,6 +41,14 @@ function openTask(taskId: number) {
 
 function isDone(task: StudentTask) {
   return task.target_status === 'COMPLETED'
+}
+
+/** 这场测评现在能不能新开一张卷子。判据与后端那道门**逐字对齐**：那边是
+ * `effective_task_status(...) != "ACTIVE"` → 404（`assessment_service.create_or_get_session`），
+ * 所以这里也只认 ACTIVE，不另写一套「什么算开着」——两套判据漂开的那一天，
+ * 屏幕上会重新出现一个点了必然失败的按钮。 */
+function canAnswer(task: StudentTask) {
+  return task.status === 'ACTIVE'
 }
 
 /** Students never see raw backend codes — only their own completion state. */
@@ -91,6 +99,14 @@ onMounted(load)
             <!-- Gate on target_status (this student's state), not status (the
                  campaign's), otherwise a finished assessment looks re-takeable. -->
             <button v-if="isDone(task)" class="btn" disabled>已完成</button>
+            <!-- 但「这场测评本身还没开始 / 已经结束」是另一回事，那时不能给一个
+                 点得动的按钮：后端 `create_or_get_session` 只放行 ACTIVE（§12 的
+                 「界面说已结束时那个端点就真的开不了」——同一句话的另一面），点了
+                 只会拿到 404「测评任务不存在或不可用」，而屏幕上刚写着「开始作答」。
+                 文案取 `labels.ts` 的表，不在这个文件里另写一份中文。 -->
+            <button v-else-if="!canAnswer(task)" class="btn" disabled>
+              {{ taskStatusLabel(task.status) }}
+            </button>
             <button v-else class="btn primary" @click="openTask(task.id)">
               {{ task.answered_count > 0 ? '继续作答' : '开始作答' }}
             </button>

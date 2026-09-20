@@ -20,36 +20,50 @@ confirmation flag — the Makefile target is the guard, and it says so.
 
 Deletion order is child-before-parent and it is not decorative: no model
 declares ``ondelete=``, so every FK is RESTRICT and MySQL raises 1451 the moment
-a parent goes first. The rules in tests/test_purge_demo.py enable
-``PRAGMA foreign_keys`` precisely because SQLite otherwise lets a wrong order
-pass silently — which is how the ordering bug in the old ``make reset-db``
-inline script survived (it deleted `risk_event` before `manual_review`).
+a parent goes first. That ordering bug is exactly how the old ``make reset-db``
+inline script survived for so long (it deleted `risk_event` before
+`manual_review`) — the tests it ran under were in-memory SQLite, whose foreign
+key checks are **off by default**, so a wrong order passed silently. Since
+2026-09-19 the whole suite runs on real MySQL (CLAUDE.md 已知缺口 3, closed),
+so that particular blind spot is gone and `tests/test_purge_demo.py` no longer
+needs its own engine to get it.
 """
 
 from __future__ import annotations
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.db.seed import mht_rule_config, seed_development_data
 from app.db.seed_demo import demo_roster
-from app.models.account import UserAccount, UserScope
+from app.models.account import AuthSession, UserAccount, UserScope
 from app.models.assessment import (
     AssessmentAnswer,
     AssessmentResult,
     AssessmentSession,
     AssessmentTarget,
     AssessmentTask,
+    AssessmentTaskScope,
     DimensionResult,
     RiskEvent,
 )
 from app.models.audit import AuditLog
 from app.models.care import (
+    CareCaseEvent,
     FamilyContactRecord,
     FollowUpRecord,
     ManualReview,
     RetestPlan,
     StudentCareCase,
+)
+from app.models.exporting import ExportJob
+from app.models.importing import (
+    AssessmentExternalResult,
+    AssessmentImportBatch,
+    AssessmentImportRow,
+    StudentAgeChangeLog,
+    StudentRosterImportBatch,
+    StudentRosterImportRow,
 )
 from app.models.organization import ClassGroup, Grade, Student
 from app.models.scale import AssessmentScale, ScaleQuestion, ScaleRule
@@ -60,7 +74,29 @@ from app.services.scale_rule_service import RULE_TYPE, rule_version_for
 # `risk_event` / the care records / `audit_log` must precede `student` and
 # `user_account`, and `assessment_answer` must precede `scale_question` — it is
 # the only row in the schema that points at a question.
+#
+# `assessment_target` leads, and not because it is the deepest child — it is a
+# leaf that nothing references, and it is the one table V1.2 pointed at both the
+# import layer and the sessions (via composite FKs whose local `student_id` is
+# NOT NULL, so no `SET NULL` is available). Deleting it first is what makes the
+# rest of the order work.
+# The V1.2 import / external-result tables come next, for a reason that is not
+# obvious from this list: `assessment_external_result` and
+# `assessment_import_row` point at **each other** (see `_delete_assessment_rows`),
+# and both of them point at `assessment_session` — so every one of them has to go
+# before the session it names, which is where the V1.0 entries start.
+# `care_case_event` / `assessment_task_scope` / `student_age_change_log` are
+# ordinary children of rows further down and could sit anywhere above them.
 ASSESSMENT_TABLES = (
+    AssessmentTarget,
+    StudentAgeChangeLog,
+    CareCaseEvent,
+    AssessmentTaskScope,
+    AssessmentExternalResult,
+    AssessmentImportRow,
+    AssessmentImportBatch,
+    StudentRosterImportRow,
+    StudentRosterImportBatch,
     ManualReview,
     RiskEvent,
     FollowUpRecord,
@@ -71,8 +107,40 @@ ASSESSMENT_TABLES = (
     AssessmentResult,
     AssessmentAnswer,
     AssessmentSession,
-    AssessmentTarget,
     AssessmentTask,
+)
+
+
+# Pointers that have to be cleared before any of this can be deleted. Every one
+# of them is a **nullable** column recording how one row relates to another row
+# that is also being deleted, and each is unreachable by ordering alone:
+#
+#   * **two cycles** — `assessment_import_row` ↔ `assessment_external_result`
+#     (each names the other) and two self-references
+#     (`assessment_session.supersedes_session_id`,
+#     `assessment_import_batch.duplicate_of_batch_id`). No order of two DELETEs
+#     survives a cycle; the row that stays is still referenced by the row that
+#     went.
+#   * **one upward pointer** — `assessment_session.import_batch_id` names an
+#     import batch, and the batch is the session's parent, so the session has to
+#     be deleted first. Ordering cannot have it both ways.
+#
+# Clearing them loses nothing: a wipe deletes both ends of every one of these
+# edges, so the relationship has no referent left to describe.
+# `reset_to_baseline.sql` clears the same list — `test_sql_reset_to_baseline.py`
+# compares the two, so change both.
+#
+# `assessment_target` needs no entry here and instead leads ASSESSMENT_TABLES;
+# the three `effective_*` / `supplemented_from_batch_id` columns V1.2 added to it
+# look like the same problem, but clearing them is not sufficient — its
+# `student_id` is itself an FK column (composite FKs into `assessment_session`
+# and `assessment_external_result`) and NOT NULL. Nothing references
+# `assessment_target`, so deleting it first is the whole fix.
+CLEARED_BEFORE_DELETE = (
+    (AssessmentImportRow, "external_result_record_id"),
+    (AssessmentImportBatch, "duplicate_of_batch_id"),
+    (AssessmentSession, "supersedes_session_id"),
+    (AssessmentSession, "import_batch_id"),
 )
 
 
@@ -92,6 +160,10 @@ def _delete_assessment_rows(db: Session) -> dict[str, int]:
     describe what the baseline accounts really did), and it is the one table
     whose rows are *about* other rows rather than part of them.
     """
+    # See CLEARED_BEFORE_DELETE: the cycles and the upward pointers have to go
+    # first, or the deletes below hit `1451 Cannot delete or update a parent row`.
+    for model, column in CLEARED_BEFORE_DELETE:
+        db.execute(update(model).values({column: None}))
     return {model.__tablename__: _delete_all(db, model) for model in ASSESSMENT_TABLES}
 
 
@@ -138,7 +210,20 @@ def purge_demo_data(db: Session) -> dict:
             AuditLog.actor_user_id.in_(demo_account_ids),
         ),
     )
-    # user_scope first: it points at the account, the student, the class and the
+    # Two more children of `user_account` that are **not** assessment data and so
+    # are not in ASSESSMENT_TABLES: a login session and an export job. They are
+    # deleted only for the demo accounts — `purge_demo_data` keeps the baseline
+    # accounts' rows, and `reset_assessment_data` (which deletes no accounts at
+    # all) leaves every session alone, so a reset does not log anyone out.
+    # They have to go **before** the account rows: `auth_session.user_id` and
+    # `export_job.requested_by` are NOT NULL, so there is nothing to null out.
+    deleted[AuthSession.__tablename__] = _delete_where(
+        db, AuthSession, AuthSession.user_id.in_(demo_account_ids)
+    )
+    deleted[ExportJob.__tablename__] = _delete_where(
+        db, ExportJob, ExportJob.requested_by.in_(demo_account_ids)
+    )
+    # user_scope next: it points at the account, the student, the class and the
     # grade, so it is the child of all four.
     deleted[UserScope.__tablename__] = _delete_where(
         db, UserScope, UserScope.user_id.in_(demo_account_ids)

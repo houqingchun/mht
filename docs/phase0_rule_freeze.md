@@ -190,10 +190,15 @@ ScaleCalculation
 ### 学生与组织
 
 - `GET /api/v1/students`
-- `POST /api/v1/students/import/preview`
-- `POST /api/v1/students/import/commit`
-- `GET /api/v1/students/import/template`
+- `POST /api/v1/student-roster/import/preview`（2026-09-19 改，原 `/students/import/preview`）
+- `POST /api/v1/student-roster/import/commit`（同上）
+- `GET /api/v1/student-roster/import/batches`（2026-09-19 加：批次历史）
+- `GET /api/v1/student-roster/import/batches/{batch_id}/rows`（同上：逐行明细）
 - `GET /api/v1/schools/{id}/statistics`
+
+> 名册导入的三个旧路径（`/students/import/{template,preview,commit}`）**同批删除，不留并存期**
+> ——同一动作两个入口是反复吃过亏的形状。`template` 那个端点没有调用方、没有测试
+> （前端 `useDataImport.downloadStudentTemplate` 自带一份模板），一并删掉。
 
 ### 量表与任务
 
