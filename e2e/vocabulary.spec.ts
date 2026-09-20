@@ -74,6 +74,24 @@ const UNTRANSLATED_CODES = [
   'PLANNED',
   'DONE',
   'CANCELLED',
+  // REMINDER_KIND_LABELS（2026-09-20）。这一张表在此**之前没有渲染点**：类别是拼进
+  // `title` 的中文（后端发「跟进 钱浩然」/「钱浩然 复测」），而工作台那一行前面还写着
+  // 一次类别，屏幕上于是出现「已逾期 1 天 · 跟进 跟进 钱浩然」。修法是类别只留在
+  // `kind` 里、中文归 `labels.ts`，`title` 退回主题（学生姓名）——`reminderKindLabel`
+  // 这才第一次被调用，而它落的正是 `/counselor/workbench`（在下面的路径清单里）。
+  //
+  // 两个码在演示数据里都扫得到：提醒面板的判据是「30 天内到期」，
+  // `seed_demo` 造的 ACTIVE 跟进与 PLANNED 复测都落在那个窗口里。与 `IMPORTED` /
+  // `SUPPLEMENT` 不同，这一项不是「等哪天有数据」。**实测过**（2026-09-20，
+  // `GET /counselor/reminders`）：18 条里 `FOLLOW_UP` 16 条、`RETEST` 2 条；
+  // 变异验证也逐条验过——从 `REMINDER_KIND_LABELS` 拿掉任一档，`/counselor/workbench`
+  // 上就报出对应的裸码（两档各红一次，`labelOf` 认不出的码原样回退）。
+  //
+  // 这两个码也是把匹配边界从 `\b` 收成「不许紧邻 `-`」的那个起因，见下面
+  // `PATTERN_SOURCE` 那段：演示任务编号 `TASK-2026-GRADE9-RETEST` 里的 `RETEST`
+  // 会被 `\b` 命中，而它是产品自己的编号，不是漏译。
+  'FOLLOW_UP',
+  'RETEST',
   // GENDER_LABELS。名册与个案详情都把性别渲染成编码就会漏——DataTable 的默认
   // 插槽直接打印 row[key]，所以花名册那一列必须显式调用 genderLabel。
   'MALE',
@@ -279,10 +297,23 @@ const UNTRANSLATED_CODES = [
   'EXPIRED',
 ];
 
-// 词边界匹配，且 `_` 在 JS 正则里属于 \w，所以 \bSTUDENT\b 不会误伤
-// STUDENT_PSYCH_DETAIL、\bACTIVE\b 不会误伤 INACTIVE、\bVALID\b 不会误伤
-// VALIDATION。误报会让这个测试很快被人关掉，边界必须收准。
-const PATTERN_SOURCE = `\\b(${UNTRANSLATED_CODES.join('|')})\\b`;
+// 词边界匹配，且 `_` 在 JS 正则里属于 \w，所以 STUDENT 不会误伤
+// STUDENT_PSYCH_DETAIL、ACTIVE 不会误伤 INACTIVE、VALID 不会误伤 VALIDATION。
+//
+// **但 `-` 既不属于 \w、也不被 `\b` 排除**，所以光有 `\b` 还不够：演示任务的编号
+// `TASK-2026-GRADE9-RETEST`（`seed_demo.py`）里那一截 `RETEST` 两侧都是 `-`，
+// `\bRETEST\b` 照样命中。2026-09-20 把 REMINDER_KIND_LABELS 的两个码加进清单时，
+// 就是这样在 `/counselor/tasks`、`/counselor/data`、`/leader/tasks` 三处报出假阳性
+// ——**命中的是产品自己的任务编号，不是漏译的枚举**。任务编号是学校可以自由命名的
+// 业务数据，不能因为里面有哪个英文词就把整个清单项拿掉（那样丢的是
+// `/counselor/workbench` 上真实的覆盖），所以收窄边界：**紧邻 `-` 的码不算**。
+//
+// 两端都是负向断言，因此比 `\b` 只紧不松（`\b` 允许的、除连字符相邻以外全都保留）：
+// `已逾期 1 天 · RETEST 钱浩然`、`等级RETEST`、`RETEST，` 仍然命中——那正是
+// 「视图渲染了裸 `kind`」与「`REMINDER_KIND_LABELS` 少了词条、`labelOf` 原样回退」
+// 两种真实故障的形状（两者都出一串被空白或标点包着的裸码）。
+// 误报会让这个测试很快被人关掉，边界必须收准。
+const PATTERN_SOURCE = `(?<![\\w-])(${UNTRANSLATED_CODES.join('|')})(?![\\w-])`;
 
 /** 给定区域内出现过的原始编码（去重、保序）。 */
 async function leakedCodes(scope: Locator): Promise<string[]> {
@@ -401,6 +432,41 @@ async function studentWithCaseEvents(page: Page): Promise<number> {
     if (detail.data.events.length > 0) return item.student_id;
   }
   throw new Error('演示数据里没有任何档案带事件，这个用例失去了对象');
+}
+
+/**
+ * 挑一个**有测评结果、但没有关注档案**的学生。
+ *
+ * 这是「学生测评记录」页唯一的对象——「未建档」不是随便挑一个人就能碰上的，
+ * 而它恰恰是**大多数**学生的状态：全库唯一的开档触发点是重点题 85 / 97 命中
+ * （`assessment_service.maybe_raise_risk_events` 的 docstring 逐字写着
+ * 「Only 重点题命中写行」），关注等级本身从不建档。
+ *
+ * 两个条件都必须由接口回答，缺一不可：
+ * - `case_id == null`：否则扫到的是**另一个**渲染分支（底部那句「该生尚未建档」
+ *   与那枚按钮都不出现），而用例会照旧全绿；
+ * - `total_level != null`：它等价于「至少交过一次卷」，也就是历次表至少一行——
+ *   没有它，表是空的，扫的是一块空区域（与 `studentWithRetestPlan` 同一个坑）。
+ *
+ * 挑不到就抛，不静默退化。
+ */
+async function studentWithoutCase(page: Page): Promise<{ student_id: number; student_name: string }> {
+  const login = await page.request.post('/api/v1/auth/login', {
+    data: { account: '13800000001', password: '123456', role: 'counselor' },
+  });
+  const headers = { Authorization: `Bearer ${(await login.json()).data.access_token}` };
+  const results = await (await page.request.get('/api/v1/students/results', { headers })).json();
+  for (const item of results.data.items as {
+    student_id: number;
+    student_name: string;
+    total_level: string | null;
+    case_id: number | null;
+  }[]) {
+    if (item.case_id === null && item.total_level !== null) {
+      return { student_id: item.student_id, student_name: item.student_name };
+    }
+  }
+  throw new Error('演示数据里没有「有等级、无档案」的学生，这个用例失去了对象');
 }
 
 test.describe('状态词汇：界面上不得出现后端编码', () => {
@@ -938,6 +1004,10 @@ test.describe('状态词汇：界面上不得出现后端编码', () => {
       },
     });
     expect(preview.ok(), '绑定任务的预览没有成功，这一条失去了对象').toBeTruthy();
+    // 批次号要从**这次预览的应答**里取，不能从屏幕上读、更不能写死：
+    // 见下面筛选那一段的理由。
+    const batchNo = (await preview.json()).data.batch_no as string;
+    expect(batchNo, '预览没有回批次号，这一条失去了定位自己那一批的办法').toBeTruthy();
 
     await loginAs(page, 'counselor');
     await page.goto('/counselor/tasks');
@@ -947,14 +1017,69 @@ test.describe('状态词汇：界面上不得出现后端编码', () => {
     const modal = page.locator('.modal-panel').first();
     await modal.getByRole('button', { name: '未匹配行' }).click();
 
+    // ★ 先把自己那一批筛出来，再做「先证明有东西可扫」那一组断言。
+    //
+    // 这一屏列的是**整场任务**下所有批次的未匹配行（判据是 `batch_id → task_id`），
+    // 而开发库是共享的：别的批次（演示数据、别的一次排查、以前跑过的某条用例）只要
+    // 也绑在这场任务上，它们那些「名册上没有」的行就会与这一批的一起出现。于是
+    // 「这一行有错误」/「名册上没有」各一条的断言会变成**数据依赖**的——它其实在说
+    // 「这场任务下只有我这一批」，而那不是这条用例要证明的事。
+    //
+    // 筛的是**批次号**（这一批自己刚拿到的那一个），所以无论库里还有什么都不受影响；
+    // 「批次」那一列本来就是这一屏的一等公民（`row_no` 只是批内编号，一场任务下可以
+    // 有好几批）。上面那条「整场共 N 行没进得去」的口径句**不筛**——它说的正是整场。
+    await modal.getByPlaceholder('按批次、行号、姓名、年级或班级筛选').fill(batchNo);
+
+    // ★ 页签是**切换**，不是**叠加**：切到这一屏之后弹层里只剩一张表。
+    //
+    // 这一条是 2026-09-20 修出来的那个缺陷的守卫。当时它不是「这一条用例红了」，
+    // 是「这一条用例的断言收不到效」——`TasksPage.vue` 里完成明细那支 `v-else`
+    // 的判据从前是「不是目标学生」，而「未匹配行」这个页签同样不是目标学生，
+    // 于是它照样成立：两张表同时渲染、完成明细那个筛选框与「导出CSV」一起露在上面。
+    // 症状是屏幕上叠了两张表，而**任何只断文案的用例都看不见它**。
+    // 判据用 `thead tr` 而不是文案：它数的是「这一屏渲染了几张表」。
+    await expect(modal.locator('thead tr')).toHaveCount(1);
+
     // 先证明有东西可扫。两行的结论都是**确定**的（空姓名在第 2 步就返回 `INVALID_ROW`，
     // 还没走到查名册；另一个名字名册上必然没有），所以按那一格的中文找得到它们。
-    const rows = modal.locator('tbody tr');
-    await expect(rows.first()).toBeVisible();
-    await expect(rows.filter({ hasText: '这一行有错误' })).toHaveCount(1);
-    await expect(rows.filter({ hasText: '名册上没有' })).toHaveCount(1);
+    const mine = modal.locator('tbody tr').filter({ hasText: batchNo });
+    await expect(mine).toHaveCount(2);
+    await expect(mine.filter({ hasText: '这一行有错误' })).toHaveCount(1);
+    await expect(mine.filter({ hasText: '名册上没有' })).toHaveCount(1);
     // 口径那一句（§9）：整场任务与「你看得见」是两个数，两个都要在。
     await expect(modal.getByText(/整场共 \d+ 行没进得去/)).toBeVisible();
     expect(await leakedCodes(modal), '未匹配行把后端编码原样显示了').toEqual([]);
+  });
+
+  /**
+   * 「学生测评记录」页（2026-09-20）。
+   *
+   * 这一页存在的理由只有一个：**没有关注档案的学生也要看得到自己的测评事实**。
+   * 在此之前 `GET /care-cases/{student_id}` 是唯一能读到「他考过几次」的接口，
+   * 而它对未建档的学生回 404，前端又拿不到 HTTP 状态码（§2）——于是「重点学生」那张表
+   * 上，未建档的行只有一个不可点的 `—`（用户 2026-09-20 报的就是这件事）。
+   *
+   * **不往 `auditPages` 那个静态路径清单里加这一页**：它需要一名学生的 id，
+   * 而静态路径只会落在一张空表上——一条看起来在守、实际扫不到任何东西的守卫
+   * （§3 里导出中心那次「清单加成功了，覆盖仍然是零」是同一个形状）。
+   *
+   * 这一页的编码渲染点有三处，各由一条 `labels.ts` 的表管：等级（`levelLabel`，
+   * 卡片与表格里各一次）、来源（`sourceLabel`）、评分状态（`calculationStatusLabel`）。
+   * 都**不条件渲染**，所以这一条扫得到它们。
+   */
+  test('未建档学生的测评记录页', async ({ page }) => {
+    await loginAs(page, 'counselor');
+    const student = await studentWithoutCase(page);
+
+    await page.goto(`/counselor/students/${student.student_id}/records`);
+    await page.waitForLoadState('networkidle');
+
+    // 先证明有东西可扫：页头是**这一名**学生（不是一个刚好打开的页面），
+    // 历次表至少一行，并且底部那句「未建档」在——它是这一页存在的理由本身。
+    await expect(page.locator('h1')).toContainText(student.student_name);
+    await expect(page.locator('tbody tr').first()).toBeVisible();
+    await expect(page.getByText('该生尚未建档（重点题未命中）')).toBeVisible();
+
+    expect(await leakedCodes(page.locator('body')), '测评记录页把后端编码原样显示了').toEqual([]);
   });
 });

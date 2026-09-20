@@ -1,4 +1,4 @@
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
@@ -323,28 +323,21 @@ def batch_assign_owner(
     return {"updated": len(cases)}
 
 
-def get_care_case(db: Session, user: UserAccount, student_id: int) -> dict:
-    ensure_counselor(db, user)
-    # Scope first: an out-of-range student must not learn whether a case exists.
-    student = ensure_student_in_scope(db, user, student_id)
-    # **已关闭的档案也要返回**（2026-09-17 修）。这里此前过滤掉 CLOSED，后果是
-    # 「关闭」这个动作把自己脚下的页面抽掉了：`closeCase()` 成功之后紧接着
-    # `await load()` 重新拉详情，拿到 404「关注档案不存在」——用户看到的是
-    # 「刚点完关闭，系统说这档案不存在」，而它其实关好了，只是这一页不肯显示。
-    # 同一个过滤还让详情页 `v-else` 的「重新打开档案」成了死代码（它的条件是
-    # `case_status === 'CLOSED'`，而这一页永远拿不到 CLOSED），列表里 CLOSED 那行的
-    # 「查看档案」也一律跳到 404——列表不过滤、详情过滤，两处口径本来就对不上。
-    # 一条学生的档案可能不止一条（唯一键是 `(student_id, status)`），
-    # 所以取 **id 最大**的那条，与 `assessment_service.open_or_reuse_care_case`
-    # 选「当前档案」的口径一致：新档开出后它自然接替旧档，旧档仍留在库里。
-    care_case = db.scalar(
-        select(StudentCareCase)
-        .where(StudentCareCase.student_id == student_id)
-        .order_by(StudentCareCase.id.desc())
-        .limit(1)
-    )
-    if not care_case:
-        raise AppError("NOT_FOUND", "关注档案不存在", 404)
+def student_assessment_records(db: Session, student: Student) -> dict:
+    """一名学生的测评记录——**写在他档案之外的那四个块**。
+
+    `student` / `assessment` / `dimensions` / `history` 与 `student_care_case` 无关
+    （`get_care_case` 里只有 `events` 依赖 `care_case.id`），所以「学生持续关注档案」页
+    与「学生测评记录」页读的是同一份。两处各拼一份时，同一个字段会在两个屏幕上各说各话，
+    而漂了不会有任何东西报错——所以它只有这一个定义。
+
+    **它不需要这名学生有档案，这正是它被抽出来的理由。** 全库唯一的开档触发点是重点题
+    85 / 97 命中（`assessment_service.maybe_raise_risk_events` 的 docstring 逐字写着），
+    所以一个被评成「需要关注」、甚至「重点关注」的学生**照样可能没有档案**；
+    在此之前，那些学生连「他考过几次、每次多少分」都查不到——`get_care_case` 是唯一的
+    读法，而它在没有档案时回 404（§「已知缺口」那条「缺的只是可达性」）。
+    """
+    student_id = student.id
     grade = db.get(Grade, student.grade_id)
     class_group = db.get(ClassGroup, student.class_id)
     # 「本次测评」= 施测时间最近的一场，不是 id 最大的一场——导入的历史普查 id 更大。
@@ -355,18 +348,6 @@ def get_care_case(db: Session, user: UserAccount, student_id: int) -> dict:
         if sitting
         else None
     )
-    risk_events = db.scalars(select(RiskEvent).where(RiskEvent.student_id == student_id).order_by(RiskEvent.id.desc())).all()
-    followups = db.scalars(
-        select(FollowUpRecord).where(FollowUpRecord.student_id == student_id).order_by(FollowUpRecord.id.desc())
-    ).all()
-    family_contacts = db.scalars(
-        select(FamilyContactRecord)
-        .where(FamilyContactRecord.student_id == student_id)
-        .order_by(FamilyContactRecord.id.desc())
-    ).all()
-    retests = db.scalars(
-        select(RetestPlan).where(RetestPlan.student_id == student_id).order_by(RetestPlan.id.desc())
-    ).all()
     # Denominator per dimension, so the UI can render "8 / 15" rather than a
     # bare number whose meaning depends on an item count the client can't see.
     dimension_item_counts = dict(
@@ -428,6 +409,11 @@ def get_care_case(db: Session, user: UserAccount, student_id: int) -> dict:
                 "total_score": past_result.total_score if past_result else None,
                 "total_level": past_result.total_level if past_result else None,
                 "validity_status": past_result.validity_status if past_result else None,
+                # 这一场是学生在本系统里做的，还是学校从外部平台导入的。**逐场给**：
+                # 一名学生的历次记录可以一半在线、一半导入（缺口 8），
+                # 而「用时 5340 秒」在两种来源下是两件事——导入的那一场没有本系统的
+                # 作答过程，用时是那个平台自己报的数。
+                "source": past_session.source,
                 # 每场自己的八维度分。趋势图要按维度看变化，而各维度题数不同（10 或 15），
                 # 所以必须带上 `max_score`，前端才能归一化后比较——只给原始分会让 15 题的
                 # 身体症状凭空压过 10 题的孤独倾向。
@@ -441,27 +427,7 @@ def get_care_case(db: Session, user: UserAccount, student_id: int) -> dict:
                 ],
             }
         )
-    # 该生敏感访问记录。仅统计本次迁移之后写入的行 —— 历史行的 student_id 为 NULL。
-    audit_rows = db.execute(
-        select(AuditLog, UserAccount)
-        .outerjoin(UserAccount, UserAccount.id == AuditLog.actor_user_id)
-        .where(AuditLog.student_id == student_id)
-        .order_by(AuditLog.id.desc())
-        .limit(100)
-    ).all()
-    # 档案事件：带操作人姓名，最新在前（与这一页其余列表同一个读法，它们都是
-    # `id.desc()`）。**没有上限**：事件是只追加的，而一份档案的事件数由它经历过的
-    # 复核/跟进/回访/复测/关档次数决定——那是十几次量级，不是几百次。
-    # 什么时候它真的会很长（一张档案上几百条），那时再加 `limit` 与一句
-    # 「还有 N 条未显示」（§10），而不是现在猜一个数。
-    event_rows = db.execute(
-        select(CareCaseEvent, UserAccount)
-        .outerjoin(UserAccount, UserAccount.id == CareCaseEvent.operator_id)
-        .where(CareCaseEvent.care_case_id == care_case.id)
-        .order_by(CareCaseEvent.id.desc())
-    ).all()
     return {
-        "case_id": care_case.id,
         "student": {
             "id": student.id,
             "student_no": student.student_no,
@@ -472,10 +438,6 @@ def get_care_case(db: Session, user: UserAccount, student_id: int) -> dict:
             # 名册上存下来的整数（迁移 0011），没填就是 null。
             "age": student.age,
         },
-        "case_status": care_case.status,
-        # 乐观锁的版本号（§16.4）。**它必须出现在这里**，因为关闭 / 重开都要求
-        # 客户端把它带回来——而客户端唯一拿得到它的地方就是这一个响应。
-        "case_version": care_case.case_version,
         "assessment": {
             "session_id": sitting.id if sitting else None,
             "submitted_at": sitting.submitted_at.isoformat() if sitting and sitting.submitted_at else None,
@@ -496,11 +458,145 @@ def get_care_case(db: Session, user: UserAccount, student_id: int) -> dict:
             "total_level": result.total_level if result else None,
             "validity_status": result.validity_status if result else None,
             "rule_version": result.rule_version if result else None,
+            # 这一场测评的原始总分。**他档案那一页的概览卡不显示它**（那一页回答的是
+            # 「他属于哪一档」），但「学生测评记录」页的页头要写「最近一次 · 一般观察 ·
+            # 总分 24」——那个数只能从这里拿。
+            #
+            # **不能改成从 `history` 的最后一行取。** `history` 走
+            # `session_history_order()` 且刻意不含 `effective_session_predicate()`
+            # （上面那一段注释），所以它的最后一行未必是**有效**的那一场；拿它填
+            # 「最近一次」会在被 §18.8 降级过的学生上给出另一场的分，而屏幕上一切正常。
+            "total_score": result.total_score if result else None,
             # 这场测评是学生在本系统里做的，还是学校从外部平台导入的。个案详情页据此
             # 显示「来源」，因为「用时 5340 秒」在两种来源下是两件事——一份导入的记录
             # 没有本系统的作答过程，用时是那个平台自己报的数。
             "source": sitting.source if sitting else None,
         },
+        "dimensions": [
+            {
+                "dimension_code": dimension.dimension_code,
+                "score": dimension.score,
+                "level": dimension.level,
+                "interpretation": dimension.interpretation,
+                # Dimensions carry different item counts (10 or 15), so a bare
+                # score is ambiguous without its denominator.
+                "max_score": dimension_item_counts.get(dimension.dimension_code, 0),
+            }
+            for dimension in dimensions
+        ],
+        "history": history,
+    }
+
+
+def get_student_assessment_records(db: Session, user: UserAccount, student_id: int) -> dict:
+    """上面的那一份，**按学生 id 取、不需要他有档案**。
+
+    门槛与 `get_care_case` 逐字相同的一道（能力 + 数据范围）：两条路径给的是同一个学生的
+    同一批列（学号 / 姓名 / 等级 / 总分 / 维度分），门槛不同就是「同一件事两条路径两个
+    答案」。`GET /students/results` 用两道是因为它下发**整份名册**，不是单个学生——
+    这一条要的两道里更严的那道已经覆盖了分数，不构成旁路。
+
+    **比 `student_assessment_records` 多一个 `case_id`**：这一份是给界面读的，而「学生测评
+    记录」页底部要说清「该生尚未建档（重点题未命中）」、并在有档时给一枚「查看关注档案」。
+    那一页**不可以**靠「拉一次档案详情、看它是不是 404」来回答这个问题——前端拿不到
+    HTTP 状态码（§2），而且那会顺带在轨迹里多写一条「查看学生详情」（他没看档案，
+    只是想知道有没有），把访问记录变成一句假话。所以由这一侧一次答完。
+    它取的是 `current_care_case`，与档案页那一侧**同一个定义**（见那个函数）。
+    """
+    ensure_counselor(db, user)
+    # Scope first: an out-of-range student must not learn whether he is known here.
+    student = ensure_student_in_scope(db, user, student_id)
+    records = student_assessment_records(db, student)
+    # 键序把 `case_id` 放在最后：前面四块由 `student_assessment_records` 一处装配，
+    # 这里只是给界面补一个它才需要的问题的答案。
+    records["case_id"] = getattr(current_care_case(db, student_id), "id", None)
+    return records
+
+
+def current_care_case(db: Session, student_id: int) -> StudentCareCase | None:
+    """这名学生**当前**的那份档案，没有就返回 `None`。
+
+    **这是「当前档案」唯一的定义**，两个读点共用：`get_care_case`（他有没有档案、
+    是哪一份）与 `get_student_assessment_records`（底部那一句「该生尚未建档」
+    与那枚「查看关注档案」按钮要不要出现）。两处各写一遍 `order_by(id.desc())`
+    就是在定义两次「谁是他现在的档案」——而这两处**必须在同一条行上给出一致的答案**，
+    否则会出现「这一页说没有档案、那一页打得开」这种谁也不信的对话。
+
+    **已关闭的档案也算**（2026-09-17 修）。`get_care_case` 此前过滤掉 CLOSED，后果是
+    「关闭」这个动作把自己脚下的页面抽掉了：`closeCase()` 成功之后紧接着
+    `await load()` 重新拉详情，拿到 404「关注档案不存在」——用户看到的是
+    「刚点完关闭，系统说这档案不存在」，而它其实关好了，只是这一页不肯显示。
+    同一个过滤还让详情页 `v-else` 的「重新打开档案」成了死代码（它的条件是
+    `case_status === 'CLOSED'`，而这一页永远拿不到 CLOSED），列表里 CLOSED 那行的
+    「查看档案」也一律跳到 404——列表不过滤、详情过滤，两处口径本来就对不上。
+
+    一条学生的档案可能不止一条（那条 `(student_id, status)` 唯一键已在迁移 `0012`
+    删掉，见 CLAUDE.md §1：秋季关档、春季再开是学校每年都会遇到的时序），
+    所以取 **id 最大**的那条，与 `assessment_service.open_or_reuse_care_case`
+    选「当前档案」的口径一致：新档开出后它自然接替旧档，旧档仍留在库里。
+    """
+    return db.scalar(
+        select(StudentCareCase)
+        .where(StudentCareCase.student_id == student_id)
+        .order_by(StudentCareCase.id.desc())
+        .limit(1)
+    )
+
+
+def get_care_case(db: Session, user: UserAccount, student_id: int) -> dict:
+    ensure_counselor(db, user)
+    # Scope first: an out-of-range student must not learn whether a case exists.
+    student = ensure_student_in_scope(db, user, student_id)
+    care_case = current_care_case(db, student_id)
+    if not care_case:
+        raise AppError("NOT_FOUND", "关注档案不存在", 404)
+    # 学生 / 测评 / 维度 / 历次这四块与档案无关，**与「学生测评记录」页共用一份装配**
+    # （`student_assessment_records`）。两处各拼一份时，同一个字段会在两个屏幕上各说各话，
+    # 而漂了不会有任何东西报错——这一页与那一页回答的是同一个学生的同一批列。
+    records = student_assessment_records(db, student)
+    risk_events = db.scalars(select(RiskEvent).where(RiskEvent.student_id == student_id).order_by(RiskEvent.id.desc())).all()
+    followups = db.scalars(
+        select(FollowUpRecord).where(FollowUpRecord.student_id == student_id).order_by(FollowUpRecord.id.desc())
+    ).all()
+    family_contacts = db.scalars(
+        select(FamilyContactRecord)
+        .where(FamilyContactRecord.student_id == student_id)
+        .order_by(FamilyContactRecord.id.desc())
+    ).all()
+    retests = db.scalars(
+        select(RetestPlan).where(RetestPlan.student_id == student_id).order_by(RetestPlan.id.desc())
+    ).all()
+    # 该生敏感访问记录。仅统计本次迁移之后写入的行 —— 历史行的 student_id 为 NULL。
+    audit_rows = db.execute(
+        select(AuditLog, UserAccount)
+        .outerjoin(UserAccount, UserAccount.id == AuditLog.actor_user_id)
+        .where(AuditLog.student_id == student_id)
+        .order_by(AuditLog.id.desc())
+        .limit(100)
+    ).all()
+    # 档案事件：带操作人姓名，最新在前（与这一页其余列表同一个读法，它们都是
+    # `id.desc()`）。**没有上限**：事件是只追加的，而一份档案的事件数由它经历过的
+    # 复核/跟进/回访/复测/关档次数决定——那是十几次量级，不是几百次。
+    # 什么时候它真的会很长（一张档案上几百条），那时再加 `limit` 与一句
+    # 「还有 N 条未显示」（§10），而不是现在猜一个数。
+    event_rows = db.execute(
+        select(CareCaseEvent, UserAccount)
+        .outerjoin(UserAccount, UserAccount.id == CareCaseEvent.operator_id)
+        .where(CareCaseEvent.care_case_id == care_case.id)
+        .order_by(CareCaseEvent.id.desc())
+    ).all()
+    # **逐项列出，不写成 `**records`。** 展开会把这四个键整体挪到开头（或末尾），
+    # 而 `assessment` / `dimensions` / `history` 在这一页的中段——键序变了接口 payload
+    # 就变了，前端现在按名字取所以看不出来，但一个「响应逐字相同」的断言会红，
+    # 而红的原因不是功能坏了。键序保持原样是这个重构的安全边界。
+    return {
+        "case_id": care_case.id,
+        "student": records["student"],
+        "case_status": care_case.status,
+        # 乐观锁的版本号（§16.4）。**它必须出现在这里**，因为关闭 / 重开都要求
+        # 客户端把它带回来——而客户端唯一拿得到它的地方就是这一个响应。
+        "case_version": care_case.case_version,
+        "assessment": records["assessment"],
         "risk_events": [
             {
                 "id": event.id,
@@ -545,19 +641,8 @@ def get_care_case(db: Session, user: UserAccount, student_id: int) -> dict:
             }
             for retest in retests
         ],
-        "dimensions": [
-            {
-                "dimension_code": dimension.dimension_code,
-                "score": dimension.score,
-                "level": dimension.level,
-                "interpretation": dimension.interpretation,
-                # Dimensions carry different item counts (10 or 15), so a bare
-                # score is ambiguous without its denominator.
-                "max_score": dimension_item_counts.get(dimension.dimension_code, 0),
-            }
-            for dimension in dimensions
-        ],
-        "history": history,
+        "dimensions": records["dimensions"],
+        "history": records["history"],
         # 档案事件时间线（§16.4）——「这份档案经历了什么」。
         #
         # **按 `care_case_id` 过滤，不按 `student_id`。** 这一页上面那几个列表
@@ -763,6 +848,38 @@ def close_case(db: Session, user: UserAccount, case_id: int, payload: CloseCaseR
     care_case.closed_by = user.id
     care_case.owner_id = user.id
     _bump_case_version(care_case)
+
+    # ★ 关档必须把这份档案名下仍挂着的跟进记录一并结束掉（2026-09-20 加）。
+    #
+    # 这两件事此前是各做各的：`close_case` 只改档案自己的状态，`follow_up_record`
+    # 那些 `ACTIVE` 的行原地不动。而 `analytics_service.counselor_reminders` 只筛
+    # `status == "ACTIVE"` 与到期日，**它不认识档案状态**——于是工作台会给一份
+    # 已经了结的档案继续发提醒，界面上写着「已逾期 N 天」。这与 §1 那条
+    # 「一条 CLOSED 的档案没有 `next_follow_up_date` 可看」自相矛盾：档案关了，
+    # 而提醒还在催。工作台那 12 份档案里有 3 份已经是 CLOSED，没人看得出来。
+    #
+    # 另一面是重复：`reopen_case` 每次都会建一条当天到期的「重新打开档案」，
+    # 那是它有意为之的语义（重新打开 = 今天跟进一次）。关档不收回旧的那些时，
+    # **关闭 / 重开一次就多一条一模一样的提醒**。实测演示库里 17 条 ACTIVE
+    # 全部出自这条路，19 条提醒里只有 11 个不同的标题（钱浩然 ×4、郑浩然 ×4）。
+    #
+    # 收回成 `CLOSED` 而**不是删除**：那些行是确实做过的跟进记录，
+    # §1「关闭档案不得删除历史记录」在这儿照样成立。`FOLLOW_UP_STATUS_LABELS`
+    # 里 `CLOSED`（「已结束」）一直都在，所以这一改不动词汇表（§3 那四个面）。
+    #
+    # 作用域只取这一份档案：同一名学生可以同时有已关闭的旧档案与在办的新档案
+    # （§1 那条时序），关掉旧的那一份不该把新那一条的待办一起收走。
+    # `reopen_case` 与 `create_follow_up` 两个写入方都写 `care_case_id`，
+    # 所以这个条件覆盖得住现在与将来；历史上没有 `care_case_id` 的行不存在
+    # （2026-09-20 在开发库上数过：17 行 ACTIVE，`care_case_id IS NULL` 的 0 行）。
+    db.execute(
+        update(FollowUpRecord)
+        .where(
+            FollowUpRecord.care_case_id == care_case.id,
+            FollowUpRecord.status == "ACTIVE",
+        )
+        .values(status="CLOSED")
+    )
     db.flush()
     record_case_event(
         db,

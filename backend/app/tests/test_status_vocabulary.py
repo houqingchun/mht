@@ -6,7 +6,7 @@ silently breaks the queue-tab filters — which is exactly what happened once:
 the frontend expected FOLLOWING_UP while the backend emitted FOLLOWING.
 """
 
-from datetime import timedelta
+from datetime import date, timedelta
 
 from app.models.common import now_local_naive
 from app.tests.conftest import auth_headers
@@ -72,6 +72,15 @@ EXPORT_JOB_STATUSES = {"READY", "REVOKED", "EXPIRED"}
 # Must match frontend/src/services/labels.ts AUTH_SESSION_STATUS_LABELS（阶段 8）。
 # `REVOKED` 是库里真发生过的动作，`EXPIRED` 是现算的（`effective_session_status`）。
 AUTH_SESSION_STATUSES = {"ACTIVE", "REVOKED", "EXPIRED"}
+# Must match frontend/src/services/labels.ts REMINDER_KIND_LABELS。
+# 两个码都住在 `analytics_service.counselor_reminders` 里——那里此前**没有码表**，
+# 类别是拼进 `title` 的中文（「跟进 钱浩然」），而工作台那一行前面也写着「跟进」。
+# 现在类别由 `kind` 单独下发，中文归 labels.ts。
+REMINDER_KINDS = {"FOLLOW_UP", "RETEST"}
+# 提醒类别 → 中文，与 `REMINDER_KIND_LABELS` 逐字相同。这一份在测试里是**镜像**，
+# 服务端那一半读的是接口实际发出的 `kind`——两边各写一份字面量的话，
+# 「后端发了什么」这件事就没有判据了。
+REMINDER_KIND_LABELS_MIRROR = {"FOLLOW_UP": "跟进", "RETEST": "复测"}
 # Must match frontend/src/services/labels.ts DIMENSION_LABELS.
 DIMENSION_CODES = {
     "LEARNING_ANXIETY",
@@ -250,6 +259,59 @@ def test_care_case_events_use_the_documented_vocabulary(client):
     )
     unknown = emitted - CARE_EVENT_TYPES
     assert not unknown, f"后端返回了前端无法映射的档案事件码: {unknown}"
+
+
+def test_counselor_reminders_use_the_documented_kind_vocabulary(client):
+    """提醒类别码必须是 `labels.ts` 认得的，而且**不许把类别再抄进 `title`**（§3 第一面）。
+
+    这一条对应一次真实的 UI 缺陷（2026-09-20）：后端发的 `title` 是「跟进 钱浩然」，
+    而复测那一支是「钱浩然 复测」——工作台那一行前面本来就写着类别（`kind`），
+    于是屏幕上出现「已逾期 1 天 · 跟进 跟进 钱浩然」。**两处各写了一遍类别的中文**，
+    这正是 §3 说的第二定义。
+
+    `title` 现在只是**主题**（学生），类别归 `kind` + `REMINDER_KIND_LABELS`。
+    后半句（类别有没有又被抄回 `title`）是这次修复的守卫——少了它，`title` 写成
+    什么样这条用例都还是绿的。
+
+    两个码都要真的出现：只断「emitted ⊆ 词表」的话，一个只发 `FOLLOW_UP` 的实现
+    照样全绿，而 `REMINDER_KIND_LABELS` 里那一半词条没有任何东西在护。
+    """
+    counselor, case = open_case(client)
+
+    # 两个来源各造一条：一条已到期的跟进，一份 5 天后的复测计划。
+    assert client.post(
+        f"/api/v1/care-cases/{case['case_id']}/follow-ups",
+        headers=counselor,
+        json={
+            "record_type": "心理老师访谈",
+            "confirmed_facts": "约定下次沟通时间。",
+            "next_follow_up_date": date.today().isoformat(),
+        },
+    ).status_code == 200
+    assert client.post(
+        f"/api/v1/care-cases/{case['case_id']}/retests",
+        headers=counselor,
+        json={
+            "planned_date": (date.today() + timedelta(days=5)).isoformat(),
+            "reason": "两周后复测一次。",
+        },
+    ).status_code == 200
+
+    items = client.get("/api/v1/counselor/reminders", headers=counselor).json()["data"]["items"]
+    emitted = {item["kind"] for item in items}
+    assert emitted == REMINDER_KINDS, f"两个来源各造了一条提醒，拿到的却是 {emitted}"
+    assert set(REMINDER_KIND_LABELS_MIRROR) == REMINDER_KINDS, (
+        "测试里这份镜像与 labels.ts 的 REMINDER_KIND_LABELS 对不上"
+    )
+
+    for item in items:
+        # 类别那两个字只许出现在 `kind` 里，不许又出现在 `title` 里。
+        label = REMINDER_KIND_LABELS_MIRROR[item["kind"]]
+        assert item["title"], f"{item['kind']} 这条提醒没有主题"
+        assert label not in item["title"], (
+            f"类别「{label}」被写进了 title（{item['title']!r}）——界面上会变成"
+            f"「{label} {item['title']}」，因为那一行前面已经渲染过类别了"
+        )
 
 
 # --- V1.2 阶段 8：参与口径 / 导出作业 / 登录会话 -------------------------------

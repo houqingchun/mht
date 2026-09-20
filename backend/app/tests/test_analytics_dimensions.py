@@ -186,3 +186,54 @@ def test_reminders_are_not_flagged_truncated_below_the_cap(client):
     assert len(data["items"]) == 3
     assert data["total"] == 3
     assert data["truncated"] is False
+
+
+def test_a_closed_case_drops_out_of_the_reminder_panel(client):
+    """关掉档案之后，它的待办不再出现在提醒面板上。
+
+    这是 2026-09-20 那处修复在**读者**这一侧的断言：`close_case` 把这份档案名下
+    `ACTIVE` 的跟进记录收回成 `CLOSED`，而 `counselor_reminders` 只筛
+    `status == "ACTIVE"`——两边合起来才是「档案关了，工作台就不催了」。
+
+    写在面板这一侧是因为它正是用户看得见的那一面：此前那条待办会在档案关闭之后
+    **继续以「已逾期」的形态挂在第一屏**，而 §1 里写着「一条 CLOSED 的档案没有
+    `next_follow_up_date` 可看」——同一份系统里两句话各说各的。
+
+    先断言关之前它在（只断后半句的话，一个把提醒面板整个写空的实现也是绿的）。
+    """
+    submit_for_student(client, yes_numbers={85})
+    counselor = auth_headers(client, "counselor", "13800000001")
+    case = client.get("/api/v1/care-cases", headers=counselor).json()["data"]["items"][0]
+
+    created = client.post(
+        f"/api/v1/care-cases/{case['case_id']}/follow-ups",
+        headers=counselor,
+        json={
+            "record_type": "心理老师访谈",
+            "confirmed_facts": "约定下次沟通时间。",
+            "next_follow_up_date": "2020-01-01",
+        },
+    )
+    assert created.status_code == 200, created.text
+
+    def titles() -> list[str]:
+        data = client.get("/api/v1/counselor/reminders", headers=counselor).json()["data"]
+        return [item["title"] for item in data["items"]]
+
+    before = client.get(f"/api/v1/care-cases/{case['student_id']}", headers=counselor).json()["data"]
+    assert before["case_status"] != "CLOSED", "这条用例要先有一条在办的档案"
+    assert titles(), "关档之前它本来就该在提醒面板上"
+
+    closed = client.post(
+        f"/api/v1/care-cases/{case['case_id']}/close",
+        headers=counselor,
+        json={
+            "close_reason": "完成阶段跟进并进入一般观察",
+            "close_note": "已检查后续安排。",
+            "confirm_follow_up_checked": True,
+            "case_version": before["case_version"],
+        },
+    )
+    assert closed.status_code == 200, closed.text
+
+    assert titles() == [], "档案已经关了，提醒面板还在催"

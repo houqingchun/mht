@@ -799,3 +799,161 @@ def test_two_requests_that_both_find_no_case_still_leave_exactly_one(client, db_
     assert event_types(db_session, item["case_id"]) == [care_events.CASE_OPENED], (
         "被回滚的那一次插入留下了一条开档事件"
     )
+
+
+# ---------------------------------------------------------------------------
+# 关档收回跟进记录（2026-09-20 心理老师工作台 UI/UX 评审的 C 项）
+# ---------------------------------------------------------------------------
+
+
+def _follow_ups_of(db_session, case_id: int) -> list[FollowUpRecord]:
+    return list(
+        db_session.scalars(
+            select(FollowUpRecord)
+            .where(FollowUpRecord.care_case_id == case_id)
+            .order_by(FollowUpRecord.id)
+        ).all()
+    )
+
+
+def _add_past_follow_up(client, headers, case_id: int, note: str = "心理老师访谈") -> None:
+    """挂一条**已经到期**的跟进（2020-01-01），所以它必然进提醒面板。"""
+    response = client.post(
+        f"/api/v1/care-cases/{case_id}/follow-ups",
+        headers=headers,
+        json={
+            "record_type": note,
+            "confirmed_facts": "约定下次沟通时间。",
+            "next_follow_up_date": "2020-01-01",
+        },
+    )
+    assert response.status_code == 200, response.text
+
+
+def test_closing_a_case_retires_its_active_follow_ups(client, db_session):
+    """★ 关档要把这份档案名下仍挂着的跟进记录一并结束掉。
+
+    此前 `close_case` 只改档案自己的状态，`follow_up_record` 那些 `ACTIVE` 的行
+    原地不动——而 `analytics_service.counselor_reminders` 只筛 `status == "ACTIVE"`
+    与到期日，**它不认识档案状态**：于是工作台会给一份已经了结的档案继续发提醒，
+    界面上写着「已逾期 N 天」。这与 §1 那条「一条 CLOSED 的档案没有
+    `next_follow_up_date` 可看」自相矛盾。
+
+    **收回成 `CLOSED`，不是删除**：那些行是确实做过的跟进记录，§1
+    「关闭档案不得删除历史记录」在这儿照样成立。所以这一条同时断两件事——
+    它不在 `ACTIVE` 里了（提醒不再催），而**这一行还在**（历史没被抹掉）。
+    只断前者的实现（删行）在第二条上会红。
+    """
+    counselor = create_risk_case(client)
+    item = client.get("/api/v1/care-cases", headers=counselor).json()["data"]["items"][0]
+    _add_past_follow_up(client, counselor, item["case_id"])
+
+    before = _follow_ups_of(db_session, item["case_id"])
+    assert [f.status for f in before] == ["ACTIVE"], "关档之前它本来就该是待办"
+    row_id, student_id = before[0].id, before[0].student_id
+
+    closed = client.post(
+        f"/api/v1/care-cases/{item['case_id']}/close",
+        headers=counselor,
+        # 上面那条跟进**已经把版本号 +1 了**（`create_follow_up` 也会 bump），
+        # 所以这里要现取——`item` 里那一份是补跟进之前读到的。
+        json=close_body(current_version(client, counselor, item["student_id"])),
+    )
+    assert closed.status_code == 200, closed.text
+
+    after = _follow_ups_of(db_session, item["case_id"])
+    assert [f.status for f in after] == ["CLOSED"], "档案关了，跟进记录还在催"
+    # 行还在，而且还是同一行——收的是状态，不是历史。
+    assert [f.id for f in after] == [row_id]
+    assert after[0].student_id == student_id
+
+
+def test_close_and_reopen_cycles_do_not_stack_duplicate_reminders(client, db_session):
+    """关闭 / 重开来回几次，待办**始终只有一条**。
+
+    `reopen_case` 每次都会建一条当天到期的「重新打开档案」，那是它有意为之的语义
+    （重新打开 = 今天跟进一次）。关档不收回旧的那些时，**每关一次、重开一次就多
+    一条一模一样的提醒**——实测演示库里 17 条 ACTIVE 全部出自这条路，19 条提醒里
+    只有 11 个不同的标题（钱浩然 ×4、郑浩然 ×4）。
+
+    三条断言各管一段：循环里每一次都只有一条待办（没有堆）、结束时归零（最后一轮
+    是关闭）、以及**三次重开留下的三行都还在**（收回不是删除）。第三条不能省：
+    把上面那条「行还在」删掉、改成删行的实现，只在前两条上是绿的。
+    """
+    counselor = create_risk_case(client)
+    item = client.get("/api/v1/care-cases", headers=counselor).json()["data"]["items"][0]
+    case_id, student_id = item["case_id"], item["student_id"]
+    _add_past_follow_up(client, counselor, case_id)
+
+    for cycle in range(3):
+        closed = client.post(
+            f"/api/v1/care-cases/{case_id}/close",
+            headers=counselor,
+            json=close_body(current_version(client, counselor, student_id)),
+        )
+        assert closed.status_code == 200, closed.text
+        assert not [f for f in _follow_ups_of(db_session, case_id) if f.status == "ACTIVE"], (
+            f"第 {cycle + 1} 次关档之后还有待办"
+        )
+
+        reopened = client.post(
+            f"/api/v1/care-cases/{case_id}/reopen",
+            headers=counselor,
+            json={
+                "reason": f"第 {cycle + 1} 次：出现新的已确认事实，需要重新跟进。",
+                "case_version": current_version(client, counselor, student_id),
+            },
+        )
+        assert reopened.status_code == 200, reopened.text
+        active = [f for f in _follow_ups_of(db_session, case_id) if f.status == "ACTIVE"]
+        assert len(active) == 1, f"第 {cycle + 1} 次重开后有 {len(active)} 条待办，应该只有 1 条"
+
+    rows = _follow_ups_of(db_session, case_id)
+    # 1 条手工跟进 + 3 条「重新打开档案」，一条都没少。
+    assert len(rows) == 4, f"跟进记录被删掉了：只剩 {len(rows)} 行"
+    assert [f.record_type for f in rows].count("重新打开档案") == 3
+
+
+def test_closing_one_case_leaves_the_students_other_case_alone(client, db_session):
+    """收的是**这一份**档案的待办，不是这名学生的全部。
+
+    一名学生可以同时有已关闭的旧档案与在办的新档案（§1 那条「秋季关档、春季再开」
+    的时序），所以按 `student_id` 去收会关错人：旧档案一关，新档案的待办跟着没了，
+    而那条待办正是老师今天要做的事。
+
+    夹具用的是**旧代码留下的那种状态**：一条 CLOSED 的档案上挂着一条 ACTIVE 的跟进
+    记录——这正是「关档不收回」这个 bug 的产物。它不是编出来的：把这件事修好之后，
+    历史库里就长这样。它的 `active_student_id` 是 NULL，所以不撞
+    `uq_care_case_one_active_per_student`。
+    """
+    counselor = create_risk_case(client)
+    item = client.get("/api/v1/care-cases", headers=counselor).json()["data"]["items"][0]
+    student_id = item["student_id"]
+
+    stale = StudentCareCase(student_id=student_id, status="CLOSED")
+    db_session.add(stale)
+    db_session.flush()
+    stale_follow_up = FollowUpRecord(
+        student_id=student_id,
+        # `operator_id` 是 NOT NULL 的外键，随便挑一个真实账号就行——这一行没有
+        # 经过任何服务层，谁写的对这条用例要断的事没有影响。
+        operator_id=db_session.scalar(select(UserAccount.id).order_by(UserAccount.id)),
+        record_type="重新打开档案",
+        confirmed_facts="这是旧档案上没被收回的那一条。",
+        next_follow_up_date=date(2020, 1, 1),
+        status="ACTIVE",
+        care_case_id=stale.id,
+    )
+    db_session.add(stale_follow_up)
+    db_session.commit()
+
+    closed = client.post(
+        f"/api/v1/care-cases/{item['case_id']}/close",
+        headers=counselor,
+        json=close_body(item["case_version"]),
+    )
+    assert closed.status_code == 200, closed.text
+
+    assert [f.status for f in _follow_ups_of(db_session, stale.id)] == ["ACTIVE"], (
+        "关掉这一份档案，把另一份档案的待办一起收走了"
+    )

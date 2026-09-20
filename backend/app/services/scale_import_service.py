@@ -1,6 +1,3 @@
-import csv
-import io
-import json
 from typing import Any
 
 import jwt
@@ -16,6 +13,7 @@ from app.scale_engine.engine import (
     ScaleQuestionConfig,
     rule_config_to_json,
 )
+from app.services.import_text import decode_upload, parse_json_rows, read_csv_dicts
 from app.services.scale_rule_service import rule_version_for
 
 
@@ -34,14 +32,12 @@ DIMENSION_CODES = {
 
 
 def parse_scale_import(filename: str, content: bytes) -> list[dict[str, Any]]:
-    text = content.decode("utf-8-sig")
+    # 解码与「表格读不读得成」都归 `import_text`，与名册导入、测评记录导入同一处定义
+    # ——题库文件同样是学校从 Excel 里「另存为 CSV」出来的，而只认 UTF-8 会抛一个
+    # 不是 `AppError` 的异常。
     if filename.lower().endswith(".json"):
-        rows = json.loads(text)
-        if not isinstance(rows, list):
-            raise AppError("VALIDATION_ERROR", "JSON必须是数组", 422)
-        return [normalize_question(row) for row in rows]
-    reader = csv.DictReader(io.StringIO(text))
-    return [normalize_question(row) for row in reader]
+        return [normalize_question(row) for row in parse_json_rows(decode_upload(content))]
+    return [normalize_question(row) for row in read_csv_dicts(content)]
 
 
 def normalize_question(row: dict[str, Any]) -> dict[str, Any]:

@@ -6,6 +6,7 @@ import StudentAssessmentPage from '../features/student/StudentAssessmentPage.vue
 import CounselorWorkbenchPage from '../features/care/CounselorWorkbenchPage.vue'
 import CasesPage from '../features/care/CasesPage.vue'
 import CareCaseDetailPage from '../features/care/CareCaseDetailPage.vue'
+import StudentRecordsPage from '../features/care/StudentRecordsPage.vue'
 import LeaderOverviewPage from '../features/leader/LeaderOverviewPage.vue'
 import ProgressPage from '../features/leader/ProgressPage.vue'
 import AdminSystemPage from '../features/admin/AdminSystemPage.vue'
@@ -35,6 +36,12 @@ export const routes: RouteRecordRaw[] = [
       { path: 'counselor/workbench', component: CounselorWorkbenchPage, meta: { role: 'counselor', title: '工作台' } },
       { path: 'counselor/cases', component: CasesPage, meta: { role: 'counselor', title: '重点学生' } },
       { path: 'counselor/cases/:studentId', component: CareCaseDetailPage, meta: { role: 'counselor', title: '学生档案' } },
+      // 路径里**没有** `cases`，这是有意的：档案页回答「这份档案走到哪一步了」，
+      // 这一页回答「这个学生考过几次、每次多少分」——而**没有档案的学生也要看得到**，
+      // 那正是它存在的理由（全库唯一的开档触发点是重点题命中，所以被评成
+      // 「需要关注」的学生照样可能没档案）。挂到 `cases/...` 下面会让这一页读起来
+      // 像是档案的一部分，而它恰恰不是。
+      { path: 'counselor/students/:studentId/records', component: StudentRecordsPage, meta: { role: 'counselor', title: '学生测评记录' } },
       { path: 'counselor/data', component: DataCenterPage, meta: { role: 'counselor', title: '数据中心' } },
       { path: 'counselor/analytics', component: AnalyticsPage, meta: { role: 'counselor', title: '统计分析' } },
       { path: 'counselor/audit', component: AuditPage, meta: { role: 'counselor', title: '审计日志' } },

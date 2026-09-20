@@ -981,15 +981,23 @@ onMounted(load)
           </template>
         </template>
 
-        <p v-else-if="detailLoading" style="margin-top:14px">正在加载明细</p>
+        <!-- ★ 下面这一条链（加载中 / 读失败 / 明细表）**只属于「完成明细」这一个页签**，
+             所以三支各自带一次 `detailTab === 'completion'`。少了它，这一条链读的是
+             「不是目标学生」——于是 `detailTab === 'unmatched'` 时最后那支 `v-else`
+             照样成立，点「未匹配行」就**不是切换，而是在完成明细下面再接一张表**。
+             实测（2026-09-20）：未匹配行页签下两张表同时可见，完成明细那个
+             `按学号、姓名…` 筛选框与「导出未参与名单 / 导出CSV」两枚按钮一起露在
+             未匹配行表的上面——而页签上写的是「未匹配行」。
+             写得啰嗦是有意的：这三支的**主体**是页签，条件只是它的谓词。 -->
+        <p v-else-if="detailTab === 'completion' && detailLoading" style="margin-top:14px">正在加载明细</p>
         <!-- 读失败就走这一支，**不落到**下面那个空表行上：`暂无完成明细` 是一句关于
              数据的话，用在读取失败上等于把一次故障说成一场空考试。 -->
         <ErrorState
-          v-else-if="detailError"
+          v-else-if="detailTab === 'completion' && detailError"
           :message="detailError"
           :on-retry="() => detailTask && loadCompletion(detailTask)"
         />
-        <template v-else>
+        <template v-else-if="detailTab === 'completion'">
           <!-- 一千多行的明细要能搜。这一屏只有 340px 高，靠滚动找人是找不到的。
                这个筛选框走全站的 `.search-box > input`（审计日志 / 重点学生 /
                账号与权限三处搜索框同形），不自己写一套——此前它是一个裸
@@ -1111,7 +1119,12 @@ onMounted(load)
         <!-- 未匹配行（V1.2 第 5 期）。**这一个块排在最后**，不是顺手：上面那三条
              `v-if` / `v-else-if` / `v-else` 是一条链，往链条中间插一个带 `v-if` 的块，
              后面那几个 `v-else-if` 就会改挂到这个新块上——完成明细从此再也不显示，
-             而报错、看不出是排版问题。 -->
+             而报错、看不出是排版问题。
+             ★ 但「排在最后」只挡住了**插入**这一个方向。反过来的那个方向同一处也漏过：
+             上面那支 `v-else` 的判据从前是「不是目标学生」，而这条链的第二个页签
+             （也就是这里）同样不是目标学生——于是点进这个页签时完成明细**没有让位**，
+             两张表叠在一起。2026-09-20 给那三支各补了一次 `detailTab === 'completion'`。
+             一句话：**页签链上每一条分支的主语都得是页签本身**，不能靠「不是上一条」。 -->
         <template v-if="detailTab === 'unmatched'">
           <p v-if="unmatchedLoading" style="margin-top:14px">正在加载未匹配的行</p>
           <ErrorState

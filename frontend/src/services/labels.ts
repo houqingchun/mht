@@ -537,6 +537,24 @@ export const RETEST_STATUS_LABELS: Record<string, string> = {
 }
 
 /**
+ * 提醒条目的类别 —— `/counselor/reminders` 的 `kind`。
+ *
+ * 它此前**不是一张表**，而是工作台里的一句内联三元：
+ * `r.kind === 'RETEST' ? '复测' : '跟进'`。那是一处 §3 意义上的第二定义，
+ * 而它的失败方式与「漏码」不同：else 那一支把**任何**认不出的码都读成「跟进」，
+ * 于是将来加第三类提醒（比如家庭回访到期）时，屏幕上会多出一批写着「跟进」的
+ * 别的东西——不报错，只是把一件事说成了另一件。
+ *
+ * `labelOf` 的兜底是**原样回退**（认不出的码照原样显示），这与 §3 那条
+ * 「漏码要看得见」一致：宁可让操作员看到 `FAMILY_CONTACT`，也不要让他看到
+ * 一个言之凿凿的「跟进」。
+ */
+export const REMINDER_KIND_LABELS: Record<string, string> = {
+  FOLLOW_UP: '跟进',
+  RETEST: '复测'
+}
+
+/**
  * 评分规则状态 —— 后端 ScaleRule.status。
  *
  * 与 SCALE_STATUS_LABELS 是两套词汇，不能合并：前者说「这版规则在不在用」
@@ -758,6 +776,11 @@ export function riskEventStatusTone(code: string | null | undefined): Tone {
 
 export function followUpStatusLabel(code: string | null | undefined) {
   return labelOf(FOLLOW_UP_STATUS_LABELS, code)
+}
+
+/** 提醒条目的类别（跟进 / 复测）—— 工作台「本周提醒」那一行前缀。 */
+export function reminderKindLabel(code: string | null | undefined) {
+  return labelOf(REMINDER_KIND_LABELS, code)
 }
 
 /** 任务自身状态（这场测评开没开）—— `effective_task_status` 现算出来的那一列。

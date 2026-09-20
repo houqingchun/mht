@@ -68,6 +68,165 @@ def test_admin_can_preview_student_json_import(client):
     assert response.json()["data"]["valid_count"] == 1
 
 
+# --------------------------------------------------------------------------
+# 文件读不读得懂：四条「本来会变成 500 纯文本」的路
+#
+# 2026-09-20 用户报的原话是 `JSON.parse: unexpected character at line 1 column 1 of
+# the JSON data`——那是**前端**的报错，而根因在后端：`UnicodeDecodeError` 不是
+# `AppError`，`main.py` 只注册了 `AppError` 与 `RequestValidationError` 两个处理器，
+# 于是它落进 Starlette 的默认 500，响应体是一段 `text/plain` 的
+# `Internal Server Error`，前端对那段纯文本调 `response.json()` 就抛出那句话。
+# 屏幕上的字与真正的原因（编码 / 格式）离得最远。判据归 `services/import_text.py`。
+# --------------------------------------------------------------------------
+
+
+def _preview_raw(client, headers, content: bytes, filename: str = "students.csv"):
+    """回整个 response（不是 `data`）：这四条要断言的是**状态码与错误码**。"""
+    return client.post(
+        "/api/v1/student-roster/import/preview",
+        headers=headers,
+        files={"file": (filename, content, "application/octet-stream")},
+    )
+
+
+def test_a_gbk_encoded_csv_from_windows_excel_is_read(client):
+    """中文 Excel / WPS 在 Windows 上「另存为 CSV」写出来的是 **GBK**。
+
+    这正是用户那条报错最可能的来路：我们发给学校的模板是 UTF-8 带 BOM
+    （`frontend/src/services/csv.ts` 的 `'\\ufeff'`），在 Excel 里编辑完再「另存为 CSV」，
+    这一步就把它变成了 GBK。只按 UTF-8 解会抛 `UnicodeDecodeError` → 500 纯文本 →
+    屏幕上那句 `JSON.parse: …`。这条路该是**照读不误**。
+    """
+    headers = auth_headers(client, "admin", "admin")
+    content = "student_no,name,grade,class_name\nS003,赵同学,初一,701\n".encode("gbk")
+
+    # **这份夹具的字节数必须是偶数，否则这条用例会失去它一半的意义。**
+    # `decode_upload` 曾经把 `utf-16` 当作回退编码，而 Python 的 `utf-16` 解码器**没有
+    # BOM 也不报错**（按小端解下去，偶数长度就「成功」）。于是偶数长度的 GBK 文件会被它
+    # 抢走、静默解成乱码，奇数长度的才会落到 `gbk` 上——也就是说这条用例的判别力取决于
+    # 它自己的字节数。现在判据是先看 BOM，这条依赖已经不在，但夹具一旦被改成奇数长度，
+    # 上面那句 `== "赵同学"` 就再也证明不了「utf-16 抢不走 GBK 文件」这件事了。
+    assert len(content) % 2 == 0, "这份 GBK 夹具要留着偶数长度，理由见上面这段注释"
+
+    response = _preview_raw(client, headers, content)
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["valid_count"] == 1
+    # 中文按 GBK 解出来必须是中文本身，而不是一串替换字符——「解开了」与「解得对」是
+    # 两件事，而按 UTF-8 硬解出来的那种乱码恰恰不会报错。
+    assert data["rows"][0]["name"] == "赵同学"
+
+
+def test_a_utf16_file_from_excel_is_read_too(client):
+    """Excel 的「另存为 → Unicode 文本」写的是 UTF-16 LE 带 BOM，这条路也照读不误。
+
+    它排在那里是因为少一档编码时，一份**明明是好文件**的文本会撞上「不是 UTF-8 或
+    GBK」——那句话对它是假话，而照着它去「另存为 CSV」是白费功夫。
+    """
+    headers = auth_headers(client, "admin", "admin")
+    content = "student_no,name,grade,class_name\nS003,赵同学,初一,701\n".encode("utf-16")
+
+    response = _preview_raw(client, headers, content)
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["valid_count"] == 1
+    assert data["rows"][0]["name"] == "赵同学"
+
+
+def test_a_binary_file_is_a_422_not_a_500(client):
+    """一份谁都解不开的文件：说的是「不是文本」，不是一个 500。
+
+    这一条钉的是**它不再是一个 500**：状态码与错误码都要对得上，因为前端拿不到
+    状态码（§2），能读到的只有 `error.message`，而 500 的那一段纯文本根本读不出来。
+
+    `\\x80` 与 `\\xff` 各自都不是合法的 GBK 前导字节，所以这份字节两条路都过不去。
+    """
+    headers = auth_headers(client, "admin", "admin")
+    response = _preview_raw(client, headers, b"\x80\xff\xfe")
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["success"] is False
+    assert "不是 UTF-8 或 GBK" in body["error"]["message"]
+
+
+def test_a_file_that_decodes_but_is_not_a_table_is_a_422_too(client):
+    """**解得出码不等于读得成表格**——第二条 500 的路，2026-09-20 由一条测试撞出来。
+
+    一份 PNG 的头几个字节（`\\x89PNG\\r\\n…`）在 **GBK 下是合法的**：GBK 的前导字节范围
+    很宽（`0x81`–`0xFE`），绝大多数字节对都能配对，于是它解成一串乱码，乱码里夹着的
+    `\\r` 让 `_csv` 当场抛 `csv.Error`。那是**另一条**不是 `AppError` 的异常，落进同一个
+    默认 500、同一句 `JSON.parse: …`——上面那条「不是文本」的分支根本走不到。
+
+    判据是它报的话**指对了方向**：这里该说的是「表格读不出来，另存为 CSV」，而不是
+    「不是 UTF-8 或 GBK」——后者对一份能解开的文件是假话，而照着它去改编码是白费功夫。
+    """
+    headers = auth_headers(client, "admin", "admin")
+    response = _preview_raw(client, headers, b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+
+    assert response.status_code == 422
+    assert "表格读不出来" in response.json()["error"]["message"]
+
+
+def test_a_malformed_json_upload_is_a_422_not_a_500(client):
+    """`.json` 那一支同样：`json.JSONDecodeError` 与 `UnicodeDecodeError` 是同一类东西。
+
+    两个都不是 `AppError`，都会落到同一个默认 500 上，屏幕上的症状一模一样。
+    """
+    headers = auth_headers(client, "admin", "admin")
+    response = _preview_raw(client, headers, "{不是 JSON}".encode("utf-8"), filename="students.json")
+
+    assert response.status_code == 422
+    assert "JSON 文件格式不正确" in response.json()["error"]["message"]
+
+
+def test_a_student_number_broken_by_the_spreadsheet_is_a_row_error(client):
+    """被表格软件改坏的学号**逐行报错**，而不是静默收进名册。
+
+    三种值都是真实会出现的（2026-09-20 在用户库里实测到第一个——批次
+    `ROSTER-20260920-7` 的学号读进来是 `27025160101'`，而后端把它当**可导入**收下了）：
+
+      `27025160101'`       给单元格加 `'` 前缀「转成文本」，另存为 CSV 时撇号留在值里
+      `2.70252E+10`        列宽不够，Excel 按科学计数法显示
+      `2702516010100.00%`  单元格格式是百分比
+
+    **只拦形状，不拦长度与含义**（缺口 2 那条「不校验格式」的边界原样不动）：判据是
+    `STUDENT_NO_PATTERN`，`S001` 与 `27025160101` 都通过。学号是名册的根，也是账号
+    （`student_no` 即登录名）——错一个就是一个人登不进来，而事后只能靠人眼在两列数字里找。
+    """
+    headers = auth_headers(client, "admin", "admin")
+    broken = ["27025160101'", "2.70252E+10", "2702516010100.00%"]
+    rows = ["student_no,name,grade,class_name"]
+    rows += [f"{value},同学{index},初一,701" for index, value in enumerate(broken)]
+    data = _preview(client, headers, "\n".join(rows) + "\n")
+
+    assert data["valid_count"] == 0
+    assert data["error_count"] == 3
+    for row, value in zip(data["rows"], broken):
+        # 报错要**带上原值**：一句「学号格式不对」对着 27 行表格毫无帮助，
+        # 而操作员要改的正是文件里那一格。
+        assert row["errors"] == [f"学号只能由字母、数字和连字符组成，当前是「{value}」"]
+
+
+def test_the_student_number_rule_keeps_the_shapes_schools_really_use(client):
+    """合法的学号一个都不能被挡下来——这条规则拦的是**坏值**，不是「不合我们的规矩」。
+
+    `S001` 是种子与全套测试用的形状，`27025160101` 是用户学校真实的那一种，
+    `2027-01-001` 是带连字符的写法。三种都要能进。
+    """
+    headers = auth_headers(client, "admin", "admin")
+    accepted = ["S001", "27025160101", "2027-01-001"]
+    rows = ["student_no,name,grade,class_name"]
+    # S001 已在名册上（种子），所以它是**冲突**而不是错误——而这条用例要的是
+    # 「它没被形状规则挡下来」，`error_count == 0` 正是这句话。
+    rows += [f"{value},同学{index},初一,70{index + 1}" for index, value in enumerate(accepted)]
+    data = _preview(client, headers, "\n".join(rows) + "\n")
+
+    assert data["error_count"] == 0
+    assert all(not row["errors"] for row in data["rows"])
+    assert data["conflict_count"] == 1  # 只有 S001 是已在名册上的那一个
+
+
 def test_non_admin_cannot_import_students(client):
     headers = auth_headers(client, "counselor", "13800000001")
     response = client.post(
@@ -114,10 +273,17 @@ def test_class_code_must_match_its_grade(client):
 
 def test_every_grade_accepts_its_own_prefix(client):
     """7/8/9 三个前缀各自对应一个年级，且只有自己的那个通过。"""
+    # 学号这里只是夹具，与这条用例的主题（班级编号前缀）无关——所以它取的是三个合法的
+    # ASCII 学号。它此前是 `S2{grade}`（展开成 `S2初一`），而 2026-09-20 加的学号形状
+    # 校验会把它当错误行挡下（学号里出现了中文）。**改的是夹具，不是断言。**
     headers = auth_headers(client, "admin", "admin")
-    for grade, class_name in (("初一", "702"), ("初二", "801"), ("初三", "901")):
+    for grade, class_name, student_no in (
+        ("初一", "702", "S201"),
+        ("初二", "801", "S202"),
+        ("初三", "901", "S203"),
+    ):
         assert _preview(
-            client, headers, f"student_no,name,grade,class_name\nS2{grade},{grade}同学,{grade},{class_name}\n"
+            client, headers, f"student_no,name,grade,class_name\n{student_no},{grade}同学,{grade},{class_name}\n"
         )["valid_count"] == 1
 
 

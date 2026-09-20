@@ -46,6 +46,37 @@ export function clearToken(): void {
   localStorage.removeItem(TOKEN_KEY)
 }
 
+/** 服务端统一封装的形状：`{ success, data, request_id, error }`。 */
+interface Envelope {
+  success?: boolean
+  data?: unknown
+  error?: { message?: string }
+}
+
+/**
+ * 读统一封装，**响应体不是 JSON 时也说人话**。
+ *
+ * `response.json()` 在不合法的 JSON 上抛 `SyntaxError`，而那一支恰恰是「服务端答了话、
+ * 但答的不是它约定的那种话」：后端崩在一个没有被 `AppError` 收住的异常上时，Starlette
+ * 的兜底处理器回的是**纯文本** `Internal Server Error`（`content-type: text/plain`）。
+ * 于是屏幕上出现的是浏览器原话 `JSON.parse: unexpected character at line 1 column 1 of
+ * the JSON data` —— 它一个字都没提到真正的原因。
+ *
+ * §2 那条「服务端答了话」与「一个字都没收到」分得开，在这里就是这一支：`fetch` 自己
+ * 失败仍然是 `TypeError`（后端没起来、网断了），走到这里说明对方确实答了，只是答得
+ * 读不懂。带上的状态码是这一支唯一能给出的线索——调用方拿不到它（§2 的既有约定），
+ * 所以它只能出现在这句话里。
+ */
+async function readEnvelope(response: Response): Promise<Envelope> {
+  try {
+    return (await response.json()) as Envelope
+  } catch {
+    throw new Error(
+      `服务端返回了无法解析的内容（HTTP ${response.status}），请联系管理员查看服务端日志`
+    )
+  }
+}
+
 export async function apiRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers)
   headers.set('Content-Type', 'application/json')
@@ -53,7 +84,7 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
   if (token) headers.set('Authorization', `Bearer ${token}`)
 
   const response = await fetch(`${API_BASE}${path}`, { ...options, headers })
-  const body = await response.json()
+  const body = await readEnvelope(response)
   if (!response.ok || !body.success) {
     throw new Error(body.error?.message || '请求失败')
   }
@@ -260,19 +291,145 @@ export interface AssignableOwner {
   display_name: string
 }
 
+/**
+ * 一名学生的身份列。
+ *
+ * 抽出来是因为它出现在**两个**响应里：`CareCaseDetail`（有档案的学生）与
+ * `StudentAssessmentRecords`（不需要他有档案）。两者说的是同一个人、同一批列，
+ * 各写一份必然漂——而 TS 看不见这种漂移，它只会在某一个屏幕上少一个字段。
+ * 这与后端把 `student` / `assessment` / `dimensions` / `history` 四块抽进
+ * `care_service.student_assessment_records` 是同一个动作的两侧。
+ */
+export interface StudentIdentity {
+  id: number
+  student_no: string
+  name: string
+  grade: string
+  class_name: string
+  /** MALE / FEMALE，或 null（名册早于迁移 0009，或学校没填）。 */
+  gender: string | null
+  /** 名册上存下来的整数年龄，学校没填时为 null。 */
+  age: number | null
+}
+
+/**
+ * 「最近一次测评」的概览——**算数的那一场**。
+ *
+ * 走 `assessment_service.latest_session`：施测时间最近，且要求 `is_effective`。
+ * 这与 `history` 的最后一行**是两件事**，见下面 `total_score` 那一段。
+ */
+export interface AssessmentOverview {
+  session_id: number | null
+  submitted_at: string | null
+  duration_seconds: number | null
+  total_level: string | null
+  validity_status: string | null
+  rule_version: string | null
+  /** IN_SYSTEM / IMPORTED，或 null（还没有任何一场测评）。 */
+  source: string | null
+  /**
+   * 这一场算出来了没有 —— PENDING / CALCULATING / CALCULATED / CALCULATION_FAILED。
+   *
+   * 与上面几项**不是一回事**：`total_level` / `validity_status` / `rule_version` 都来自
+   * `assessment_result` 那一行，评分没成功时它们全是 null，而 null 在界面上长得与
+   * 「还没测」一模一样。这一列是那两者之间唯一的区别，也是「重算评分」按钮的判据。
+   */
+  calculation_status: string | null
+  /** 失败原因原文（后端已截断）。算成功或还没算时为 null。 */
+  calculation_error: string | null
+  /**
+   * 这一场**真实发生**的日期，与 `submitted_at` 分开。
+   *
+   * 在线作答时两者相同（交卷那一刻就是测评那一刻）；外部导入时 `submitted_at` 也是
+   * 文件里的那格日期，所以今天它们总是一样。但趋势是按这个字段排的，而
+   * `tested_at_source` 回答的正是「这个日期是谁给的」——历史行两者都是 null
+   * （0013 刻意没有回填，见 CLAUDE.md §21），那时界面只能照实说「待核实」。
+   */
+  tested_at: string | null
+  /** ONLINE_SUBMIT / IMPORT_FILE / PENDING_VERIFICATION，或 null。 */
+  tested_at_source: string | null
+  /**
+   * 这一场的原始总分。
+   *
+   * **档案页的概览卡不显示它**（那一页回答的是「他属于哪一档」），
+   * 「学生测评记录」页的页头写「最近一次 · 一般观察 · 总分 24」用的就是它。
+   *
+   * **不能改成从 `history` 的最后一行取。** `history` 刻意不含
+   * `effective_session_predicate()`（被 §18.8 降级的那一场仍然是他真实考过的一次，
+   * 趋势图少一个点就是在抹掉一段事实），所以它的最后一行**未必是有效的那一场**——
+   * 拿它填「最近一次」会在这些学生上给出另一场的分，而屏幕上一切正常。
+   */
+  total_score: number | null
+}
+
+/** 一个维度的得分，连同它的分母。 */
+export interface DimensionScore {
+  dimension_code: string
+  score: number
+  level: string
+  interpretation: string
+  /** Item count behind this dimension — the denominator for `score`. */
+  max_score: number
+}
+
+/** 历次测评里的一场，含**这一场自己的**八维度分。 */
+export interface AssessmentHistoryEntry {
+  session_id: number
+  submitted_at: string | null
+  duration_seconds: number | null
+  total_score: number | null
+  total_level: string | null
+  validity_status: string | null
+  /**
+   * 这一场是学生在本系统里做的，还是学校从外部平台导入的。**逐场给**：一名学生的
+   * 历次记录可以一半在线、一半导入（缺口 8），而「用时 5340 秒」在两种来源下是
+   * 两件事——导入的那一场没有本系统的作答过程，用时是那个平台自己报的数。
+   */
+  source: string | null
+  /**
+   * 这一场自己的八维度分。`max_score` 是画图用的分母：各维度题数不等（10 或 15），
+   * 不归一化会让 15 题的身体症状在图上凭空压过 10 题的孤独倾向。
+   */
+  dimensions: Array<{
+    dimension_code: string
+    score: number
+    max_score: number
+  }>
+}
+
+/**
+ * 「学生测评记录」的响应体 —— **不要求这名学生有档案**。
+ *
+ * 全库唯一的开档触发点是重点题 85 / 97 命中，所以一个被评成「需要关注」、甚至
+ * 「重点关注」的学生照样可能没有档案；在此之前 `GET /care-cases/{student_id}`
+ * 是唯一能读到「他考过几次、每次多少分」的接口，而它对无档案的学生回 404。
+ *
+ * 四个块与 `CareCaseDetail` 里同名的四个**是同一份数据**（后端同一个函数装配），
+ * 所以这里直接复用那四个类型，而不是各写一份。
+ */
+export interface StudentAssessmentRecords {
+  student: StudentIdentity
+  assessment: AssessmentOverview
+  dimensions: DimensionScore[]
+  /** 历次测评，**从旧到新**（后端按施测时间升序排，见 `session_history_order`）。 */
+  history: AssessmentHistoryEntry[]
+  /**
+   * 这名学生**当前**那份档案的 id，没有档案时为 `null`。
+   *
+   * 这一页存在的理由就是「没有档案的学生也要看得到」，所以「他到底有没有档案」是它
+   * 必须自己答的一个问题：底部那句「该生尚未建档」与「查看关注档案」那枚按钮都读它。
+   *
+   * **不要改成「拉一次档案详情、看它是不是 404」。** 前端拿不到 HTTP 状态码（§2），
+   * 而那一次请求会在轨迹里多写一条「查看学生详情」——他没看档案，只是想知道有没有，
+   * 那条访问记录就成了一句假话。后端取的是 `current_care_case`，与档案页同一个定义：
+   * 有档案的行点进去一定打得开，反之亦然。
+   */
+  case_id: number | null
+}
+
 export interface CareCaseDetail {
   case_id: number
-  student: {
-    id: number
-    student_no: string
-    name: string
-    grade: string
-    class_name: string
-    /** MALE / FEMALE，或 null（名册早于迁移 0009，或学校没填）。 */
-    gender: string | null
-    /** 名册上存下来的整数年龄，学校没填时为 null。 */
-    age: number | null
-  }
+  student: StudentIdentity
   case_status: string
   /**
    * 乐观锁版本号（§16.4）。
@@ -282,37 +439,7 @@ export interface CareCaseDetail {
    * 那是另一条路（批量分配逐行带号用）。
    */
   case_version: number
-  assessment: {
-    session_id: number | null
-    submitted_at: string | null
-    duration_seconds: number | null
-    total_level: string | null
-    validity_status: string | null
-    rule_version: string | null
-    /** IN_SYSTEM / IMPORTED，或 null（还没有任何一场测评）。 */
-    source: string | null
-    /**
-     * 这一场算出来了没有 —— PENDING / CALCULATING / CALCULATED / CALCULATION_FAILED。
-     *
-     * 与上面几项**不是一回事**：`total_level` / `validity_status` / `rule_version` 都来自
-     * `assessment_result` 那一行，评分没成功时它们全是 null，而 null 在界面上长得与
-     * 「还没测」一模一样。这一列是那两者之间唯一的区别，也是「重算评分」按钮的判据。
-     */
-    calculation_status: string | null
-    /** 失败原因原文（后端已截断）。算成功或还没算时为 null。 */
-    calculation_error: string | null
-    /**
-     * 这一场**真实发生**的日期，与 `submitted_at` 分开。
-     *
-     * 在线作答时两者相同（交卷那一刻就是测评那一刻）；外部导入时 `submitted_at` 也是
-     * 文件里的那格日期，所以今天它们总是一样。但趋势是按这个字段排的，而
-     * `tested_at_source` 回答的正是「这个日期是谁给的」——历史行两者都是 null
-     * （0013 刻意没有回填，见 CLAUDE.md §21），那时界面只能照实说「待核实」。
-     */
-    tested_at: string | null
-    /** ONLINE_SUBMIT / IMPORT_FILE / PENDING_VERIFICATION，或 null。 */
-    tested_at_source: string | null
-  }
+  assessment: AssessmentOverview
   risk_events: Array<{
     id: number
     risk_type: string
@@ -345,32 +472,9 @@ export interface CareCaseDetail {
     reason: string
     status: string
   }>
-  dimensions: Array<{
-    dimension_code: string
-    score: number
-    level: string
-    interpretation: string
-    /** Item count behind this dimension — the denominator for `score`. */
-    max_score: number
-  }>
+  dimensions: DimensionScore[]
   /** 历次测评，**从旧到新**（后端按施测时间升序排，见 `session_history_order`）。 */
-  history: Array<{
-    session_id: number
-    submitted_at: string | null
-    duration_seconds: number | null
-    total_score: number | null
-    total_level: string | null
-    validity_status: string | null
-    /**
-     * 这一场自己的八维度分。`max_score` 是画图用的分母：各维度题数不等（10 或 15），
-     * 不归一化会让 15 题的身体症状在图上凭空压过 10 题的孤独倾向。
-     */
-    dimensions: Array<{
-      dimension_code: string
-      score: number
-      max_score: number
-    }>
-  }>
+  history: AssessmentHistoryEntry[]
   /**
    * 档案事件时间线（§16.4），**最新在前**（后端按 `id.desc()` 排）。
    *
@@ -416,6 +520,20 @@ export async function getCareCases(): Promise<CareCaseItem[]> {
 
 export async function getCareCaseDetail(studentId: number): Promise<CareCaseDetail> {
   return apiRequest<CareCaseDetail>(`/care-cases/${studentId}`)
+}
+
+/**
+ * 一名学生的测评记录——**不需要他有档案**。
+ *
+ * `getCareCaseDetail` 对没有档案的学生回 404「关注档案不存在」，而前端拿不到 HTTP
+ * 状态码（§2），于是「重点学生」列表上那一行只显示一个 `—`：心理老师真的没有入口
+ * 看到这个学生。这一条补的就是那个入口。
+ *
+ * 门槛与档案详情**逐字相同的一道**（`STUDENT_PSYCH_DETAIL: {SCOPED}` + 数据范围），
+ * 所以这两个调用对一个 403 的反应也一样。
+ */
+export async function getStudentAssessmentRecords(studentId: number): Promise<StudentAssessmentRecords> {
+  return apiRequest<StudentAssessmentRecords>(`/students/${studentId}/assessment-records`)
 }
 
 /**
@@ -1283,7 +1401,10 @@ export async function previewStudentImport(file: File): Promise<StudentImportPre
   const token = getToken()
   if (token) headers.set('Authorization', `Bearer ${token}`)
   const response = await fetch(`${API_BASE}/student-roster/import/preview`, { method: 'POST', headers, body: form })
-  const body = await response.json()
+  // `readEnvelope` 而不是裸 `response.json()`：这一支是最常撞见「服务端答了一段纯文本」
+  // 的地方——一个编码读不动的文件会让后端抛在 `AppError` 之外，屏幕上的原话因此是
+  // `JSON.parse: unexpected character …`（§2 那条的另一半）。
+  const body = await readEnvelope(response)
   if (!response.ok || !body.success) throw new Error(body.error?.message || '导入预览失败')
   return body.data as StudentImportPreview
 }
@@ -1534,7 +1655,7 @@ export async function previewAssessmentImport(
   const token = getToken()
   if (token) headers.set('Authorization', `Bearer ${token}`)
   const response = await fetch(`${API_BASE}/assessment-imports/preview`, { method: 'POST', headers, body: form })
-  const body = await response.json()
+  const body = await readEnvelope(response)
   if (!response.ok || !body.success) throw new Error(body.error?.message || '导入预览失败')
   return body.data as AssessmentImportBatch
 }
@@ -1721,7 +1842,7 @@ export async function previewScaleImport(file: File): Promise<ScaleImportPreview
   const token = getToken()
   if (token) headers.set('Authorization', `Bearer ${token}`)
   const response = await fetch(`${API_BASE}/scales/import/preview`, { method: 'POST', headers, body: form })
-  const body = await response.json()
+  const body = await readEnvelope(response)
   if (!response.ok || !body.success) throw new Error(body.error?.message || '题库预览失败')
   return body.data as ScaleImportPreview
 }

@@ -13,11 +13,13 @@ import {
   dimensionLabel,
   levelLabel,
   levelTone,
+  reminderKindLabel,
   retestStatusLabel,
   riskEventStatusLabel,
   riskEventStatusTone,
   statusLabel,
   statusTone,
+  userScopeLabel,
   validityLabel,
   validityTone
 } from '../../services/labels'
@@ -39,6 +41,7 @@ import {
   type CareCaseDetail,
   type CareCaseItem,
   type CounselorWorkbench,
+  type CurrentUser,
   type DimensionDistributionItem,
   type ReminderItem
 } from '../../services/api'
@@ -57,6 +60,30 @@ const cases = ref<CareCaseItem[]>([])
 const detail = ref<CareCaseDetail | null>(null)
 const loading = ref(true)
 const error = ref('')
+
+/**
+ * 读者自己。
+ *
+ * `load()` 一直在调 `getMe()`——它要拿 `role_code` 判这一页该不该给这个人看——
+ * 但**取到之后用完就丢**，于是这一页上没有任何一个字说明「这些数字描述的是谁的范围」。
+ *
+ * 而这一页每一个数都是**按数据范围**算出来的（服务端的 `student_scope_predicate`，
+ * §9）：`getCareCases()` 只回调用者范围内的档案，`completion_rate` 的分母也是。
+ * 一个只带 1 个班范围的心理老师看到「关注档案总数 12」，会读成「这所学校 12 份档案」。
+ * §9 那句「范围数字必须在 UI 上写明口径，否则它冒充全校数字，比不给数字更糟」
+ * 说的正是这一处，而「我的范围筛查统计」那一页（`AnalyticsPage`）已经这么做了。
+ *
+ * 口径文字的形状与「全部学生」页头那一行同源（`CasesPage.vue` 的 `scopeText`）：
+ * 读 `/auth/me` 的 `scopes[]`，**取不到就整句不出现**，不猜一个「全校」——
+ * 一句说不清的范围比没有范围更糟，因为它会被照着安排工作。
+ * 多行范围在服务端由 `or_` 合并，所以这里并列（并集，比任何单行都大）。
+ */
+const me = ref<CurrentUser | null>(null)
+const scopeText = computed(() => {
+  const types = [...new Set((me.value?.scopes ?? []).map(s => s.scope_type))]
+  if (!types.length) return ''
+  return types.map(userScopeLabel).join('、')
+})
 
 // Dialog state
 const showConfirm = ref(false)
@@ -120,10 +147,47 @@ const priorityQueue = computed(() =>
   )
 )
 
-/** 未进入队列、但仍在观察中的档案数 —— 空态里说明它们的去向。 */
+/**
+ * 未进入队列、但仍在观察中的档案数。
+ *
+ * 「优先工作队列」这四个字会把人带向「这就是我的全部在办档案」，而它其实是一张
+ * **筛选过的**表：未逾期、非待复核、且未超出一般范围的那批不在里面。演示数据上
+ * 9 条在队列、12 份在办——差的那 3 份此前**只在这个队列为空时**才被解释一句，
+ * 于是有 9 行的时候读者看到的就是「都在这里了」。
+ *
+ * 所以那一句从空态里搬出来了（见模板），这条注解除了解释它，也解释为什么它是
+ * 「差集」而不是另算一个数：它与 `priorityQueue` 共用同一组判据，构造上不可能
+ * 说「9 + 3 ≠ 12」。
+ */
 const observingElsewhere = computed(
   () => cases.value.filter(c => c.case_status !== 'CLOSED').length - priorityQueue.value.length
 )
+
+/** 「关注档案总数」脚下那一格的数。抽成 computed 而不是在模板里 `filter().length`：
+ *  模板里的表达式每次重渲染都会重新扫一遍数组，而这是四张卡里唯一一张会随
+ *  `cases` 每个字段变化重算的。 */
+const closedCaseCount = computed(
+  () => cases.value.filter(c => c.case_status === 'CLOSED').length
+)
+
+/**
+ * 指标卡的色带只在**有事**的时候亮。
+ *
+ * 四条色带此前是写死的常量（红 / 琥珀 / 青 / 绿），与它上面那个数无关：于是
+ * 「待人工复核 0」头上照样顶着一条红杠，「逾期跟进 0」照样一条琥珀——而那正是
+ * 工作台上最刺眼的两个位置，也恰好出现在「今天没有待办」的那一天。
+ *
+ * 色带是这四张卡里唯一一个**不经过数字就能被看见**的信号（`metric-value` 是
+ * 2rem 的字，但红杠是整张卡最外圈的图形），所以它必须与数字同源。这是 §11 那条
+ * 「指标与它指向的列表同源」的另一面：这一次会漂的不是数，是颜色。
+ *
+ * 返回空串时 `data-tone` 不匹配任何一条 `[data-tone=…]` 规则，`--tone` 保持未设，
+ * `.metric:before` 回落到 `var(--blue)`——也就是「平静」那一档。青色与绿色两张卡
+ * 不参与：它们本来就不表示警报，0 份档案顶一条青杠不会说谎。
+ */
+function metricTone(count: number | undefined | null, tone: string) {
+  return (count ?? 0) > 0 ? tone : ''
+}
 
 /**
  * 「逾期跟进」指标卡的数。
@@ -202,11 +266,13 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const me = await getMe()
-    if (me.role_code !== 'counselor') {
+    const current = await getMe()
+    if (current.role_code !== 'counselor') {
       await router.push('/login')
       return
     }
+    // 留下来的理由见 `me` 的声明：页头那行范围口径读的就是它。
+    me.value = current
     metrics.value = await getCounselorWorkbench()
     cases.value = await getCareCases()
     // 副面板失败不影响工作台其余部分，所以它自带 catch，放在这里而不是外层 try 里。
@@ -218,8 +284,28 @@ async function load() {
   }
 }
 
+/**
+ * 打开一名学生的档案弹层。
+ *
+ * 两条约定都在 §14 里：
+ * - **换一个人时先清空**，否则取数失败之后弹层的标题写着 B、正文还是 A（上一次那份
+ *   没被清掉）。判据是 `student.id !== studentId` 而不是无条件清空：写入之后那几处
+ *   刷新（`saveReview` / `closeCase` 一伙）读的是**同一个人**，清了弹层会闪一下关掉
+ *   再打开，而那不是「上一次的答案」，是这个人上一刻的数据。
+ * - **失败要说出来**。此前它没有 try，异常直接抛到事件处理器外面（`@click` 里没人
+ *   接），屏幕上什么都不会发生——而这一格现在多了整行可点这个入口（见模板），
+ *   一次静默失败的面积跟着变大。
+ */
 async function openDetail(studentId: number) {
-  detail.value = await getCareCaseDetail(studentId)
+  if (detail.value && detail.value.student.id !== studentId) {
+    detail.value = null
+  }
+  try {
+    detail.value = await getCareCaseDetail(studentId)
+  } catch (err) {
+    detail.value = null
+    showToast('error', err instanceof Error ? err.message : '档案详情加载失败')
+  }
 }
 
 /**
@@ -477,9 +563,27 @@ onMounted(load)
       <div>
         <div class="eyebrow">心理工作中心</div>
         <h1>今日工作台</h1>
-        <p class="page-desc">以待复核、逾期跟进和复测任务为核心，不默认展开高敏感内容。</p>
+        <!-- 副标题此前写的是一句**设计说明**（「以待复核、逾期跟进和复测任务为核心，
+             不默认展开高敏感内容」）——它说的是这一页是怎么设计的，而读者站在这一页上
+             要回答的问题是「这些数字说的是谁」。同一句话在「我的范围筛查统计」那一页
+             已经换成口径了（`AnalyticsPage`，e2e 按 `.page-desc` 断言它）。
+             这里每一个数都按数据范围算（§9），所以这一行说的就是范围。
+             取不到 `scopes` 时换一句不给数字的：仍然说的是范围，只是不说成「全校」。 -->
+        <p class="page-desc">
+          <template v-if="scopeText">范围：{{ scopeText }}。下面每个数字与每一条队列都在这个范围内统计。</template>
+          <template v-else>下面每个数字与每一条队列都按你的授权范围统计。</template>
+        </p>
       </div>
       <div class="actions">
+        <!-- 三个按钮**都没有 `primary`**，这是 2026-09-20 改的，刻意如此。
+             `primary` 是这一页上最强的一个视觉信号（实心蓝底），它必须落在
+             「这一页为什么存在」那件事上——而这一页的存在理由是**处理队列**，
+             那个队列就在下面，不需要一个按钮把它叫出来。
+             「高度关注导出」此前戴着 `primary`：它是这三个里**最小众**的一个
+             （一份跨全范围的、不在这张队列上的名单），却长得最响。
+             不是把它降级成次要，是**这一页没有主操作**——三件事各有各的场合，
+             没有一个比另外两个更该被首先点到，那就谁也别假装是。 -->
+
         <!-- 学生导入属于账号与组织治理，仅管理员可做，故此处不再提供入口。
              题库导入产出草稿、不改变任何判定，心理老师可在此准备。 -->
         <button class="btn" @click="router.push('/counselor/data')">题库导入</button>
@@ -490,7 +594,13 @@ onMounted(load)
              现在两个入口各写各的名字、各做各的事（与重点学生页的两个按钮同一个形状）：
              队列导出走名单，全范围的走 `high_risk_only`。 -->
         <button class="btn" @click="openExport()">导出优先队列</button>
-        <button class="btn primary" @click="openExport(true)">高度关注导出</button>
+        <!-- 这一份导的是**全范围的重点关注**，不是左边那张队列——两个导出按钮挨在
+             一起，唯一的差别在名字里，而「优先队列」与「高度关注」都是四个字的抽象词，
+             扫一眼分不出哪个是本页的、哪个是全校的。所以这一处的边界写在弹层里
+             （弹层标题、以及那行「「高度关注」就是关注等级里的**重点关注**」，
+             见 §3 那条约定）。**不要在这里再加一句小字**：`.page-head` 的 `.actions`
+             是一行按钮，塞进去的说明在 1280px 下会把这行挤到第二排。 -->
+        <button class="btn" @click="openExport(true)">高度关注导出</button>
       </div>
     </div>
 
@@ -507,7 +617,7 @@ onMounted(load)
            默认样式（字体、对齐、背景、边框）都要一条条复位，而这四张卡的版式有
            「布局完整性」用例按计算值盯着。 -->
       <div class="grid metrics">
-        <article class="metric" data-tone="red" role="button" tabindex="0" @click="goCases('PENDING_REVIEW')" @keydown.enter.prevent="goCases('PENDING_REVIEW')" @keydown.space.prevent="goCases('PENDING_REVIEW')">
+        <article class="metric" :data-tone="metricTone(metrics?.pending_review, 'red')" role="button" tabindex="0" @click="goCases('PENDING_REVIEW')" @keydown.enter.prevent="goCases('PENDING_REVIEW')" @keydown.space.prevent="goCases('PENDING_REVIEW')">
           <div class="metric-label">待人工复核</div>
           <div class="metric-value">{{ metrics?.pending_review ?? 0 }}</div>
           <!-- 单位是**条**不是人：`pending_risk_events` 数的是 `risk_event` 的行，
@@ -515,7 +625,7 @@ onMounted(load)
                一道是 / 两道也是的学生在这张卡上会读成 2 人，而档案只有一份。 -->
           <div class="metric-foot">重点题命中 {{ metrics?.pending_risk_events ?? 0 }} 条</div>
         </article>
-        <article class="metric" data-tone="amber" role="button" tabindex="0" @click="goCases('overdue')" @keydown.enter.prevent="goCases('overdue')" @keydown.space.prevent="goCases('overdue')">
+        <article class="metric" :data-tone="metricTone(overdueCount, 'amber')" role="button" tabindex="0" @click="goCases('overdue')" @keydown.enter.prevent="goCases('overdue')" @keydown.space.prevent="goCases('overdue')">
           <div class="metric-label">逾期跟进</div>
           <!-- 这个数**必须**跟点进去的那个队列同一个来源（`c.overdue`，与「已逾期」
                页签、"已逾期"药丸同一个标志）。此前它写的是 `metrics.following`，
@@ -523,19 +633,32 @@ onMounted(load)
                真实数据上它读 10，而「已逾期」队列是 0 条，卡片与它自己指向的列表
                各说各话。FOLLOWING 这个数没浪费，挪到脚注里当上下文。 -->
           <div class="metric-value">{{ overdueCount }}</div>
-          <div class="metric-foot">跟进中 {{ metrics?.following ?? 0 }} 份，需尽快处理</div>
+          <!-- 「逾期」在右边那块面板上是一个**不同的单位**：这一格数的是**档案**
+               （一份档案算一次），而「近期提醒」数的是**跟进记录**（项）——同一天里
+               这一格读 2、那一块读 19，两边都叫「已逾期」，而它们问的不是同一件事。
+               两处此前都没有写单位，读者只能自己猜，猜错的那一半会以为其中一个是坏的。
+               所以这一格把单位写出来（点击进的是档案队列，单位就是档案）。 -->
+          <div class="metric-foot">跟进中 {{ metrics?.following ?? 0 }} 份 · 逾期按档案计</div>
         </article>
         <article class="metric" data-tone="teal" role="button" tabindex="0" @click="goCases('all')" @keydown.enter.prevent="goCases('all')" @keydown.space.prevent="goCases('all')">
           <div class="metric-label">关注档案总数</div>
           <div class="metric-value">{{ cases.length }}</div>
-          <div class="metric-foot">其中已关闭 {{ cases.filter(c => c.case_status === 'CLOSED').length }} 份</div>
+          <div class="metric-foot">其中已关闭 {{ closedCaseCount }} 份</div>
         </article>
         <article class="metric" data-tone="green" role="button" tabindex="0" @click="goTasks" @keydown.enter.prevent="goTasks" @keydown.space.prevent="goTasks">
           <!-- 口径是「我的数据范围内」，不是全校：分母跟 scope 走。原标签写「本任务」
                也不对——这个数跨任务合并，单任务完成率在测评任务页看。 -->
           <div class="metric-label">我的学生完成率</div>
           <div class="metric-value">{{ metrics?.completion_rate ?? 0 }}%</div>
-          <div class="metric-foot">点击查看测评任务</div>
+          <!-- 另外三格的脚注都在给上面那个数**提供上下文**（重点题命中几条、
+               跟进中几份、其中已关闭几份），只有这一格写的是「点击查看测评任务」——
+               一句操作提示。卡片本身就是可点的（`role="button"` + hover 抬高），
+               提示它「可以点」是四格里唯一一句不关于数据的话，而它占的正是读者用来
+               判断「75% 是好还是坏」的那个位置。
+               换成一个口径句：`CounselorWorkbench` 只有四个字段，这个端点不提供
+               「应测人数」，所以这里给不出第二个数——**编一个没有出处的数比不给更糟**。
+               这句回答的是「75% 的分母是什么」，而分母为什么是这些学生由页头那行范围说明。 -->
+          <div class="metric-foot">按数据范围统计 · 覆盖全部测评任务</div>
         </article>
       </div>
 
@@ -563,7 +686,19 @@ onMounted(load)
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="c in priorityQueue" :key="c.case_id">
+                  <!-- 整行可点：这一列是「操作」，而整行的**其余五列**才是读者真正
+                       在读的东西——他看完姓名、阶段、等级、下次处理日期之后要做的
+                       下一件事就是「进去看看」，而这一步此前要求把鼠标移到最右边
+                       那个 74px 的按钮上（实测 1440px 下它只露出 11px，1280px 下 0px，
+                       见 `styles.css` 里 `.queue-scroll table` 那一段）。
+
+                       **不给这一行加 `role="button"`**，也不加 `tabindex`：`<tr>` 是
+                       表格的行，改成按钮会让读屏软件读不出「第 3 行，共 9 行」，
+                       也会让 `getByRole('button', { name: '进入档案' })` 撞上重复匹配
+                       （`e2e/vocabulary.spec.ts` 正是用它开档案弹层的）。
+                       键盘这条路一直有，就是右边那个按钮——**它留着**，
+                       而且它现在不再是唯一的路。 -->
+                  <tr v-for="c in priorityQueue" :key="c.case_id" class="queue-row" @click="openDetail(c.student_id)">
                     <td>
                       <div class="student-cell">
                         <!-- 首字母圆片是**装饰**：名字就在它右边。不加 aria-hidden 的话
@@ -588,25 +723,29 @@ onMounted(load)
                       <span v-else>{{ c.next_follow_up_date || '—' }}</span>
                     </td>
                     <td>
-                      <button class="btn small" @click="openDetail(c.student_id)">进入档案</button>
+                      <!-- `@click.stop` 不能省：整行已经挂了同一个 `openDetail`，
+                           不拦住冒泡就是同一个学生连着取两次详情（弹层闪一下、
+                           多一个请求），而失败时还会弹两条一模一样的 toast。 -->
+                      <button class="btn small" @click.stop="openDetail(c.student_id)">进入档案</button>
                     </td>
                   </tr>
                   <tr v-if="!priorityQueue.length">
                     <td colspan="6">
-                      <div class="empty">
-                        没有待复核或高优先级的档案。
-                        <template v-if="observingElsewhere > 0">
-                          <br>
-                          <span class="muted tiny">
-                            另有 {{ observingElsewhere }} 份一般观察档案，可在「重点学生」中查看。
-                          </span>
-                        </template>
-                      </div>
+                      <div class="empty">没有待复核或高优先级的档案。</div>
                     </td>
                   </tr>
                 </tbody>
               </table>
             </div>
+            <!-- 这句话此前**只长在空态里**——也就是只在队列一条都没有的时候出现。
+                 于是有 9 行的时候读者看到的就是「我的在办档案都在这里了」，而实际上
+                 还有 3 份在观察中的没进来（演示数据：队列 9 条 / 在办 12 份）。
+                 它与下面「近期提醒」那句「另有 N 项未显示」是同一类声明（§10：
+                 凡是截断，都要自己说出来），区别只是那一处截的是**条数**、这一处截的是
+                 **判据**——两处都在回答「你看到的这份清单是不是全部」。 -->
+            <p v-if="observingElsewhere > 0" class="muted tiny" style="margin-top:10px">
+              另有 {{ observingElsewhere }} 份一般观察档案不在这个队列里（未逾期、非待复核、且未超出一般范围），可在「查看全部」里查看。
+            </p>
           </div>
         </article>
 
@@ -625,7 +764,10 @@ onMounted(load)
               <div v-if="reminders.length" class="timeline">
                 <div v-for="(r, i) in reminders" :key="i" class="timeline-item">
                   <div class="timeline-dot" :class="{ overdue: r.overdue }"></div>
-                  <div class="muted tiny">{{ r.when }} · {{ r.kind === 'RETEST' ? '复测' : '跟进' }}</div>
+                  <!-- 类别走 `labels.ts`（§3 第一面），不在视图里写三元：那句
+                       `kind === 'RETEST' ? '复测' : '跟进'` 会把认不出的第三类
+                       读成「跟进」。 -->
+                  <div class="muted tiny">{{ r.when }} · {{ reminderKindLabel(r.kind) }}</div>
                   <div class="timeline-title">{{ r.title }}</div>
                   <div class="timeline-text">{{ r.desc }}</div>
                 </div>
@@ -635,6 +777,14 @@ onMounted(load)
                    而这一块正是老师排工作量的地方。 -->
               <p v-if="remindersTruncated" class="muted tiny" style="margin-top:10px">
                 另有 {{ remindersHidden }} 项未显示，请到「重点学生」逐条处理。
+              </p>
+              <!-- 两支是**互斥且穷尽**的，所以「去哪处理」这句话不会两遍也不落空。
+                   没有截断时这一支同样要写：`.timeline` 有 460px 的上限，19 条里
+                   14 条在折线之下——**没有超过服务端的 20 条上限，所以上面那句不出现**，
+                   而屏幕上看起来就是「提醒只有这五条」。它与队列那一句是同一类声明
+                   （「你看到的这份清单是不是全部」），差别是这一处裁的是**高度**。 -->
+              <p v-else-if="reminders.length" class="muted tiny" style="margin-top:10px">
+                共 {{ reminders.length }} 项，列表可上下滚动；逐条处理请到「重点学生」。
               </p>
             </template>
           </div>

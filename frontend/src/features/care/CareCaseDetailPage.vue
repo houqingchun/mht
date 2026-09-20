@@ -9,6 +9,7 @@ import ErrorState from '../../components/ErrorState.vue'
 import TrendChart from '../../components/TrendChart.vue'
 import DimensionTrends from '../../components/DimensionTrends.vue'
 import DimensionRadar from '../../components/DimensionRadar.vue'
+import ClassComparisonPanel from '../../components/ClassComparisonPanel.vue'
 import { showToast } from '../../services/toast'
 import { useSettings } from '../../composables/useSettings'
 import { daysFromNow, formatDuration, today } from '../../services/dates'
@@ -19,8 +20,6 @@ import {
   careEventLabel,
   careEventTone,
   genderLabel,
-  dimensionLabel,
-  dimensionPercent,
   levelLabel,
   levelTone,
   retestStatusLabel,
@@ -223,6 +222,12 @@ async function loadComparison() {
     // 对照表是补充信息：它拿不到不该让整页变成错误状态（与维度分布同一条处理）。
     comparisonFailed.value = true
   }
+}
+
+/** 去这个学生的「测评记录」页——那条路不需要他有档案，所以它永远通。 */
+function openStudentRecords() {
+  if (!detail.value) return
+  router.push(`/counselor/students/${detail.value.student.id}/records`)
 }
 
 async function saveReview() {
@@ -455,42 +460,6 @@ function goReviewFromKeyAnswers() {
 
 onMounted(load)
 onMounted(loadComparison)
-
-/**
- * 对照表的每一行：本人、本班均值、本年级均值，都换算成百分比再画。
- *
- * 百分比是必须的：八个维度题数不等（两个 15 题、其余 10 题），把 15 题的维度和
- * 10 题的维度按原始分并排，前者天然更长，读者会以为它「更严重」——那只是多问了五道题。
- * 分母取维度的 `max_score`（后端随每一行下发），复用 `dimensionPercent`，
- * 它的兜底已经在条形图和雷达图上用了很久。
- *
- * 均值可能为 `null`（同班样本太小，后端扣住不给）。那时这一行只画本人，
- * 并在图例里说明——**不能画成 0**，0 是一条很具体的断言。
- */
-const comparisonRows = computed(() => {
-  const items = comparison.value?.items || []
-  return items.map(item => {
-    const classPercent =
-      item.class_average === null ? null : dimensionPercent(Math.round(item.class_average), item.max_score)
-    const gradePercent =
-      item.grade_average === null ? null : dimensionPercent(Math.round(item.grade_average), item.max_score)
-    return {
-      code: item.dimension_code,
-      label: dimensionLabel(item.dimension_code),
-      score: item.score,
-      maxScore: item.max_score,
-      own: dimensionPercent(item.score, item.max_score),
-      classPercent,
-      gradePercent,
-      classSize: item.class_size,
-      gradeSize: item.grade_size
-    }
-  })
-})
-
-const comparisonSuppressed = computed(() =>
-  comparisonRows.value.some(row => row.classPercent === null || row.gradePercent === null)
-)
 </script>
 
 <template>
@@ -506,6 +475,10 @@ const comparisonSuppressed = computed(() =>
       </div>
       <div class="actions">
         <button class="btn" @click="router.back()">返回列表</button>
+        <!-- 「测评记录」与档案页并列：这一页读的是**这份档案**（复核、跟进、复测），
+             那一页读的是**这个学生的测评事实**（历次场次、维度分、班级对照）。
+             两名老师在同一名学生上并行工作时，两条路都得走得通。 -->
+        <button class="btn" @click="openStudentRecords">测评记录</button>
         <button class="btn" @click="exportSummary">受控导出摘要</button>
         <button
           v-if="detail.case_status !== 'CLOSED'"
@@ -552,9 +525,12 @@ const comparisonSuppressed = computed(() =>
               <span class="pill">{{ sourceLabel(detail.assessment.source) }}</span>
             </div>
             <!-- 这里原本还有一行「MHT总分」，显示的却是 total_level（分类而非分数），
-                 与下一行的「筛查分类」是同一个值、且标签是错的。接口有意不下发
-                 total_score（导出的 include_score 默认为 false，说明分数是更敏感的
-                 一档），所以这里删掉那行，而不是把分数补出来。 -->
+                 与下一行的「筛查分类」是同一个值、且标签是错的，所以删掉了那一行。
+
+                 `assessment.total_score` 今天**是**下发的（2026-09-20 随「学生测评记录」
+                 页补上——那一页的页头要写「总分 24」，正文里有一张逐场的表）。
+                 这张概览卡仍然不显示它，是有意的取舍而不是接口不给：它回答的是
+                 「他属于哪一档」，分数要挨着日期与来源读才读得出是哪一场的。 -->
             <div class="detail-row">
               <span>筛查分类</span>
               <span :class="['pill', levelTone(detail.assessment.total_level)]">{{
@@ -710,80 +686,10 @@ const comparisonSuppressed = computed(() =>
         </div>
       </div>
 
-      <!-- 班级对照 -->
+      <!-- 班级对照。面板本身在 components/ClassComparisonPanel.vue——「学生测评记录」
+           页也要这一块（未建档的学生照样能看对照），口径只有那一份定义。 -->
       <div v-if="activeTab === 'comparison'" style="margin-top: 17px">
-        <div class="card pad">
-          <h2>本班 / 本年级对照</h2>
-          <p class="muted tiny" style="margin:6px 0 0">
-            本人最近一场各维度的得分，与同班、同年级同学最近一场的水平并排。
-            各维度按自己的题数归一化，纵轴 0–100%，所以八行之间可比。
-          </p>
-
-          <div v-if="comparisonFailed" class="notice warn" style="margin-top:15px">
-            对照数据暂时取不到，其余信息不受影响。稍后重试或刷新页面。
-          </div>
-
-          <template v-else-if="comparison">
-            <div v-if="!comparison.items.length" class="empty" style="margin-top:15px">
-              这名学生还没有已交卷的测评，暂无对照数据。
-            </div>
-            <template v-else>
-              <div class="cmp-legend">
-                <span class="cmp-key"><i class="cmp-swatch own"></i>本人</span>
-                <span class="cmp-key">
-                  <i class="cmp-swatch cls"></i>
-                  本班均值（{{ comparisonRows[0]?.classSize ?? 0 }} 人已测评）
-                </span>
-                <span class="cmp-key">
-                  <i class="cmp-swatch grade"></i>
-                  本年级均值（{{ comparisonRows[0]?.gradeSize ?? 0 }} 人已测评）
-                </span>
-              </div>
-
-              <div class="cmp-list">
-                <div v-for="row in comparisonRows" :key="row.code" class="cmp-row">
-                  <div class="cmp-head">
-                    <span>{{ row.label }}</span>
-                    <span class="muted tiny">本人 {{ row.score }}/{{ row.maxScore }}</span>
-                  </div>
-                  <div class="cmp-track">
-                    <!-- 三根刻度线共用同一条轨道：本人实心、两个均值用不同的虚线，
-                         读者一眼看出的是「他在哪」而不是三张分开的图。 -->
-                    <i class="cmp-bar own" :style="{ width: `${row.own}%` }"></i>
-                    <i
-                      v-if="row.classPercent !== null"
-                      class="cmp-mark cls"
-                      :style="{ left: `${row.classPercent}%` }"
-                    ></i>
-                    <i
-                      v-if="row.gradePercent !== null"
-                      class="cmp-mark grade"
-                      :style="{ left: `${row.gradePercent}%` }"
-                    ></i>
-                  </div>
-                  <div class="cmp-foot">
-                    <b>{{ row.own }}%</b>
-                    <span class="muted tiny">
-                      本班 {{ row.classPercent === null ? '样本过小' : `${row.classPercent}%` }} ·
-                      本年级 {{ row.gradePercent === null ? '样本过小' : `${row.gradePercent}%` }}
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              <div v-if="comparisonSuppressed" class="notice" style="margin-top:12px">
-                同班或同年级已测评的人数太少，均值不展示——几个人的平均等于点名。
-                计数仍然给了出来。
-              </div>
-              <div class="notice" style="margin-top:12px">
-                对照只描述这名学生与其同学在同一批题目上的相对位置，不构成诊断，
-                也不是常模参照；高低由心理老师结合访谈判断。
-              </div>
-            </template>
-          </template>
-
-          <SkeletonBlock v-else variant="table" :rows="4" />
-        </div>
+        <ClassComparisonPanel :comparison="comparison" :failed="comparisonFailed" />
       </div>
 
       <!-- 历次趋势 -->

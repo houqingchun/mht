@@ -658,8 +658,8 @@ def counselor_reminders(db: Session, user: UserAccount) -> dict:
     followup_filter = (
         FollowUpRecord.status == "ACTIVE",
         FollowUpRecord.next_follow_up_date <= horizon,
-        # Each reminder's title is 「跟进 <姓名>」, so this panel is a roster
-        # of students in trouble, not an aggregate.
+        # Each reminder names one student, so this panel is a roster of
+        # students in trouble, not an aggregate.
         scope,
     )
     retest_filter = (RetestPlan.status == "PLANNED", RetestPlan.planned_date <= horizon, scope)
@@ -686,7 +686,10 @@ def counselor_reminders(db: Session, user: UserAccount) -> dict:
                 "kind": "FOLLOW_UP",
                 "when": when,
                 "overdue": overdue,
-                "title": f"跟进 {student.masked_name}",
+                # `title` 是**主题**，不是整句话：类别由 `kind` 单独下发，中文由
+                # `labels.ts` 的 `REMINDER_KIND_LABELS` 渲染。此前这里写成
+                # 「跟进 <姓名>」而视图那行前面也写着「跟进」——同一句话里两遍。
+                "title": student.masked_name,
                 "desc": f"约定跟进日 {followup.next_follow_up_date.isoformat()}",
                 "student_id": student.id,
             }
@@ -706,7 +709,7 @@ def counselor_reminders(db: Session, user: UserAccount) -> dict:
                 "kind": "RETEST",
                 "when": f"{days} 天后" if days >= 0 else f"已逾期 {abs(days)} 天",
                 "overdue": days < 0,
-                "title": f"{student.masked_name} 复测",
+                "title": student.masked_name,
                 "desc": retest.reason,
                 "student_id": student.id,
             }

@@ -24,6 +24,7 @@ from app.security.permissions import (
 from app.services.analytics_service import student_result_list
 from app.services.assessment_service import latest_session
 from app.services.audit_service import write_audit
+from app.services.care_service import get_student_assessment_records
 
 router = APIRouter(tags=["students"])
 
@@ -157,3 +158,49 @@ def key_question_answers(
     )
     db.commit()
     return ok({"items": items})
+
+
+@router.get("/students/{student_id}/assessment-records")
+def student_assessment_records(
+    student_id: int,
+    request: Request,
+    current_user: PsychDetailScopedReader,
+    db: Annotated[Session, Depends(get_db)],
+):
+    """一名学生的测评记录——**不需要他有档案**。
+
+    这是「关注档案不存在」那条死路的第二个出口。全库唯一的开档触发点是重点题 85 / 97
+    命中（见 `assessment_service.maybe_raise_risk_events` 的 docstring），所以一个被评成
+    「需要关注」、甚至「重点关注」的学生**照样可能没有档案**——而在此之前
+    `GET /care-cases/{student_id}` 是唯一能读到「他考过几次、每次多少分」的接口，
+    它在没有档案时回 404，前端又拿不到状态码（§2），于是那一行只显示一个 `—`，
+    心理老师**真的没有任何入口**看到这个学生。
+
+    门槛与 `GET /care-cases/{student_id}` **逐字相同的一道**（能力 + 数据范围）：两条路
+    给的是同一个学生的同一批列（学号 / 姓名 / 等级 / 总分 / 维度分），门槛不同就是
+    「同一件事两条路径两个答案」。`/students/results` 之所以要两道，是因为它下发的是
+    **整份名册**，不是单个学生——这一条不构成读名册的旁路。
+
+    学生不存在 → 404「学生不存在」，范围外 → 403（两条都由 `ensure_student_in_scope`
+    给出，不在这里另写）。**查到人但从未测评 → 200 + 空的 `assessment` 与 `history`**，
+    不是 404：那是「他还没测」，与「查无此人」是两件事，而前端把两者都渲染成一条红条
+    （§14：空态是一句关于数据的话）。
+
+    每次读都写审计，在被拒时**不写**——理由与 `key-questions` 那一段逐字相同。
+    不需要 `purpose`：那是**原始答卷**那一档的要求，这一条与档案详情同档。
+    """
+    records = get_student_assessment_records(db, current_user, student_id)
+    write_audit(
+        db,
+        action="查看测评记录",
+        # **`STUDENT` 而不是 `STUDENT_CARE_CASE`。** 这一条读的是测评记录本身，
+        # 而且它存在的理由正是「这名学生没有档案」——对那样的学生写
+        # `STUDENT_CARE_CASE` 是一句假话，会让按对象筛审计的人以为他开过档。
+        resource_type="STUDENT",
+        resource_id=str(student_id),
+        actor=current_user,
+        request=request,
+        student_id=student_id,
+    )
+    db.commit()
+    return ok(records)

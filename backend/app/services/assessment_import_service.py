@@ -106,6 +106,7 @@ from app.services.export_document import ExportDocument
 # 导出的 CSV 由后端拼，「匹配结论」那一列的中文与 `labels.ts` 是同一份镜像表——用它，
 # 不在这个模块里再写一遍那九个码的中文（第三面，见 `export_labels.py`）。
 from app.services.export_labels import unmatched_reason_label
+from app.services.import_text import read_csv_grid
 # 未匹配行那一页的两道门槛直接复用 `list_task_targets` 的那一个判据（§22）。
 # `task_service` 不 import 本模块，所以这里没有环；哪一天它需要 import 了，把这一个
 # 判据搬到 `app/security/` 里去，而不是在两边各写一份。
@@ -658,16 +659,11 @@ def _read_csv(content: bytes) -> list[list[str]]:
     中文 Excel / WPS 的「另存为 CSV」在 Windows 上写出来的是 GBK，而那是学校最可能的
     操作路径。只按 UTF-8 解会抛 UnicodeDecodeError —— 一个 500，而它该是「照读不误」
     或者一句「请另存为 UTF-8 的 CSV」。两次都解不出来才报错（真的二进制文件）。
+
+    判据本身归 `services/import_text.py`：名册导入与题库导入是同一个洞的第二、三处，
+    2026-09-20 起三条链共用那一处定义，这里只留下「CSV 字节 → 二维数组」这一步。
     """
-    for encoding in ("utf-8-sig", "gbk"):
-        try:
-            text = content.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-        return [list(row) for row in csv.reader(io.StringIO(text))]
-    raise AppError(
-        "VALIDATION_ERROR", "文件不是 UTF-8 或 GBK 编码的文本，请另存为 CSV 后重试", 422
-    )
+    return read_csv_grid(content)
 
 
 def _columns_from_header(header: list[str]) -> tuple[dict[str, Any], list[str]]:

@@ -214,9 +214,25 @@ async function loadStudents() {
   }
 }
 
-/** 只有已建档的学生才给链接：没有档案的行点进去是 404，而前端拿不到状态码（§2）。 */
+/** 已建档的行进档案详情。 */
 function openStudentCase(studentId: number) {
   router.push(`/counselor/cases/${studentId}`)
+}
+
+/**
+ * 未建档的行进「学生测评记录」。
+ *
+ * **这条路是补出来的，此前它不存在**：这一列过去对未建档的行只渲染一个 `—`，
+ * 而「未建档」恰恰是**大多数**学生——全库唯一的开档触发点是重点题 85 / 97 命中
+ * （`assessment_service.maybe_raise_risk_events` 的 docstring 逐字写着
+ * 「Only 重点题命中写行」），关注等级本身从不建档。所以一个被评成「需要关注」的学生
+ * 照样可能没有档案，而那时他在这张表上是一格不可点的破折号——心理老师**没有任何
+ * 入口**看他考过几次。用户 2026-09-20 报的就是这件事。
+ *
+ * 两枚按钮的判据是同一个 `row.case_id`，两个分支各自都有落点：不存在「点了是 404」的位置。
+ */
+function openStudentRecords(studentId: number) {
+  router.push(`/counselor/students/${studentId}/records`)
 }
 
 /** 表格列定义：可排序列在表头点击切换升降序。 */
@@ -678,12 +694,18 @@ onMounted(load)
               <span v-else class="muted tiny">未建档</span>
             </template>
             <template #actions="{ row }">
-              <!-- 只有已建档的才有链接：没有档案的行点进去是 404，而前端拿不到
-                   状态码（§2），用户看到的是一个红条。不渲染，不是 disabled。 -->
+              <!-- 两个分支**各自都有落点**，没有 `—`：
+                   有档案的进档案详情，没档案的进「学生测评记录」——后者读的正是那些
+                   **与档案无关**的测评事实（后端两条路径共用
+                   `care_service.student_assessment_records` 一处装配）。
+                   此前未建档的行只有一个破折号，而「未建档」是大多数学生（建档只由重点题
+                   命中触发，不认关注等级），于是心理老师没有任何入口看他考过几次。 -->
               <button v-if="row.case_id" class="btn small" @click="openStudentCase(row.student_id)">
                 查看档案
               </button>
-              <span v-else class="muted tiny">—</span>
+              <button v-else class="btn small" @click="openStudentRecords(row.student_id)">
+                查看测评记录
+              </button>
             </template>
           </DataTable>
         </div>

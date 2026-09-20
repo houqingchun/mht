@@ -538,92 +538,75 @@ onMounted(async () => {
 
     <ErrorState v-if="error && !loading" :message="error" :on-retry="load" />
 
-    <div class="grid two">
-      <div class="card pad">
-        <h2>MHT题库版本导入</h2>
-        <p class="muted tiny" style="margin-top:7px">校验100题、10道效度题、维度映射、重点题与重复题号</p>
-        <p class="muted tiny" style="margin-top:4px">
-          导入只创建草稿版本，草稿不生效；需由系统管理员发布后才会用于新的测评任务。
-        </p>
-        <div class="import-drop">
-          <strong>导入形成新的草稿版本</strong>
-          <span class="muted tiny">不会覆盖已发布题库或历史测评结果</span>
-          <div class="actions" style="justify-content:center;margin-top:14px">
-            <button class="btn" @click="downloadQuestionTemplate">下载模板</button>
-            <label class="btn primary" style="cursor:pointer">
-              选择文件
-              <input type="file" accept=".csv,.json" hidden @change="onQuestionFile" />
-            </label>
-          </div>
-        </div>
-
-        <p v-if="importingQuestions" class="muted tiny" style="margin-top:12px">正在上传校验…</p>
-        <div v-if="questionPreview" class="import-summary" style="margin-top:14px">
-          <strong>总数 {{ questionPreview.total }}</strong>
-          <span>{{ questionPreview.valid ? '校验通过' : '校验不通过' }}</span>
-          <button
-            :disabled="!questionPreview.valid || !questionPreview.preview_token || creatingDraft"
-            @click="commitDraftNow"
-          >
-            {{ creatingDraft ? '正在创建…' : '创建草稿版本' }}
-          </button>
-        </div>
-        <p v-if="questionPreview?.global_errors.length" class="form-error" style="margin-top:8px">
-          {{ questionPreview.global_errors.join('、') }}
-        </p>
-      </div>
-
+    <div class="grid">
+      <!-- 两张卡片**竖着排、各占整幅**（2026-09-20 用户报「MHT测评记录导入显示很拥挤」）。
+           此前是 `.grid.two`：测评记录导入只拿到 559px 的一半栏，而那一格里要塞四个批次
+           字段、一段取值约定、一行批次摘要和一块待确认面板。**宽度是这一处拥挤的根因**，
+           实测：卡片 559px 时「关联测评任务」那个下拉框只有 ~252px 可用，而它的当前值
+           ——任务名——量出来最长 565px，一个字都读不全。改成整幅之后卡片是 1134px，
+           卡片内部的疏密是第二件事（见 `.batch-fields.four` 与 `.conventions`）。
+           次序也换了：题库导入只产出草稿（发布还归管理员），是偶尔做一次的事；而每次普查
+           都要做的是测评记录导入。原先两栏并排时两张卡片一样宽，看不出这个主次。 -->
       <div class="card pad">
         <h2>MHT测评记录导入</h2>
-        <!-- 三句取值约定必须写在页面上：1/2 与 1/0 是**那个外部平台**的约定，
-             本系统其它任何地方都不出现这两种写法，老师无从推断。
-             性别那一句 2026-09-17 跟着后端一起改成了 2=男、1=女——此前反着写，
-             照着这段说明填的表会把同名同班的两个学生定位反。 -->
         <p class="muted tiny" style="margin-top:7px">
-          CSV · 导入在其他平台完成的普查结果，按姓名、性别、年龄、年级、班级定位学生
-        </p>
-        <p class="muted tiny" style="margin-top:4px">
-          性别 2=男、1=女；答案 1=是、0=否；年级 1/2/3 为初一/初二/初三，班级 4 表示初一 4 班。
+          CSV · 导入在其他平台完成的普查结果，按姓名、性别、年龄、年级、班级定位学生；
           定位不到的学生会跳过并逐行报错，不建学生、不建账号。
         </p>
+        <!-- 四条取值约定必须写在页面上：1/2 与 1/0 是**那个外部平台**的约定，
+             本系统其它任何地方都不出现这两种写法，老师无从推断。
+             排成一张四格的对照表而不是一句顿号连起来的长句——这一块是要被人**回头查**的
+             （「班级那一位到底是不是年级」），四格一眼扫得到，一行字每次都要从头读一遍。
+             性别那一句 2026-09-17 跟着后端一起改成了 2=男、1=女——此前反着写，
+             照着这段说明填的表会把同名同班的两个学生定位反。 -->
+        <dl class="conventions">
+          <div><dt>性别</dt><dd>2 = 男，1 = 女</dd></div>
+          <div><dt>答案</dt><dd>1 = 是，0 = 否</dd></div>
+          <div><dt>年级</dt><dd>1 / 2 / 3 为初一 / 初二 / 初三</dd></div>
+          <div><dt>班级</dt><dd>4 表示初一 4 班</dd></div>
+        </dl>
         <!-- 这里不再写「不改名册」：年龄不符时「覆盖」的含义就是改名册上的年龄。
              那句话与下面的待确认面板自相矛盾，而面板才是有选项的那一个。 -->
-        <p class="muted tiny" style="margin-top:4px">
+        <p class="muted tiny">
           年龄与名册不符、或本月已导过一次的记录会先列出来，由你选择覆盖还是放弃。
         </p>
-        <div class="batch-fields">
+        <div class="batch-fields four">
           <label>
             <span class="muted tiny">批次名称</span>
             <input v-model="assessmentBatchName" type="text" maxlength="128" placeholder="如 2026年秋季心理普查" />
           </label>
-          <label>
+          <label class="field-date">
             <span class="muted tiny">测评日期</span>
             <input v-model="assessmentTestedOn" type="date" />
           </label>
-        </div>
-        <div class="batch-fields">
-          <label>
+          <label class="field-source">
+            <span class="muted tiny">数据来源平台（选填）</span>
+            <input v-model="assessmentSourceSystem" type="text" maxlength="64" placeholder="如 市中小学生心理健康平台" />
+          </label>
+          <!-- 「关联测评任务」排在最后、独占一整行（`.field-task` 的 `grid-column: 1 / -1`）。
+               **次序不是排版喜好，是量出来的**：它的选项是任务名，`<select>` 的当前值显示的
+               是整条选中项的文字，演示库里最长的一条量出来 565px——排在三个短字段后面时它
+               只剩 ~425px，四个选项里三个仍然被截断（就是用户报的那一处拥挤换了个宽度复发）。
+               占一整行有 1049px 可用。这与「改短 `taskOptionLabel`」是两条路，选了这条：
+               砍掉任务编号是一条用户没要的产品改动，而这里只是排布。
+               它也是这四格里唯一改**判重口径**的一格，占一整行与它的分量相称。
+               「它为什么存在」写在这一格自己下面（而不是另起一段）：换掉判重口径之后，
+               同一份文件会得到不同的结论（绑了任务时「名册上有他、但他不在这场任务里」
+               是「无法导入」，不绑时他照常导入）。不写这一句，操作员会以为它是个备注字段。 -->
+          <label class="field-task">
             <span class="muted tiny">关联测评任务（选填）</span>
             <select v-model="assessmentTaskId" class="select">
-              <option :value="null">不关联——按「同一个学生同一个月只导一次」判重</option>
+              <option :value="null">不关联（按自然月判重）</option>
               <option v-for="task in assessmentTasks" :key="task.id" :value="task.id">
                 {{ taskOptionLabel(task) }}
               </option>
             </select>
-          </label>
-          <label>
-            <span class="muted tiny">数据来源平台（选填）</span>
-            <input v-model="assessmentSourceSystem" type="text" maxlength="64" placeholder="如 市中小学生心理健康平台" />
+            <span class="muted tiny field-hint">
+              关联后按「这场任务里这个人有没有有效答卷」判重，不在任务名单里的学生会标成
+              「不在本场任务里」（可去任务页补发目标）；不关联则按自然月判重。
+            </span>
           </label>
         </div>
-        <!-- 「关联任务」这一格为什么存在，必须写出来：它换掉的是**判重口径**，
-             而两种口径下同一份文件会得到不同的结论（绑了任务时「名册上有他、但他不在
-             这场任务里」是「无法导入」，不绑时他照常导入）。不写这一句，操作员会以为
-             它只是个备注字段。 -->
-        <p class="muted tiny" style="margin-top:-6px">
-          关联任务后：按「这场任务里这个人有没有有效答卷」判重，不在任务名单里的学生会标成
-          「不在本场任务里」（可去任务页补发目标）；不关联则按自然月判重，两种口径都在。
-        </p>
         <div class="import-drop">
           <strong>导入前显示逐项校验结果</strong>
           <!-- 这里此前写着「外部记录不产生风险提示与关怀档案，只带进评分结果」——
@@ -786,6 +769,40 @@ onMounted(async () => {
             </template>
           </p>
         </div>
+      </div>
+
+      <div class="card pad">
+        <h2>MHT题库版本导入</h2>
+        <p class="muted tiny" style="margin-top:7px">校验100题、10道效度题、维度映射、重点题与重复题号</p>
+        <p class="muted tiny" style="margin-top:4px">
+          导入只创建草稿版本，草稿不生效；需由系统管理员发布后才会用于新的测评任务。
+        </p>
+        <div class="import-drop">
+          <strong>导入形成新的草稿版本</strong>
+          <span class="muted tiny">不会覆盖已发布题库或历史测评结果</span>
+          <div class="actions" style="justify-content:center;margin-top:14px">
+            <button class="btn" @click="downloadQuestionTemplate">下载模板</button>
+            <label class="btn primary" style="cursor:pointer">
+              选择文件
+              <input type="file" accept=".csv,.json" hidden @change="onQuestionFile" />
+            </label>
+          </div>
+        </div>
+
+        <p v-if="importingQuestions" class="muted tiny" style="margin-top:12px">正在上传校验…</p>
+        <div v-if="questionPreview" class="import-summary" style="margin-top:14px">
+          <strong>总数 {{ questionPreview.total }}</strong>
+          <span>{{ questionPreview.valid ? '校验通过' : '校验不通过' }}</span>
+          <button
+            :disabled="!questionPreview.valid || !questionPreview.preview_token || creatingDraft"
+            @click="commitDraftNow"
+          >
+            {{ creatingDraft ? '正在创建…' : '创建草稿版本' }}
+          </button>
+        </div>
+        <p v-if="questionPreview?.global_errors.length" class="form-error" style="margin-top:8px">
+          {{ questionPreview.global_errors.join('、') }}
+        </p>
       </div>
     </div>
 

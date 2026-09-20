@@ -1204,6 +1204,39 @@ h1 {
    不设上限时行数完全跟着数据走——2026-09-17 量到 40 条时整栏 4127px。 */
 .queue-scroll {
   max-height: 460px;
+  /* 与 `.timeline` 那一段同一条：460px 里 9 行只完整露得出 6 行（2026-09-20 实测
+     `rowsFullyVisible: 6` / `queueRows: 9`），而最后一行是从字形中间切断的——
+     李依诺那三个字只有上半截，看起来像表格画坏了。滚动条不承担这个提示
+     （实测是浮层的，见 `.timeline` 里那段），所以这里也用同一套四层背景。
+     表格的滚动条加在 `.table-wrap` 上，也就是这个元素自己，所以两层是同一处。
+
+     这一页有个 `.timeline` 没有的好处：`td` 是透明的（只有 `th` 是 `#f6f8fb`），
+     四层背景与内容之间没有任何一层不透明的东西挡着——那两条阴影在表体上
+     不会出现「被单元格背景盖住」的问题（`th` 会盖住顶部那条，而停在顶部时
+     本来也不该有顶部阴影）。 */
+  background:
+    linear-gradient(#fff 30%, rgba(255, 255, 255, 0)) top / 100% 30px no-repeat local,
+    linear-gradient(rgba(255, 255, 255, 0), #fff 70%) bottom / 100% 30px no-repeat local,
+    radial-gradient(farthest-side at 50% 0, rgba(20, 43, 69, 0.30), rgba(20, 43, 69, 0)) top / 100% 16px no-repeat scroll,
+    radial-gradient(farthest-side at 50% 100%, rgba(20, 43, 69, 0.30), rgba(20, 43, 69, 0)) bottom / 100% 16px no-repeat scroll;
+}
+
+.queue-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.queue-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.queue-scroll::-webkit-scrollbar-thumb {
+  background: #c3d2e2;
+  border-radius: 4px;
+}
+
+.queue-scroll::-webkit-scrollbar-thumb:hover {
+  background: #aabdd2;
 }
 
 .timeline {
@@ -1215,6 +1248,54 @@ h1 {
      总数与「另有 N 项未显示」由服务端的 `total` 回答，不靠这里数。 */
   max-height: 460px;
   overflow-y: auto;
+  /* 460px 的框里 19 条只露得出 5 条（2026-09-20 实测 `reminderClippedCount: 14`），
+     而 macOS 的浮层滚动条不滚就不画——**被裁掉的那一条是从字形中间切断的**，
+     看起来像渲染坏了，不像「下面还有」。所以「可以滚」这件事必须有别的说法。
+
+     ★ 2026-09-20 实测：给 `::-webkit-scrollbar` 上样式**买不到常驻滚动条**。
+     Chromium 153 确实匹配了这条规则（`getComputedStyle(el, '::-webkit-scrollbar')
+     .width` 回 `"8px"`），但照样按浮层画：`offsetWidth === clientWidth === 718`，
+     滚动条不占任何布局宽度，也不在静止时出现。换 `--disable-features=
+     OverlayScrollbar` 起浏览器同样是 0。所以「上了样式就会变常驻」这个说法是错的，
+     不要照它推理——这条 `::-webkit-` 那一族留着的唯一好处，是滚动过程中那个滑块
+     有颜色（本机实测 8px、浮层），**它不承担「这里可以滚」这个提示**。
+
+     承担那件事的是 `background` 里那四层（见下）——它按**构造**成立：本地层随内容
+     滚，阴影钉在框上。没有溢出时两条本地层正好把阴影盖满，一丝痕迹都没有；
+     溢出时滚到中间，本地层让开，两条阴影各出现一条。不需要 JS 测量，也不会撒谎。 */
+  background:
+    /* 前两层是「内容自己的空白」，`local` 让它们跟着内容滚。它们的存在就是为了
+       在没有溢出时把下面两条阴影盖掉——**渐隐必须是有条件的**，一个常驻的渐隐
+       等于一句假话：它说下面还有，而下面没有了。 */
+    linear-gradient(#fff 30%, rgba(255, 255, 255, 0)) top / 100% 30px no-repeat local,
+    linear-gradient(rgba(255, 255, 255, 0), #fff 70%) bottom / 100% 30px no-repeat local,
+    /* 后两层是阴影本体，`scroll` 让它们钉在框的内边缘。颜色取自 `--navy`
+       （`rgba(20, 43, 69, …)`）而不是纯黑：这一页的深色都是这个色偏。
+       16px 高是因为它只负责「这里断开了」，不负责好看——再高就像一块遮罩了。
+
+       **0.30 是量出来的，不是挑出来的。** 第一版写的 0.13：逐像素扫底边，
+       最深只到 `rgb(232,235,237)`，也就是比白深 23/255。它确实在画（不是没生效），
+       但 9% 的斜坡在白色卡片上读不出来——截图里那一行还是「被切断了」的样子。
+       0.30 之后最深约 65/255（25%），才够让人看成「下面还有」。 */
+    radial-gradient(farthest-side at 50% 0, rgba(20, 43, 69, 0.30), rgba(20, 43, 69, 0)) top / 100% 16px no-repeat scroll,
+    radial-gradient(farthest-side at 50% 100%, rgba(20, 43, 69, 0.30), rgba(20, 43, 69, 0)) bottom / 100% 16px no-repeat scroll;
+}
+
+.timeline::-webkit-scrollbar {
+  width: 8px;
+}
+
+.timeline::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.timeline::-webkit-scrollbar-thumb {
+  background: #c3d2e2;
+  border-radius: 4px;
+}
+
+.timeline::-webkit-scrollbar-thumb:hover {
+  background: #aabdd2;
 }
 
 .timeline:before {
@@ -1834,6 +1915,20 @@ table {
   min-width: 820px;
 }
 
+/* 上面那条 `min-width: 820px` 是**无条件**的，它保证的是「十五个页面的表格
+   都别把列挤成一团」。代价落在工作台那个六列的队列上：它的六列自然宽约 820px，
+   而右侧栏在 1440px 下只有 718px、1280px 下只有 595px——实测横向隐藏 102px / 225px，
+   「进入档案」那个按钮 1440px 下只露出 11px、1280px 下露出 0px（9 行 9 行全裁）。
+   一张读不完的操作列等于没有操作列。
+
+   所以就地豁免，**只豁免这一张表**：`min-width: 0` 之后表格按容器宽度收，
+   放不下的格子自己折行。不去改上面那条全局规则——那会同时挪动另外十几个页面，
+   而它们的列数、内容与本页无关（`CareCaseDetailPage` 那些表比 820px 宽得多，
+   收窄之后是另一场评估）。 */
+.queue-scroll table {
+  min-width: 0;
+}
+
 th {
   text-align: left;
   padding: 12px 13px;
@@ -1853,6 +1948,26 @@ td {
 
 tbody tr:hover td {
   background: #fafcff;
+}
+
+/* 工作台队列的整行可点（`CounselorWorkbenchPage.vue` 的 `.queue-row`）。
+
+   上面那条悬停底色是给**只读**表格用的，`#fafcff` 与白色差两个色阶，意思是
+   「你的鼠标在这一行上」；而这里的行点下去会开档案，所以它要说的是
+   「这一行能点」。两者差在**有没有手型与对比度**：`cursor: pointer` 是判据本体
+   （§15 那条 `role="button"` 才给手型的约定管的是 `.metric` 卡片，<tr> 不在此列，
+   理由见那个模板里那一段注释——加了 role 会让读屏软件读不出行号），
+   底色加深一档让它在扫视时也看得出来。
+
+   这一条**刻意不加 `:focus-within` 的高亮**：焦点一直落在右边那个按钮上，
+   而按钮自己有 `:focus-visible` 的环——再给整行加一层底色会有两个焦点指示，
+   读屏与键盘用户看到的是同一个东西的两种说法。 */
+.queue-row {
+  cursor: pointer;
+}
+
+.queue-row:hover td {
+  background: #eef5fd;
 }
 
 .toolbar {
@@ -1941,6 +2056,7 @@ tbody tr:hover td {
 
 .batch-fields label {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px;
 }
 
@@ -1952,6 +2068,104 @@ tbody tr:hover td {
   background: #fff;
   font: inherit;
   color: inherit;
+}
+
+/* 批次字段的排布（`.four`，2026-09-20 随「测评记录导入显示很拥挤」一起加）。
+   此前固定两行两格，而卡片只占 `.grid.two` 的一半宽。卡片改成整幅宽之后重排成
+   **三个短字段一行 + 「关联测评任务」自己占一整行**（后者见下面 `.field-task`）。
+
+   为什么不是四格一行，这是**量出来的**：`<select>` 的当前值显示的是整条选中项的文字，
+   而这一项的选项是任务名——演示库里最长的一条
+   `2026春季MHT心理健康筛查（外部平台导入）（IMPORT-202605-1 · 已结束）` 实测 565px。
+   四格一行时即使把另外三格压到最小，「关联任务」也只分得到 ~425px，**四个选项里三个
+   仍然被截断**，就是用户报的那一处拥挤换了个宽度复发。整行给它有 1049px 可用。
+
+   三个短字段**等宽**而不是按内容量配比：它们的占位符长短接近（两个中文占位符各约 208px、
+   一个日期约 129px），量下来差不到 20px，配比只是多一份要维护的数字。
+   `minmax(0, …)` 与上面 `.batch-fields` 那条同一个写法：`<input>` 的默认 `size` 是 20 个
+   字符，不压到底下这行在窄屏上会溢出。
+   （第一版是 `flex` + `flex-wrap`，量出来是错的：`flex-grow` 让第一行三格长到填满容器，
+   第四格于是**必定**被挤到第二行、再独占整行——看到的是「三格一行 + 孤零零一格」，
+   而基准宽度加起来本来一次排得下。grid 不存在这个算法。） */
+.batch-fields.four {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+/* 「关联测评任务」跨满整行。它排在这一组的**最后**（模板里的次序与这里一致，
+   不用 `grid-row` 显式定位）——既是上面那条宽度账的结果，也因为它排在那儿读起来顺：
+   前三格是这份文件的元信息，它是唯一改判重口径的那一格，并与下面那句解释连在一起。 */
+.batch-fields .field-task {
+  grid-column: 1 / -1;
+}
+
+/* 窄屏上三个短字段退回一格一行。680px 是这一组既有的断点（见本文件别处的媒体查询）。
+   「关联任务」本来就是整行，不必再声明。 */
+@media (max-width: 680px) {
+  .batch-fields.four {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* `.batch-fields input` 一直写着 `font: inherit`，而 `.select` 的基础规则（见文件后半
+   的 `.select`）没有带 font——于是同一行里的下拉框是浏览器默认的 13.33px Arial，
+   旁边的输入框是 16px Inter，并排看像有一格没上样式（2026-09-20 实测）。
+   **只在这一处 inherit，没有给 `.select` 的基础规则补 font**：全站 18 个 `<select>`，
+   补基础规则会同时改动另外六个页面（权限矩阵、审计筛选、分页器…），而那些页面的疏密
+   没有量过。这与 §17 那条「要补请单独做，并准备逐页看一遍」是同一个取舍。
+   这一条有守卫：`e2e/app.spec.ts` 的「数据中心的下拉框与同一行的输入框同字体」
+   （断言的是**与同行的输入框相等**，不是写死 16px）。
+
+   下面两条（`min-width: 0` 与 `label` 的 `minmax(0, 1fr)`）是「下拉框不许撑破它那一格」
+   的通用写法，**而它们今天不承重，这是量过的**：`<select>` 的 min-content 是它最宽的
+   那个 `<option>`（这里的选项是任务名，最长 565px），四格一行的版本里那一格只有 360px、
+   下拉框自己量出 **631px** 溢到旁边的字段上；改成整行独占之后格宽 1049px，摘掉
+   `min-width: 0` 或摘掉 `minmax(0, …)` 都不再复现（两次都实测过，`宽度 ≤ 格子` 那条断言
+   仍然绿）。**留着是因为它们管的是这个控件的通用行为**，将来谁再把它排进窄格子就是它们
+   挡着；但**别把它们读成当前布局的承重件**——`width: 100%` 才是最直接的那一条。 */
+.batch-fields select {
+  width: 100%;
+  min-width: 0;
+  font: inherit;
+}
+
+/* 挂在字段下面的一句解释（目前只有「关联测评任务」用它）。做成 `<label>` 里的一个
+   `<span>` 而不是另起一段——「这句话在解释哪一格」不必靠位置猜；而四个 `<label>` 的
+   首行结构相同，所以四个控件的上边缘仍然对齐，多出来的只有这一格自己的高度。 */
+.field-hint {
+  display: block;
+  line-height: 1.55;
+}
+
+/* 取值约定对照表（数据中心 · MHT测评记录导入 的四条：性别 / 答案 / 年级 / 班级）。
+   这四条此前是一句顿号连起来的长句，而它们是被人**回头查**的（「班级那一位到底是不是
+   年级」）——排成四格一眼扫得到，一行字每次都要从头读一遍。
+   `auto-fit` + 最小宽而不是固定四列：卡片整幅宽时四格一行，窄屏上自己折成两行。 */
+.conventions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 8px 16px;
+  margin: 13px 0;
+  padding: 12px 14px;
+  border: 1px solid #e3eaf1;
+  border-radius: 11px;
+  background: #fafcfe;
+}
+
+.conventions > div {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.conventions dt {
+  flex: none;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.conventions dd {
+  margin: 0;
+  font-size: 0.82rem;
 }
 
 .import-drop {

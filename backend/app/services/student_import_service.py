@@ -1,7 +1,5 @@
-import csv
 import hashlib
-import io
-import json
+import re
 from datetime import datetime
 from typing import Any
 
@@ -19,6 +17,7 @@ from app.models.importing import (
 from app.models.organization import ClassGroup, Grade, School, Student
 from app.security.passwords import hash_password
 from app.services.audit_service import write_audit
+from app.services.import_text import decode_upload, parse_json_rows, read_csv_dicts
 # 处置方式的两个码与测评导入**共用一套**：同一份 API 词汇出现在两个端点里，
 # 各写一份字面量就会有第三种写法悄悄冒出来，而它只会在前端提交时变成一句 422。
 # 中文标签各自定义——含义确实不同（测评那边「覆盖」是替换上次导入的那一场，
@@ -106,6 +105,23 @@ CLASS_PREFIX_GRADE = {prefix: grade for grade, prefix in GRADE_CLASS_PREFIX.item
 GRADE_INPUT_HINT = "年级应为 初一 / 初二 / 初三"
 CLASS_NAME_INPUT_HINT = "班级格式应为 701（首位 7/8/9 分别表示初一/初二/初三）"
 
+# 学号允许的形状：ASCII 字母、数字、连字符。
+#
+# 拦的是**被表格软件改坏**的那几种值，它们不是「格式不合我们的规矩」，而是「这一格已经
+# 不是学号了」，而没有一种编号规则产得出它们：
+#   `2.70252E+10`        列宽不够，Excel 按科学计数法显示（`.` 与 `+` 都出局）
+#   `2702516010100.00%`  单元格格式是百分比
+#   `27025160101'`       给单元格加 `'` 前缀「转成文本」——**另存为 CSV 会把这个撇号留在
+#                        值里**。2026-09-20 实测：这个值一路进了预览，而那一行显示「可导入」
+# 静默收下的代价是一名学生带着错的学号进名册，而事后只能靠人眼在两列数字里找出来——
+# 名册是这套系统的根，学号又是账号（`student_no` 即登录名），错一个就是一个人登不进来。
+#
+# **只拦形状，不拦长度与含义**：缺口 2 那条「不校验格式」说的是「各位数字的含义没有确认
+# 过」，而这条规则不需要知道含义——`S001`（种子与全套测试都用它）与 `27025160101` 都通过。
+# 连字符留着：`2027-01-001` 这类写法是学校真会用的。
+STUDENT_NO_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
+STUDENT_NO_INPUT_HINT = "学号只能由字母、数字和连字符组成"
+
 
 def check_grade_and_class(grade: str, class_name: str) -> str | None:
     """年级与班级编号一致性检查；返回该行的错误文案，或 None 表示通过。
@@ -129,14 +145,12 @@ def check_grade_and_class(grade: str, class_name: str) -> str | None:
 
 
 def parse_student_import(filename: str, content: bytes) -> list[dict[str, str]]:
-    text = content.decode("utf-8-sig")
+    # 解码与「表格读不读得成」都归 `import_text`：学校手上那份文件多半是 Excel「另存为
+    # CSV」出来的 GBK，而只认 UTF-8 会抛一个不是 `AppError` 的异常，屏幕上就只剩一句
+    # `JSON.parse: …`（编码与 `csv.Error` 两条路都在那里收住）。
     if filename.lower().endswith(".json"):
-        rows = json.loads(text)
-        if not isinstance(rows, list):
-            raise AppError("VALIDATION_ERROR", "JSON必须是数组", 422)
-        return [normalize_row(row) for row in rows]
-    reader = csv.DictReader(io.StringIO(text))
-    return [normalize_row(row) for row in reader]
+        return [normalize_row(row) for row in parse_json_rows(decode_upload(content))]
+    return [normalize_row(row) for row in read_csv_dicts(content)]
 
 
 def normalize_row(row: dict[str, Any]) -> dict[str, str]:
@@ -299,6 +313,11 @@ def analyze_roster_rows(
         for field in REQUIRED_FIELDS:
             if not row.get(field):
                 errors.append(f"缺少{field_label(field)}")
+        # 被表格软件改坏了的学号（科学计数法 / 百分比 / 多一个撇号）不静默收下，
+        # 见 `STUDENT_NO_PATTERN`。与年级/班级那一条同一层：只能改文件重导，所以它是一条
+        # **错误**，不是一条要人拍板的冲突。空值不报——那是上面那句「缺少学号」的事。
+        if row.get("student_no") and not STUDENT_NO_PATTERN.match(row["student_no"]):
+            errors.append(f"{STUDENT_NO_INPUT_HINT}，当前是「{row['student_no']}」")
         if row.get("student_no") in seen:
             errors.append("文件内重复学号")
         seen.add(row.get("student_no", ""))

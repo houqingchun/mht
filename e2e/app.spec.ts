@@ -835,6 +835,59 @@ test.describe('已接通的后端数据', () => {
     await expect(rows.last()).toContainText('未测评');
   });
 
+  /**
+   * 未建档的学生也要有一个入口（2026-09-20，用户报的那件事的第二半）。
+   *
+   * 用户的原话：「其中张三学生定位为一般观察，但看到未建档，这是什么原因，
+   * 也没有途径来查看此学生的过往测评信息」。第二问成立，而且缺口就在这一行上：
+   * 未建档的行此前只渲染一个不可点的 `—`。**而「未建档」是大多数学生的状态**——
+   * 全库唯一的开档触发点是重点题（第 85 / 97 题）答「是」
+   * （`assessment_service.maybe_raise_risk_events` 的 docstring 逐字写着
+   * 「Only 重点题命中写行」），关注等级本身从不建档。所以一个被评成
+   * 「需要关注」的学生照样可能没有档案，而那时心理老师看不到他考过几次。
+   *
+   * 「有没有入口」这件事只能从**像素**上验：后端一直答得出这名学生的测评记录
+   * （`care_service.student_assessment_records` 与档案无关），缺的只是可达性。
+   *
+   * 挑哪一名学生**问接口要**，不按当前这一页的第一行：名册的次序随班级与学号走，
+   * 而「第一个未建档的人」未必交过卷——那会让下面「历次表至少一行」红在一个
+   * 与被测功能无关的地方（§测试注意：行数问接口要，不写死）。
+   */
+  test('a student without a care case still has a way into their records', async ({ page }) => {
+    const login = await page.request.post('/api/v1/auth/login', {
+      data: { account: '13800000001', password: '123456', role: 'counselor' },
+    });
+    const headers = { Authorization: `Bearer ${(await login.json()).data.access_token}` };
+    const items = (await (await page.request.get('/api/v1/students/results', { headers })).json())
+      .data.items as {
+      student_no: string;
+      student_name: string;
+      total_level: string | null;
+      case_id: number | null;
+    }[];
+    const target = items.find((item) => item.case_id === null && item.total_level !== null);
+    if (!target) throw new Error('演示数据里没有「有等级、无档案」的学生，这一条失去了对象');
+
+    await loginAs(page, 'counselor');
+    await page.goto('/counselor/cases?tab=students');
+    // 每页放到 100：名册 31 人、默认每页 20，翻页会让这一行恰好不在第一页上，
+    // 而那看起来像「按钮没渲染」。
+    await page.getByLabel('每页条数').selectOption('100');
+    const row = page.locator('.card-body tbody tr', { hasText: target.student_no }).first();
+    await expect(row).toBeVisible();
+    // `case_id` 为空在界面上的可见形态就是这一格（不是空白、也不是某个状态码）。
+    await expect(row).toContainText('未建档');
+
+    await row.getByRole('button', { name: '查看测评记录' }).click();
+
+    await expect(page).toHaveURL(/\/counselor\/students\/\d+\/records/);
+    // 落到的**是这一名学生**的页面，不是一个刚好打开的页面。
+    await expect(page.locator('h1')).toContainText(target.student_name);
+    await expect(page.getByText('该生尚未建档（重点题未命中）')).toBeVisible();
+    // 先证明有东西可看：他至少有一场已交卷的测评（接口那一条同款判据保证的）。
+    await expect(page.locator('tbody tr').first()).toBeVisible();
+  });
+
   test('student sees their completion history', async ({ page }) => {
     await loginAs(page, 'student');
     await page.goto('/student/history');
@@ -1859,6 +1912,51 @@ test.describe('布局完整性', () => {
     expect(style.parentClass).toContain('search-box');
   });
 
+  /**
+   * 数据中心「MHT测评记录导入」里那个「关联测评任务」下拉框的字体（2026-09-20 补，
+   * 随用户报的「MHT测评记录导入显示很拥挤」一起）。
+   *
+   * **`.select` 的基础规则里没有 `font`。** 全站只有 `button, input { font: inherit }`
+   * （`styles.css:757`，`select` 不在那一条里），而 `.select` 自己也没带——于是这个
+   * 下拉框是浏览器默认的 **13.33px Arial**，紧挨着它的「批次名称」是 **16px Inter**，
+   * 同一行里看起来像有一格没上样式（并排量出来的，不是估的）。
+   *
+   * 判据取的是「它属于全站那一套」而不是「它刚好是 16px」——与上面那条筛选框同一条
+   * 理由：写字面量会在下一次调尺寸时无故变红。所以断言的是**与同一行里的输入框相等**。
+   *
+   * **为什么只断字体、不断宽度**（这是本次刻意留下的半条，理由量过）：`<select>` 的
+   * min-content 是它最宽的那个 `<option>`（这里的选项是任务名，演示库里最长的一条
+   * 565px），四格一行的版本里那一格只有 360px、下拉框自己量出 **631px** 溢到隔壁，
+   * 所以「宽度 ≤ 格子」当时是有活条件的。改成「关联测评任务」独占整行（格宽 1049px）
+   * 之后那个条件**不再成立**——摘掉 `min-width: 0`、或把 `label` 的 `minmax(0, 1fr)`
+   * 退回 auto 轨道，两种变异都实测过，这条断言照样绿（CSS Grid 里 `width: 100%` 会让
+   * grid item 的 `min-width: auto` 计算成 0，撑宽的机制根本没有落点）。
+   * 恒绿的守卫比没有更糟（§18），所以宽度那半删掉，不假装它在守。
+   * 要让它重新有牙，得先把这一格排回一个比 565px 窄的列里——那是布局改动，不是改断言。
+   *
+   * 变异验证：摘掉 `.batch-fields select` 的 `font: inherit` → 红（报「下拉框拿的是浏览器
+   * 默认字体，没跟全站走」）。
+   */
+  test('数据中心的下拉框与同一行的输入框同字体', async ({ page }) => {
+    await loginAs(page, 'counselor');
+    await page.goto('/counselor/data');
+    await expect(page.getByRole('heading', { name: 'MHT测评记录导入' })).toBeVisible();
+
+    const measured = await page.locator('.field-task select').evaluate((sel) => {
+      const input = sel.closest('.batch-fields')!.querySelector('input[type=text]')!;
+      const cs = getComputedStyle(sel);
+      const ci = getComputedStyle(input);
+      return {
+        selectFont: `${cs.fontSize} ${cs.fontFamily}`,
+        inputFont: `${ci.fontSize} ${ci.fontFamily}`,
+      };
+    });
+
+    expect(measured.selectFont, '下拉框拿的是浏览器默认字体，没跟全站走').toBe(
+      measured.inputFont,
+    );
+  });
+
   test('sidebar is a fixed vertical rail on desktop', async ({ page }) => {
     await loginAs(page, 'counselor');
     const sidebar = page.locator('.sidebar');
@@ -2425,6 +2523,40 @@ test.describe('失败与竞态不留下旧数据', () => {
     await expect(page.locator('.toast', { hasText: '导入预览失败' })).toBeVisible();
     await expect(card.getByText('待确认 1')).toHaveCount(0);
     await expect(card.getByRole('button', { name: '确认导入' })).toHaveCount(0);
+  });
+
+  test('服务端回的是一段纯文本时，屏幕上说的是人话而不是浏览器的原话', async ({ page }) => {
+    // 上一条桩的是**统一封装**（JSON 的 500），这一条桩的是另一支：服务端崩在一个没有
+    // 被 `AppError` 收住的异常上，Starlette 的兜底处理器回的是**纯文本**
+    // `Internal Server Error`（`content-type: text/plain`）。这正是用户 2026-09-20 报的
+    // 那一个——一份 GBK 编码的 CSV 让后端的解码抛在 `AppError` 之外，而屏幕上的原话是
+    // `JSON.parse: unexpected character at line 1 column 1 of the JSON data`，
+    // 它一个字都没提到编码。
+    await loginAs(page, 'admin');
+    await page.goto('/admin/organization');
+
+    const card = page
+      .locator('.card')
+      .filter({ has: page.getByRole('heading', { name: '学生导入' }) });
+    await expect(card).toBeVisible();
+
+    await page.route(
+      (url) => url.pathname === '/api/v1/student-roster/import/preview',
+      (route) =>
+        route.fulfill({ status: 500, contentType: 'text/plain', body: 'Internal Server Error' })
+    );
+    await card.locator('input[type=file]').setInputFiles({
+      name: 'e2e-纯文本.csv',
+      mimeType: 'text/csv',
+      buffer: Buffer.from('student_no,name,grade,class_name\nS002,e2e预演2,初二,801\n', 'utf-8'),
+    });
+
+    // 说得出话，而且**带上了状态码**：前端拿不到 HTTP 状态码（§2 的既有约定），
+    // 这一支里它是唯一能给出的线索，所以它只能出现在这句话里。
+    await expect(page.locator('.toast', { hasText: 'HTTP 500' })).toBeVisible();
+    // 而浏览器那句原话不许出现在屏幕上——它就是用户报的那一句，也是**唯一**会被
+    // 误当成「文件格式不对」的一句话。
+    await expect(page.locator('.toast', { hasText: 'JSON.parse' })).toHaveCount(0);
   });
 
   test('换一个版本读失败时，标题栏不留着上一个版本的规则号', async ({ page }) => {
