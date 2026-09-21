@@ -922,6 +922,98 @@ def test_the_base_python_must_be_311_x64():
     assert "$code -eq 2" in body, "没有把「是 32 位的」单独报出来——它与「没装」的处置不一样"
 
 
+def test_an_arm64_python_is_diagnosed_instead_of_chased_in_a_circle():
+    """ARM 的 Windows 上要挡的是 **ARM64 那一份解释器**，不是「ARM 机器」。
+
+    这个包在 ARM 上照样能用——装 python.org 的 **Windows installer (64-bit)**，Windows
+    自带 x64 模拟，性能损失通常一成以内。挡不住的是操作员装成 ARM64 那一份：31 个 wheel
+    里 `cryptography` / `httptools` / `PyYAML` 上游压根没发 win_arm64，而 `cryptography`
+    不是可选项（MySQL 8 的 `caching_sha2_password` 缓存一命中不到就要它），所以这不是
+    换个包能解决的事。
+
+    两件事缺一件，都会造出一个**没有出路的死循环**：
+
+    · **候选表里要有 ARM64 那一份**——列进去才会被跑到、才会拿到那句诊断。漏掉它，
+      一台只装了 ARM64 版 Python 的机器读到的是「找不到可用的 Python 3.11」，而那个
+      人明明装了：他唯一能做的推理是「再装一遍」，装回来还是同一个 ARM64 版。
+    · **判据是 `sysconfig.get_platform()`，不是 `platform.machine()`**——后者在 Windows
+      上返回 `PROCESSOR_ARCHITEW6432 or PROCESSOR_ARCHITECTURE`，**模拟层下报的是原生
+      架构**（CPython 那两行上面的原话是 `# WOW64 processes mask the native
+      architecture`）。于是 ARM 上那个 x64 解释器被它报成 `ARM64`：提示「请装 x64 版」
+      → 他装的本来就是 x64 版 → 重跑还是同一句。而那恰好是这条判据唯一要拦的机器。
+
+    两个脚本各有一份判据（`install.ps1` 给一键安装，`manual-start.ps1` 给那条手工出路），
+    所以两处都断——它们的探针形状还不一样（一个是一段 here-string，一个是 `-c` 一行）。
+    """
+    resolve = code_only(function_body(install_text(), "Resolve-BasePython"))
+    candidates = code_only(function_body(install_text(), "Get-PythonCandidates"))
+
+    # 判据：pip 拼平台标签读的就是这个字符串，所以「过了这一条」==「pip 收得下这批 wheel」。
+    assert "sysconfig.get_platform() != 'win-amd64'" in resolve, (
+        "Resolve-BasePython 的探测脚本没有判平台标签——ARM64 那一份会被当成能用的"
+    )
+    assert "platform.machine" not in resolve, (
+        "判据换回了 platform.machine()：它在 ARM Windows 上会把 x64 解释器报成 ARM64，"
+        "而那句提示（去装 x64 版）正是那台机器已经在做的事——一个没有出路的死循环"
+    )
+    assert "raise SystemExit(4)" in resolve and "$code -eq 4" in resolve, (
+        "「平台不对」没有自己的退出码（4）与分支——它会与「不是 3.11」「32 位」共用一句诊断"
+    )
+
+    # 候选：x64 那一份要排在 ARM64 那一份**前面**（两种都装了的机器必须挑中 x64）。
+    assert "'Python311\\python.exe'" in candidates, "x64 那份的路径候选不见了"
+    assert "'Python311-arm64\\python.exe'" in candidates, (
+        "ARM64 那一份没列进候选——它连被跑到都不会，操作员拿到的是「没找到 Python 3.11」"
+    )
+    assert candidates.index("'Python311\\python.exe'") < \
+        candidates.index("'Python311-arm64\\python.exe'"), (
+        "ARM64 那份排在了 x64 前面——两种都装了的机器会先撞上被拒的那一份"
+    )
+    assert "3.11-arm64\\InstallPath" in candidates, (
+        "PEP 514 那条注册表候选里没有 ARM64（python.org 把它注册在 3.11-arm64）"
+    )
+
+    # 那句诊断只在**真撞上过** ARM64 时才说。它对一台 32 位机器是一句误导：那台机器照着
+    # 去装一个 x64 版会装不上，于是卡在一个与真正原因无关的地方。
+    assert "if ($sawArm64)" in resolve, "ARM64 那段指路的话没有按「撞上过没有」分岔"
+    assert "Windows installer (64-bit)" in resolve, "那段话里没说出该装哪一个"
+    # 严格模式：`$sawArm64` 要在循环之前赋初值，否则「一个候选都没撞上 ARM64」的那台机器
+    # 读它时当场抛异常（`Set-StrictMode -Version Latest` 下读未赋值变量就是这个下场）。
+    assert resolve.index("$sawArm64 = $false") < resolve.index("$sawArm64 = $true"), (
+        "$sawArm64 没有在循环之前赋初值——严格模式下读一个没赋值过的变量当场抛"
+    )
+
+    manual = MANUAL_SCRIPT.read_text(encoding="utf-8-sig")
+    probe = code_only(function_body(manual, "Test-BasePython"))
+    manual_resolve = code_only(function_body(manual, "Resolve-BasePython"))
+    init_body = code_only(function_body(manual, "Initialize-Runtime"))
+
+    assert "sysconfig.get_platform()" in probe, (
+        "manual-start.ps1 的 Test-BasePython 没有判平台标签"
+    )
+    assert "platform.machine" not in probe, "manual-start.ps1 换回了 platform.machine()"
+    assert re.search(r"\^3\\\.11 64 win-arm", probe), (
+        "manual-start.ps1 认不出 ARM64 那一档——那条手工出路上只会说「没找到 Python 3.11」"
+    )
+    assert "Python311-arm64" in manual_resolve, "manual-start.ps1 的候选表里没有 ARM64 那一份"
+    assert "Windows installer (64-bit)" in init_body, (
+        "manual-start.ps1 那句诊断里没说出该装哪一个"
+    )
+    # **严格模式的次序**。`$script:SawArm64Python` 的初值在 `Resolve-BasePython` 里赋，
+    # 而 `Initialize-Runtime` 是读它的那一处，所以那个调用必须排在读之前。删掉初值那一行
+    # **不会在 ARM 机器上出事**（`Test-BasePython` 会写它），只会在**别的**机器上抛异常
+    # ——也就是在九成九的机器上抛。
+    assert manual_resolve.index("$script:SawArm64Python = $false") < \
+        manual_resolve.index("Test-BasePython -Exe"), (
+        "$script:SawArm64Python 的初值排在了跑候选之后"
+    )
+    assert init_body.index("Resolve-BasePython") < \
+        init_body.index("$script:SawArm64Python"), (
+        "Initialize-Runtime 先读了 $script:SawArm64Python 才去解析解释器——"
+        "没撞上 ARM64 的那台机器会因为严格模式在这里抛异常"
+    )
+
+
 def test_the_store_python_stub_is_rejected_before_it_runs():
     """应用商店那个别名要**在执行之前**排掉，不是跑完了再看结果。
 

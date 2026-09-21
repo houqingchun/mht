@@ -496,6 +496,20 @@ function Get-PythonCandidates {
 
       **刻意不读 `WOW6432Node`**：那是 32 位注册表视图，里面的解释器一定是 32 位的。
 
+      ---------------------------------------------------------------------
+      ARM64 那一份也列进来，与 32 位那一份**同一个理由**
+      ---------------------------------------------------------------------
+      列进来才会被跑到、才会拿到「这是 ARM64 版的 Python」那句诊断。漏掉它的话，一台
+      只装了 ARM64 版 Python 的机器会得到「这台机器上大概从没装过 Python」——而那个人
+      明明装了，于是他唯一能做的推理是「再装一遍」，装回来还是同一个 ARM64 版。
+
+      python.org 的 ARM64 安装器把解释器放在 `Python311-arm64\`（x64 那份是
+      `Python311\`），并注册在 PEP 514 的 **`3.11-arm64`** 标签下（x64 那份是 `3.11`），
+      所以注册表与常见路径两处都要列。
+
+      它排在 x64 之后，而 `Resolve-BasePython` 对它**不中断**、只在 `$rejected` 里记一笔
+      就继续找下一个——所以一台同时装了两种的机器照样会挑中 x64 那份。
+
       **刻意不用 `py -0p` 去枚举**（它列的其实就是同一批 PEP 514 注册项）：那要解析原生
       工具的输出，而那个输出里可能带着用户名（`C:\Users\张三\...`），于是要么按控制台
       代码页解（英文版 Windows 上 cp1252 解 GBK 字节得到乱码）要么按 UTF-8 解（反方向
@@ -510,7 +524,9 @@ function Get-PythonCandidates {
 
     # 1. 注册表（PEP 514）。**机器级（HKLM）排在用户级（HKCU）前面。**
     foreach ($key in @('HKLM:\SOFTWARE\Python\PythonCore\3.11\InstallPath',
-                       'HKCU:\SOFTWARE\Python\PythonCore\3.11\InstallPath')) {
+                       'HKCU:\SOFTWARE\Python\PythonCore\3.11\InstallPath',
+                       'HKLM:\SOFTWARE\Python\PythonCore\3.11-arm64\InstallPath',
+                       'HKCU:\SOFTWARE\Python\PythonCore\3.11-arm64\InstallPath')) {
         foreach ($name in @('ExecutablePath', '')) {
             try {
                 $value = (Get-ItemProperty -LiteralPath $key -Name $name -ErrorAction Stop).$name
@@ -524,6 +540,8 @@ function Get-PythonCandidates {
     # 2. 机器级的常见安装位置
     if ($env:ProgramFiles) {
         Add-Candidate (Join-Path $env:ProgramFiles 'Python311\python.exe')
+        # **ARM64 那一份也列进来，与下面 32 位那一份同一个理由**（见 docstring）。
+        Add-Candidate (Join-Path $env:ProgramFiles 'Python311-arm64\python.exe')
     }
     # **32 位那一份也列进来，是有意的**：列进来才会被跑到、才会拿到「这是 32 位的」那句
     # 诊断。漏掉它的话一台只装了 32 位 3.11 的机器会得到「没找到 Python 3.11」——
@@ -535,6 +553,7 @@ function Get-PythonCandidates {
     # 3. 当前用户的常见安装位置（python.org 安装器默认就是「Install for me only」）
     if ($env:LOCALAPPDATA) {
         Add-Candidate (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python311\python.exe')
+        Add-Candidate (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python311-arm64\python.exe')
         # 应用商店那一份：会被 `Resolve-BasePython` 在**执行之前**按 `WindowsApps` 排掉。
         Add-Candidate (Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\python.exe')
     }
@@ -566,7 +585,7 @@ function Resolve-BasePython {
       docstring 里已经记着这条教训。判据全部走**退出码**，一个字符都不解析。
 
       ---------------------------------------------------------------------
-      ★ 探测脚本的输出必须是**纯 ASCII**（而且这里干脆不输出）
+      ★ 探测脚本的输出必须是**纯 ASCII**（而且只有一行：版本号 + 平台串）
       ---------------------------------------------------------------------
       这一步跑的是**基础 Python**，而 `sitecustomize.py` 是第 2 步装进 venv 的、此刻
       还不存在。于是它的 stdout 按 locale 编码写字节（英文版 Windows 上 cp1252），
@@ -581,18 +600,63 @@ function Resolve-BasePython {
       退出码的含义（下面 switch 里逐条对应一句中文）
       ---------------------------------------------------------------------
         0 = 就是它      1 = 不是 3.11      2 = 32 位
-        3 = 没有 venv / ensurepip（精简版）    其它 = 探针没跑起来
+        3 = 没有 venv / ensurepip（精简版）    4 = 不是 win-amd64 平台
+        其它 = 探针没跑起来
+
+      ---------------------------------------------------------------------
+      ★ 为什么要有 4：ARM Windows 上跑 x64 版 Python 是被支持的
+      ---------------------------------------------------------------------
+      这条路要的从来不是「x64 电脑」，是「x64 解释器」。ARM Windows 自带 x64 模拟，
+      装一个 python.org 的 **Windows installer (64-bit)** 就能把这套装上（性能损失
+      通常在一成以内，而这是唯一一条走得通的路——包里那些二进制 wheel 没有一份
+      win_arm64：`cryptography` 上游从 46.0.3 之后就不再发 Windows ARM64，
+      `httptools` 与 `PyYAML` 从来没发过，而前两个里 `cryptography` 不是可选项，
+      MySQL 8 的 `caching_sha2_password` 要靠它）。
+
+      所以这一条判据**不拦人，只把人指对方向**。没有它的话，一台装了 ARM64 版
+      Python 的机器三个判据全过，然后在第 4 步 `pip install` 上炸在一句英文的
+      「not a supported wheel on this platform」里——离真正的原因隔着两步。
+
+      ---------------------------------------------------------------------
+      ★★ 判据是 `sysconfig.get_platform()`，**不是** `platform.machine()`
+      ---------------------------------------------------------------------
+      前者取自 `sys.version` 里编译时烤进去的那个架构串（x64 版是
+      `[MSC v.1938 64 bit (AMD64)]`），**不经任何环境变量**；而且**它就是 pip 拼平台
+      标签时读的同一个字符串**，所以「这一条过了」与「pip 收得下那些 wheel」是同一件
+      事，不是两件相似的事。
+
+      后者是个陷阱，**别换回去**：`platform.machine()` 在 Windows 上返回的是
+      `PROCESSOR_ARCHITEW6432 or PROCESSOR_ARCHITECTURE`（`platform.py` 的
+      `_get_machine_win32()`），而那两行上面的注释写着
+      `# WOW64 processes mask the native architecture`——**模拟层下它优先报的是原生
+      架构**。于是 ARM Windows 上跑的那个 x64 解释器会被报成 `ARM64`：我们正要把这个
+      解释器挑出来用，却被判成「ARM64 版，请去装 x64 版」，而用户装的本来就是 x64 版，
+      他照做、重跑，还是这一句。**一个没有出路的死循环，比不做这条判据更糟。**
+      （这一版第一稿就是那么写的，核 `platform.py` 源码时才看出来。）
     #>
     $probe = @'
 import sys
+import sysconfig
 
-# 只有 ASCII，而且只有一行。理由见 Resolve-BasePython 的 docstring。
-print(sys.version.split()[0])
+# 只输出一行，而且只有 ASCII。理由见 Resolve-BasePython 的 docstring。
+print(sys.version.split()[0], sysconfig.get_platform())
 
 if sys.version_info[:2] != (3, 11):
     raise SystemExit(1)
 if sys.maxsize <= 2 ** 32:
     raise SystemExit(2)
+# 这个解释器吃不吃 `win_amd64` 的 wheel。判据与 pip 是**同一个字符串**：pip 拼平台标签
+# 读的就是 `sysconfig.get_platform()`，而它取自 `sys.version` 里编译时烤进去的架构
+# （x64 版是 `[MSC v.1938 64 bit (AMD64)]`），**不经任何环境变量**。
+#
+# ★ 不要换成 `platform.machine()`，那是个陷阱。它在 Windows 上返回的是
+# `PROCESSOR_ARCHITEW6432 or PROCESSOR_ARCHITECTURE`，而 CPython 源码里那两行上面的
+# 注释写着 `# WOW64 processes mask the native architecture`——**模拟层下它优先报的是
+# 原生架构**。于是 ARM Windows 上那个 x64 解释器会被它报成 `ARM64`，正好把这条路上
+# 唯一能用的那一个排除掉；用户装的本来就是 x64 版，他照提示重装一遍还是同一句。
+# 理由见 Resolve-BasePython 的 docstring。
+if sysconfig.get_platform() != 'win-amd64':
+    raise SystemExit(4)
 try:
     import venv
     import ensurepip
@@ -607,6 +671,10 @@ raise SystemExit(0)
     Write-Log '在这台电脑上找 Python 3.11（64 位）'
     $rejected = [System.Collections.Generic.List[string]]::new()
     $seen = @{}
+    # 有没有撞上过 ARM64 那一档。只影响最后那段文案里多不多一段指路的话——
+    # 一台 32 位的机器不需要看 ARM64 那几行。**必须先赋初值**：
+    # `Set-StrictMode -Version Latest` 下读一个没赋值过的变量会当场抛异常。
+    $sawArm64 = $false
 
     foreach ($candidate in @(Get-PythonCandidates)) {
         $full = ''
@@ -654,6 +722,9 @@ raise SystemExit(0)
             $rejected.Add($full + ' —— 是 3.11，但是 32 位的（要 64 位）')
         } elseif ($code -eq 3) {
             $rejected.Add($full + ' —— 里面没有 venv / ensurepip（精简版或被裁剪过的）')
+        } elseif ($code -eq 4) {
+            $sawArm64 = $true
+            $rejected.Add($full + ' —— 是 ARM64 版的 Python（包里那些 wheel 是 x64 的）')
         } else {
             $rejected.Add($full + " —— 探测脚本没跑起来（退出码 $code）")
         }
@@ -668,18 +739,30 @@ raise SystemExit(0)
         } else {
             foreach ($item in $rejected) { Write-Log ('  · ' + $item) 'ERROR' }
         }
-        Stop-WithError (@(
-            '这台电脑上找不到可用的 Python 3.11（64 位），装不下去。',
-            '',
-            '请到 python.org 下载 Python 3.11 的 Windows installer (64-bit) 装上，',
-            '安装时勾上「Add python.exe to PATH」，然后重跑一次「一键安装.bat」。',
-            '',
-            '为什么必须是 3.11：包里的依赖是按 3.11 编译的（31 个 wheel 里有 9 个是',
-            'cp311-cp311-win_amd64，不含 abi3），换别的版本装不上。',
-            '为什么必须是 64 位：32 位解释器加载不了这些 64 位的扩展模块。',
-            '',
-            '上面这几行把找过的每个位置和它被拒的原因都列出来了，对照着看。'
-        ) -join [Environment]::NewLine)
+        # **按实际撞上过哪一档分岔**：ARM64 那一段只对装了 ARM64 版 Python 的机器说。
+        # 一台 32 位的机器读到的「请装 x64 版」与它无关——而这句话正好与它该做的那件
+        # 事长得一样，所以不分岔的话它反而会照着去做（装一个 x64 版到一个 32 位系统
+        # 上，那装不上，于是它卡在一个与真正原因无关的地方）。
+        $lines = [System.Collections.Generic.List[string]]::new()
+        $lines.Add('这台电脑上找不到可用的 Python 3.11（64 位），装不下去。')
+        $lines.Add('')
+        $lines.Add('请到 python.org 下载 Python 3.11 的 Windows installer (64-bit) 装上，')
+        $lines.Add('安装时勾上「Add python.exe to PATH」，然后重跑一次「一键安装.bat」。')
+        $lines.Add('')
+        $lines.Add('为什么必须是 3.11：包里的依赖是按 3.11 编译的（31 个 wheel 里有 9 个是')
+        $lines.Add('cp311-cp311-win_amd64，不含 abi3），换别的版本装不上。')
+        $lines.Add('为什么必须是 64 位：32 位解释器加载不了这些 64 位的扩展模块。')
+        if ($sawArm64) {
+            $lines.Add('')
+            $lines.Add('★ 上面有一份是 ARM64 版的 Python，这次的失败与它有关。')
+            $lines.Add('  包里那些二进制 wheel 没有一份是给 ARM64 的（上游就没发），所以要')
+            $lines.Add('  装的**不是**「ARM64 版」，而是上面说的 Windows installer (64-bit)。')
+            $lines.Add('  这台电脑如果是 ARM 的，那一条照样装得上：Windows 自带 x64 模拟。')
+            $lines.Add('  两个版本可以并存，装完重跑一次，这里会挑中 x64 的那一份。')
+        }
+        $lines.Add('')
+        $lines.Add('上面这几行把找过的每个位置和它被拒的原因都列出来了，对照着看。')
+        Stop-WithError ($lines -join [Environment]::NewLine)
     }
 
     # --- 局域网那条路的额外风险提示（**只警告，不拦**）---

@@ -1258,6 +1258,39 @@ lan 走 `Start-ScheduledTask`）去掉了 `-WindowStyle Hidden`，并在收尾�
    **探测脚本只输出 ASCII**：它跑的是 base python，此时 `sitecustomize.py` 还不存在，
    中文会按 locale 写字节，而 `Invoke-Python` 按 UTF-8 读回来 → `C:\Users\张三\` 变成
    不可逆的 U+FFFD。中文提示与路径一律留在 PowerShell 侧（`Write-Log` 是 UTF-8 落盘的）。
+   **ARM 的电脑（2026-09-20）：包不换，只补一条架构自检。** 用户问「当前的 window 包
+   适用于 arm 架构下的 window 吗」。31 个 wheel 里有 3 个上游**没有** `win_arm64` 构建
+   （`cryptography==50.0.1`、`httptools==0.8.0`、`PyYAML==6.0.3`），而 `cryptography`
+   不可省——正是下面第 4 条那件事。所以**原生 ARM64 包造不出来**，出路是反过来的：
+   在 ARM Windows 上装 python.org 的 **Windows installer (64-bit)**，Windows 自带 x64
+   模拟（WOW64），包里那些 `cp311-cp311-win_amd64` 照装照跑。于是改动只剩一处诊断
+   ——探到 ARM64 解释器时给一句中文指路，而不是让它一路走到 `pip install` 再报一句
+   关于 wheel 的英文。
+
+   **判据是 `sysconfig.get_platform() != 'win-amd64'`，不是 `platform.machine()`。**
+   两者在 Windows 上会给出**相反**的答案，而错的那个看起来完全合理：
+   `get_platform()` 读的是 `sys.version` 里**编译时**烙进去的架构串（x64 那份是
+   `(AMD64)`、ARM64 那份是 `(ARM64)`），落在 `TARGET_TO_PLAT` 上，**从不看运行时的
+   宿主**；而 `platform.machine()` 回的是 `PROCESSOR_ARCHITEW6432 or
+   PROCESSOR_ARCHITECTURE`——它自己的源码注释就写着「WOW64 进程会把真实架构盖住」，
+   于是一份**能用**的 x64 解释器跑在 ARM 机器上会被判成 ARM64，正好把这条判据要放行的
+   那一种拦下来。顺带一句：**这个字符串与 pip 拼平台标签用的是同一个**，所以「这条判据
+   过了」与「pip 吃得下这些 wheel」是同一件事。
+
+   候选表**把 ARM64 那一份也列进去**，但只为了**够得着、然后拒掉**——与 32 位那份
+   同一个理由。python.org 的 ARM64 版装到 `Program Files\Python311-arm64\`、PEP 514
+   标签是 `3.11-arm64`（x64 是 `Python311\` / `3.11`），而 `py -3.11` 的标签**前缀
+   匹配**会挑中它。列进去的收益是操作员拿到「你装的是 ARM64 版，去装 (64-bit)」，
+   而不是「这台电脑上找不到 Python 3.11」——后者让他唯一的推理是「再装一遍」，
+   而他已经装过一遍了。探针多一个退出码 `4 = 不是 win-amd64 平台`；
+   `$sawArm64` / `$script:SawArm64Python` 必须在候选循环**之前**初始化
+   （`Set-StrictMode -Version Latest` 读一个没赋过值的变量会抛），两个脚本各一份。
+   守卫是 `test_windows_assets.py::test_an_arm64_python_is_diagnosed_instead_of_chased_in_a_circle`
+   （6 条变异全部变红）。
+
+   **残余风险，如实记**：ARM64 那份若任何一个候选路径都够不着（装在别处、又不在 PATH、
+   `py` 也没注册它），探针就不会跑，`$sawArm64` 留在 `$false`，操作员拿到的是通用文案、
+   没有 ARM64 那一句。**这条诊断发不发得出来，取决于候选表全不全。**
 2. **次序不能换：`venv → pip install → sitecustomize`。** `--clear` 会清空
    `Lib\site-packages`，编码钩子排在前面会被下一次重建**静默**抹掉。
    `pip install` 的开关各有理由（`--no-index --find-links` 不碰网络、`--no-deps` 与下载

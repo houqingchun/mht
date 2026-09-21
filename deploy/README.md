@@ -24,6 +24,35 @@ CPython 3.11 64 位——3.12 装不上，32 位也加载不了那些扩展模�
 看退出码），而不是读 `(Get-Item $exe).VersionInfo`——那个报的是 exe 自己的版本资源，
 对应用商店的别名、对别的软件带进来的那份都不作数。
 
+### 「x64」那一半管的是 ARM：没有它，ARM 机器会走进死循环（2026-09-20）
+
+**这个包在 ARM 的 Windows 上照样能用**，前提是装 python.org 的 **Windows installer
+(64-bit)** ——Windows 自带 x64 模拟，性能损失通常一成以内。所以要挡的不是「ARM 机器」，
+是**ARM64 那份解释器**。
+
+python.org 的 ARM64 安装器把解释器放在 `Python311-arm64\`，注册在 PEP 514 的
+`3.11-arm64` 标签下（x64 那份是 `Python311\` / `3.11`）。这两处都列进候选表了——
+**只为让它被跑到、然后被拒掉**，好让操作员拿到一句「你装的是 ARM64 版，去装 (64-bit)」，
+而不是「这台电脑上没找到 Python 3.11」（他明明装了，于是唯一能做的推理是「再装一遍」）。
+这与 32 位那一项被列进来是同一条理由。
+
+**判据是 `sysconfig.get_platform() != 'win-amd64'`，不是 `platform.machine()`。**
+后者在 Windows 上返回 `PROCESSOR_ARCHITEW6432` 优先于 `PROCESSOR_ARCHITECTURE`，
+而前者的含义就是「模拟层下面那个原生架构」（CPython `platform.py` 那两行上面写着
+`# WOW64 processes mask the native architecture`）。于是 ARM Windows 上那个 **x64**
+解释器会被报成 `ARM64`：提示他「请装 x64 版」→ 他装的本来就是 x64 版 → 重跑还是这一句。
+**一个没有出路的死循环，比不做这条判据更糟。** `sysconfig.get_platform()` 读的是编译时
+烤进 `sys.version` 的架构串，不经任何环境变量，而且**它就是 pip 拼平台标签时读的同一个
+字符串**——所以「这一条过了」与「pip 收得下那些 wheel」是同一件事。
+
+**为什么不干脆发一个 win_arm64 的包：上游不发。** 实测（逐包问 PyPI）31 个 wheel 里
+有 3 个没有 win_arm64 版本——`cryptography`、`httptools`、`PyYAML`。其余 28 个都有。
+而 `cryptography` **不是可选项**：MySQL 8 默认 `caching_sha2_password`，服务端内存缓存
+未命中时走 `sha2_rsa_encrypt`，`pymysql/_auth.py` 在那条路上直接
+`raise RuntimeError("'cryptography' package is required …")`，而 MySQL 一重启缓存就空。
+要发原生 ARM64 包就得降这个安全库的版本、去掉 `httptools`、再维护第二套按平台的依赖表，
+而且**开发机验不了**（本机是 macOS）。不值得。
+
 **venv 的 `pyvenv.cfg` 里 `home` 是写死的绝对路径。** 所以选中的那个 Python 一旦被
 更新、卸载（学校统一升 3.12 顺手卸旧的），或者装的是用户级而那个账号被删，服务就再也
 起不来——而日志里只有一句 `pyvenv.cfg` 相关的英文，没人会联想到「有人动过 Python」。
@@ -825,6 +854,12 @@ ERROR 安装没有完成：在此对象上找不到属性"Count"。请确认该�
 0c. `查看状态.bat` 的输出里应当有一行「这套系统依赖的 Python：`C:\…`（还在）」。
     手工把它报的那个 Python 改名（或卸掉）再跑一次 —— 那一行要变成「**不在了**」
     并给出处置。**这是唯一能在故障发生之前看见它的地方。**
+0d. 一台 **ARM 的** Windows（先只装 ARM64 版 Python 3.11）：被挡下，而且那句中文要说得出
+    「去装 (64-bit) 那个版本」，不是「没找到 Python 3.11」；然后按它说的装上 x64 版
+    **重跑一遍，这一档必须消失**——那一半同时证明了 `sysconfig.get_platform()` 没把 x64
+    解释器误报成 ARM64（就是上面「x64 那一半管的是 ARM」那一节里那个死循环）。
+    **这一条只有 ARM 真机能验**：开发机与 x86 机器都构造不出「模拟层下面那个原生架构」
+    这个形状。
 
 ### 两条都走
 

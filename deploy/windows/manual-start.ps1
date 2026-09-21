@@ -269,14 +269,25 @@ function Test-BasePython {
     <#
       **真跑一次**去验，不回读版本资源：应用商店的别名、别的软件带进来的那一份，报出来
       的版本号都不作数（`install.ps1` 的 `Resolve-BasePython` 里有同一段推理）。
-      三条判据：恰好 3.11、64 位、`venv` 与 `ensurepip` 能 import。
+      四条判据：恰好 3.11、64 位、平台标签正好是 `win-amd64`、`venv` 与 `ensurepip`
+      能 import。
 
       探针只输出 ASCII：此刻 `sitecustomize.py` 还不存在，中文会按 locale 写字节。
+
+      ---------------------------------------------------------------------
+      ★ 平台那一条用 `sysconfig.get_platform()`，**不是** `platform.machine()`
+      ---------------------------------------------------------------------
+      它取自 `sys.version` 里编译时烤进去的架构串（x64 版是 `[MSC v.1938 64 bit
+      (AMD64)]`），不经任何环境变量；而且它就是 pip 拼平台标签时读的同一个字符串。
+      而 `platform.machine()` 在 Windows 上返回的是 `PROCESSOR_ARCHITEW6432 or
+      PROCESSOR_ARCHITECTURE`，**模拟层下优先报原生架构**——ARM Windows 上那个 x64
+      解释器会被它报成 `ARM64`，于是这条路上唯一能用的那一个被自己排除掉。
+      完整那一段写在 `install.ps1` 的 `Resolve-BasePython` docstring 里。
     #>
     param([string]$Exe)
 
     if (-not (Test-Path -LiteralPath $Exe)) { return $false }
-    $probe = 'import struct,sys,venv,ensurepip;print("%d.%d %d" % (sys.version_info[0], sys.version_info[1], struct.calcsize("P") * 8))'
+    $probe = 'import struct,sys,sysconfig,venv,ensurepip;print("%d.%d %d %s" % (sys.version_info[0], sys.version_info[1], struct.calcsize("P") * 8, sysconfig.get_platform()))'
     try {
         $output = & $Exe -c $probe 2>$null
     } catch {
@@ -284,13 +295,41 @@ function Test-BasePython {
     }
     if ($LASTEXITCODE -ne 0) { return $false }
     if (-not $output) { return $false }
-    return (([string]($output | Select-Object -First 1)).Trim() -eq '3.11 64')
+    $line = ([string]($output | Select-Object -First 1)).Trim()
+    if ($line -eq '3.11 64 win-amd64') { return $true }
+    # ARM64 那一份：版本、位数、venv 三样全对，只有平台标签不对。记一笔给调用方，
+    # 让最后那句「没找到 Python 3.11」能说清是为什么（它这一支**不中断**，继续找下一个）。
+    if ($line -match '^3\.11 64 win-arm') { $script:SawArm64Python = $true }
+    return $false
 }
 
 function Resolve-BasePython {
+    <#
+      挑一个能用的基础解释器，挑不到回 `''`。
+
+      **机器级排在用户级前面**：venv 的 `pyvenv.cfg` 里写的是**绝对路径**，而局域网那条路
+      的服务是以 SYSTEM 身份跑的——挂在某个人的目录下的解释器被更新/卸载之后，服务就再也
+      起不来（CLAUDE.md §18「运行环境是安装时现建的 venv」那一节）。
+
+      ---------------------------------------------------------------------
+      ARM64 那一份也列进来，与 32 位那一份同一个理由
+      ---------------------------------------------------------------------
+      列进来才会被跑到、才会拿到「这是 ARM64 版的 Python」那句诊断。漏掉它的话，一台只装了
+      ARM64 版 Python 的机器会得到「这台电脑上没找到 64 位的 Python 3.11」——而那个人明明
+      装了，于是他唯一能做的推理是「再装一遍」，装回来还是同一个 ARM64 版。
+
+      python.org 的 ARM64 安装器把解释器放在 `Python311-arm64\`（x64 那份是 `Python311\`），
+      所以两处都要列。它排在 x64 之后，而 `Test-BasePython` 对它**不中断**、只记一笔
+      就继续找下一个——所以一台同时装了两种的机器照样会挑中 x64 那份。
+    #>
     param()
 
     $candidates = New-Object System.Collections.Generic.List[string]
+
+    # 有没有撞上过 ARM64 那一档。只影响调用方最后那段文案里多不多一段指路的话。
+    # **必须先赋初值**：本文件开着 `Set-StrictMode -Version Latest`，读一个没赋值过的
+    # 变量会当场抛异常（`Test-BasePython` 是往里写的那个）。
+    $script:SawArm64Python = $false
 
     # `py` 是个启动器，不是解释器：让它自己挑一个 3.11，把它报出来的 `sys.executable`
     # 当候选。挑不到时它会自己报错（退出码非 0），这里就当没有这个候选。
@@ -306,13 +345,17 @@ function Resolve-BasePython {
         }
     }
 
-    # 机器级排在用户级前面：venv 的 `pyvenv.cfg` 里写的是**绝对路径**，而局域网那条路
-    # 的服务是以 SYSTEM 身份跑的——挂在某个人的目录下的解释器被更新/卸载之后，服务就
-    # 再也起不来（CLAUDE.md §18「运行环境是安装时现建的 venv」那一节）。
     $programFiles = [Environment]::GetEnvironmentVariable('ProgramFiles')
     $localAppData = [Environment]::GetEnvironmentVariable('LOCALAPPDATA')
-    if ($programFiles) { $candidates.Add((Join-Path $programFiles 'Python311\python.exe')) }
-    if ($localAppData) { $candidates.Add((Join-Path $localAppData 'Programs\Python\Python311\python.exe')) }
+    if ($programFiles) {
+        $candidates.Add((Join-Path $programFiles 'Python311\python.exe'))
+        # **ARM64 那一份也列进来**（见 docstring）。
+        $candidates.Add((Join-Path $programFiles 'Python311-arm64\python.exe'))
+    }
+    if ($localAppData) {
+        $candidates.Add((Join-Path $localAppData 'Programs\Python\Python311\python.exe'))
+        $candidates.Add((Join-Path $localAppData 'Programs\Python\Python311-arm64\python.exe'))
+    }
     $candidates.Add('C:\Python311\python.exe')
 
     foreach ($candidate in $candidates) {
@@ -346,8 +389,18 @@ function Initialize-Runtime {
     Write-Line '没有运行环境，现在建一个（这一步不联网）。' 'STEP'
     $base = Resolve-BasePython
     if (-not $base) {
-        Stop-Here '这台电脑上没找到 64 位的 Python 3.11。包里那些 wheel 有几个的文件名是 cp311-win_amd64，' +
+        # **按撞上过哪一档分岔**：ARM64 那一段只对装了 ARM64 版 Python 的机器说。32 位那一档
+        # 读到的就是上面这句（对它而言「去装 64 位版」正是该做的事，不必再多说一句）。
+        # 这一段与 `install.ps1` 的收尾文案同源，两处要一起改。
+        $message = '这台电脑上没找到 64 位的 Python 3.11。包里那些 wheel 有几个的文件名是 cp311-win_amd64，' +
             '解释器换不了——去 python.org 装一个 3.11（勾上 Add python.exe to PATH），再跑一次。'
+        if ($script:SawArm64Python) {
+            $message += [Environment]::NewLine +
+                '上面那个位置上是 ARM64 版的 Python，这次的失败与它有关：包里那些二进制 wheel 没有一份是给' +
+                'ARM64 的（上游就没发），所以要装的**不是**「ARM64 版」，而是上面说的 Windows installer (64-bit)。' +
+                '这台电脑如果是 ARM 的，那一条照样装得上：Windows 自带 x64 模拟。两个版本可以并存，装完重跑一次。'
+        }
+        Stop-Here $message
     }
     Write-Line ('用这个解释器：' + $base)
 
