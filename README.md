@@ -99,6 +99,19 @@ mysql -h 127.0.0.1 -u root -p xinliceping < sql/reset_to_baseline.sql
 `make purge-demo` 是另一件事：它只把 `seed-demo` 填的东西删掉，回到 `seed.py` 的基线
 （S001、两名种子员工、基线任务都还在），而且只在开发库上用。
 
+#### `backend/sql/` 下另外三份脚本（面向交付，不是给开发库用的）
+
+| 文件 | 做什么 | 谁用 |
+|---|---|---|
+| `schema_mysql8.sql` | 建 34 张表 | 目标机跑不了 Python、只能手工建表时 |
+| `upgrade_from_v1_0_0.sql` | 把停在 V1.0.0 的库升到当前版本 | 同上，且库是旧版 |
+| `seed_mysql8.sql` | 空库的初始化数据：量表 + 100 道题 + 评分规则 + `admin`（初始密码 `123456`），**不含任何演示数据** | 自己建了空库的人——没有数据就登录不进去 |
+
+三份都随一键安装包一起交付。后两份是**生成的**（`make db-upgrade-sql` /
+`make db-seed-sql`），别手改，改了下次重跑就没了；`seed_mysql8.sql` 生成时要连上一台
+活着的 MySQL（它 dump 的是 `seed.py` 跑完再清库之后的**结果**）。四份脚本各自的分工与
+执行方式见 `deploy/README.md`。
+
 ## 部署到 Windows（一键安装包）
 
 给**装不了 Docker** 的学校服务器（Windows + 已装 Python 3.11 + MySQL 8.0 Server），

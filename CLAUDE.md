@@ -750,18 +750,21 @@ mysql -h HOST -u USER -p DB < backend/sql/reset_to_baseline.sql
 （`DEFAULT_RULE_CONFIG`）。在 SQL 里再抄一份必然漂移，而一份抄错的规则 JSON 会让那个库的评分
 与别处不同、且看不出来（§6：阈值随规则版本走）。**这是一条约定，不是没写完。**
 
-#### `sql/` 下现在有**三个**文件，分工不要混（2026-09-18 补，2026-09-20 加第三个）
+#### `sql/` 下现在有**四个**文件，分工不要混（2026-09-18 补，2026-09-20 加第三个，2026-09-21 加第四个）
 
-| 文件 | 建表吗 | 删行吗 | 改行吗 | 谁用 |
-|---|---|---|---|---|
-| `reset_to_baseline.sql` | 不 | 删（清成基线） | 不 | 上面那张表 |
-| `schema_mysql8.sql` | **建**（34 张表，父先子后） | 不 | 不 | §18 的 `schema_prepared` 分工 |
-| `upgrade_from_v1_0_0.sql` | **改**（`0012 → 0018` 六条迁移的渲染） | 不 | 不 | §30：停在 V1.0.0 的库 |
+| 文件 | 建表吗 | 删行吗 | 改行吗 | 写行吗 | 谁用 |
+|---|---|---|---|---|---|
+| `reset_to_baseline.sql` | 不 | 删（清成基线） | 不 | 不 | 上面那张表 |
+| `schema_mysql8.sql` | **建**（34 张表，父先子后） | 不 | 不 | 不 | §18 的 `schema_prepared` 分工 |
+| `upgrade_from_v1_0_0.sql` | **改**（`0012 → 0018` 六条迁移的渲染） | 不 | 不 | 不 | §30：停在 V1.0.0 的库 |
+| `seed_mysql8.sql` | 不 | 不 | 不 | **写**（6 张表 105 行） | §31：自己建了空库、又跑不了 Python 的人 |
 
 前两份都是**手写并受静态守卫**（`test_sql_schema_matches_models.py` /
-`test_sql_reset_to_baseline.py`）；第三份**是生成的**（`deploy/build_migration_sql.py`，
-`make db-upgrade-sql`），守卫是逐字节比对今天这棵树渲染出来的东西（§30）。**谁也不许手改
-它**——改了下次重跑就没了，而且守卫会红。
+`test_sql_reset_to_baseline.py`）；后两份**是生成的**（`deploy/build_migration_sql.py` +
+`make db-upgrade-sql`、`deploy/build_seed_sql.py` + `make db-seed-sql`），守卫都是逐字节
+比对今天这棵树渲染出来的东西（§30 / §31）。**谁也不许手改它们**——改了下次重跑就没了，
+而且守卫会红。两份生成器有一处**关键不同**：前者是纯文件操作，后者要**连一台活着的
+MySQL**，所以它**不在出包时重生成**（理由见 §31）。
 
 `schema_mysql8.sql` 是**快照，不是来源**——上面那句「schema 归 `alembic upgrade head`」一个字
 没变，它只是把迁移链**当时**建出来的形状印了一份出来。它存在是因为 `schema_prepared` 那条路上
@@ -4426,6 +4429,170 @@ MySQL 8.4.4 上两个方向各跑过一遍**，走的都是操作员会走的那
 （它们能挡的是「有人改回去」，不是「它在真库上成立」）。所以上面这张表的每一格都只能
 重跑一次才有——`DROP DATABASE` 一个验证库、`alembic upgrade 0012_drop_care_case_unique`
 建到起点、然后跑那两趟。**别照抄这张表去断言，也别把它读成「已经有人替这次改动验过了」。**
+
+### 31. 第四份 SQL：空库的初始化数据 `seed_mysql8.sql`（2026-09-21）
+
+用户的要求逐字是「**只需要数据库的 sql DML 脚本，只包括系统基础数据和管理员账号，
+mock 数据不要包含**」。产物是 `backend/sql/seed_mysql8.sql`（+ `dist/` 一份）、生成器
+`deploy/build_seed_sql.py`（`make db-seed-sql`）、守卫
+`backend/app/tests/test_seed_sql.py`。
+
+**它补的是四条路里唯一一条断掉的。** `schema_mysql8.sql` 那条路（目标机跑不了 Python、
+只能手工建表）此前断在「**建完表，进不去**」：表有了、admin 没有，而 `app.db.seed` 要
+Python，正是那台机器缺的东西。
+
+#### 内容边界：终点**不由这份文件定义**
+
+只有系统基础数据与管理员账号——**6 张表 105 行**：`school` 1、`user_account` 1、
+`user_scope` 1、`assessment_scale` 1、`scale_question` 100、`scale_rule` 1。
+**不含任何演示数据**（从不跑 `seed_demo.py`）。
+
+**「只留这六张」是 `reset_to_baseline.sql` 的结论，不是这里的定义**：生成器遍历
+`Base.metadata.sorted_tables`，非空就 dump，它不知道终点是什么。将来 §16 那条线挪了，
+这份文件自动跟上——**而守卫会替文档记住这件事**：`test_seed_sql.py` 的 `BASELINE_TABLES`
+把「终点是这六张」写死成一条断言，红了就是说 §16 那张表该改了。
+
+`system_setting` / `role_permission` 不在其中，且**将来也不会在**：全新库上它们就是
+0 行（配置回退 `DEFAULTS`、权限回退 `CAPABILITY_DEFAULTS`，§4 / §5 的 fail-safe），
+`seed.py` 本来就不写它们。
+
+#### 生成它**要连一台活着的 MySQL**（这是代价，不是实现细节）
+
+`make db-seed-sql` 真的跑一遍：建 `<主库名>_init`（`INIT_SUFFIX`）→
+`alembic upgrade head` → `python -m app.db.seed` → `python -m app.db.reset_to_baseline --yes`
+→ 读全部非空表 → 编译 INSERT → `finally` 删库。
+
+**不能做成纯文件操作**（`build_migration_sql.py` 那种），理由有两条，都不是实现层面的：
+
+- 数据里有 **id 引用**（`user_scope.school_id` / `scale_question.scale_id` /
+  `scale_rule.scale_id`），它们是 `seed.py` 里 `db.flush()` 的**执行结果**、不是它的代码，
+  纯 Python 路要自己重新实现「谁拿到 id 几」；
+- §16 那条 doctrine（「不把基线写成 SQL 的 INSERT」）在这里原样成立：再抄一份必然漂移，
+  而一份抄错的规则 JSON 会让那个库的评分与别处不同、且看不出来（§6）。
+
+`_safety_checked_names()` 动手之前先断三件事：库名以 `_init` 结尾、与主库**不同名**、
+是 mysql——不满足就 `SystemExit("[X] 临时库名与主库同名（{init_name}），拒绝")`。
+口径与 §20 那个「库名不以 `_test` 结尾就拒绝跑」逐字同源：**宁可拦住**。库在 `finally`
+里删掉，中途崩掉也不会在开发机上留一个「看起来与正常库一模一样」的半成品。
+
+#### **但它不在出包时重新生成**（与 `upgrade_from_v1_0_0.sql` 不同，且不是漏了）
+
+`upgrade_from_v1_0_0.sql` 每次重生成，是因为它的两个来源都长在**当前源码树**上，出包时
+源码树就是最新的。这一份多了一个**外部来源**（一个库），出包时重生成反而会**掩盖**
+「有人改了 `seed.py` 却没重跑 `make db-seed-sql`」——那个信号应该由守卫红在那次
+`make test` 上，不该被一次静默重生成盖掉。它与 `schema_mysql8.sql` 同一档：**仓库里的
+快照，随 `backend/` 进包**（`build_package.py` 的 `REQUIRED_PATHS` 钉住，旁边那行注释
+写着它为什么不进 `step("3/6")`），靠守卫保鲜。
+
+#### 三个非确定源被固定下来，判据才回到逐字节
+
+`NORMALIZED`（`build_seed_sql.py:145`）是一张**显式的常量表，每条带理由**——理由会逐字
+写进产物里那一节，所以它同时是文档和可被守卫检查的对象：
+
+| # | 非确定源 | 为什么每次都不同 | 处置 |
+|---|---|---|---|
+| 1 | `user_account.password_hash` | `hash_password()` 用 `bcrypt.gensalt()`，**盐随机** | 换成固定字面量。值**两个方向都验过**（见下） |
+| 2 | `assessment_scale.published_at` | `seed.py` 写 `datetime.now(UTC).replace(tzinfo=None)` | 固定成 `datetime(2026, 9, 20, 0, 0, 0)`；**这一列在界面上有读者**（量表页的「发布时间」），所以文件头写明「它不是真实发布时间，只是这份交付文件里那条量表版本的发布时间」 |
+| 3 | 各表的 `created_at` / `updated_at` | `server_default=DEFAULT (now())`，由 MySQL 在 seed 那一刻填 | **INSERT 里不写这几列**，交给客户那台库的默认值——它回答的是「这一行什么时候落进**这个**库」，语义上更对 |
+
+**第三条的判据是「`server_default` 的文本含 `now()` / `current_timestamp`」，不是「凡有
+`server_default` 的列都不写」**（`_is_runtime_timestamp`）。后者会漏掉
+`must_change_password`（`server_default="0"` 而 seed 写 `True`）这一类，症状是客户库里的
+值悄悄变成默认值——而界面上看不出任何异常。
+
+`_verify_credentials()` 那两半值得单独记：它断的是「库里的哈希验得过 `123456`」**和**
+「`NORMALIZED` 里那个常量也验得过」。**少了后半句**，一次手滑改 `NORMALIZED` 就会产出一份
+**谁都登不进去**的交付文件，而它长得完全正常。这就是「客户能不能登录」这个问题的可执行
+形式。（`SEED_PASSWORD = "123456"` 是模块常量，且守卫**从 `app.security.passwords` 直接
+import `verify_password`**，不走生成器——那是函数体内的局部 import，`module.X` 取不到。
+这一条与 §18 那条「安装器写 `.env` 时验证自己写出来的东西」是同一类。）
+
+#### ★ 真机那次 `1064`：一份「注释」让整份文件跑不起来（这一期最值钱的教训）
+
+`mysql` 的注释规则比它看起来严格：**`--` 后面必须跟空白或控制字符**（`#` 没有这个
+要求）。所以下面这些**不是注释，是一条 SQL**：
+
+```
+==========        ← 一条没带 `-- ` 的横线（RULE / LINE 曾经就是这样）
+--（中文…         ← `--` 后面紧跟全角括号，中间没有空格
+```
+
+后果不是「少了一条注释」，是**整份文件跑不起来**，而且报错位置离原因很远：光秃秃的横线
+报在**第 1 行**（`ERROR 1064 … near '=====…' at large`），而 `--（` 那一种报在那一行
+自己身上（`near '--（学生账号…'`）——**看起来像那句话写错了**，于是下一个人会去改文案，
+而文案是对的。**这两种形状 2026-09-21 在真机上各撞过一次。**
+
+处置是 `RULE = "-- " + "=" * 75` / `LINE = "-- " + "-" * 75`，外加
+`refuse_fake_comments(text)` 三条判据（`--` 后不是空白 / 整行只由 `=` 或 `-` 组成 /
+`#`）——**它不在守卫里，在生成器里**：`compose` 是这份文件的唯一写入方，而「写出去的东西
+读得回来」是**写入方**的责任（与 §18 那条同源），守卫再抄一份就又是两处定义。守卫只**调**
+它，逐字钉住这三类形状还认得出来（`test_the_fake_comment_guard_catches_the_three_shapes`）
+——一条没人能单独验的检查，改坏了不会有任何东西红。
+
+第三条判据刻意收窄到「我们真的会生成的那两种字符」，**不是**一条通用的「哪些行像注释」
+的词法判据：那种判据判错一次就再没人信它（§18 里那个剥壳器的两版自相矛盾就是同一种
+半吊子词法器的下场）。
+
+#### 产物**不写 `alembic_version`**
+
+文件头明写着这一条，因为它两个方向各错一次：在一份按 `schema_mysql8.sql` 建出来的库上
+它**还不存在**（1146），而在一份已经迁移过的库上补一行又会撞 1062。补版本戳的正解是
+安装目录里的 `python -m app.db.ensure_schema`（§18 / §30 那个先校对再盖章的动作）。
+
+守卫因此把「这份文件跑完、库里**没有** `alembic_version` 这张表」当成一条**真正会被
+打破**的断言（往产物里加一句 `INSERT INTO alembic_version` 就红）。
+
+#### 守卫两半，第三半是自证
+
+| 用例 | 判据 |
+|---|---|
+| `test_the_snapshot_is_what_todays_seed_renders` | `compose(...)` 的产物与盘上那份**逐字节**比（**不许调 `build()`**，§30 那条：`build` 先写快照再写目标，比对是恒真的） |
+| `test_the_snapshot_has_no_bom` | 无 BOM（与 `.ps1` 那条正好相反，读它的那台机器不由我们决定） |
+| `test_the_comparison_is_not_vacuous` | **自证**：在内存里改 `blocks` / 提示语，`compose` 的输出必须跟着变 |
+| `test_the_fake_comment_guard_catches_the_three_shapes` | 上面那三条判据各喂一个形状 |
+| `test_the_snapshot_really_imports_into_an_empty_database` | **真的导进去**（~20 秒，`throwaway_database(with_schema=False)`）：`schema_mysql8.sql` → `seed_mysql8.sql` → `ensure_schema` 认账补戳 → `alembic upgrade head` 输出里没有 `Running upgrade` |
+
+最后那条走了**客户的顺序**，几条判据各有各的理由：**走 `run_sql`
+（`CLIENT.MULTI_STATEMENTS`）而不是切分语句**（末尾那条对账查询是一条 `UNION ALL` 链、
+分号只挂最后一行，`;\s*$` 那个切分器会把它切成七八条各自能跑、报错位置全错的东西——
+整份丢给客户端才是 `mysql < 文件` 的忠实模拟）；**非空表恰好等于基线那六张**（多了说明
+`reset_to_baseline` 没清干净、客户会拿到 mock 数据，少了说明有表被漏掉）；**`ensure_schema`
+说「只往 `alembic_version` 里写了一行」**，且**不写死 `0018`**（迁移链往后走一条，写死的
+那句就会红在一个与功能无关的地方）。
+
+**一个 `TypeError: 'str' object is not callable` 值得记**：那个函数里要用
+`sqlalchemy.text(...)`，而 `text, blocks = rendered()` 会把那个名字**遮蔽掉**——报出来
+的位置在 `text(...)` 那一行，看起来像 SQLAlchemy 坏了。现在叫 `rendered_text`。
+另有一处同类的编译细节：`_dialect()` 必须设
+`identifier_preparer._double_percents = False`（**`dialect._double_percents` 这个属性
+不存在**，设它没有任何效果），否则题干里一个 `100%` 到了客户库上就是 `100%%`。
+
+#### 接线：四处，其中一处带了新守卫
+
+| 位置 | 内容 |
+|---|---|
+| `Makefile` | `db-seed-sql`（注释写明**它要连上一台活着的 MySQL**、**只碰 `<主库名>_init`**、**不在 `make deploy-package` 里重生成**） |
+| `build_package.py` 的 `REQUIRED_PATHS` | `"backend/sql/seed_mysql8.sql"` + 一行注释说明它为什么不进 `step("3/6")` |
+| `deploy/windows/部署说明.txt` | 「数据库我自己准备」那节的 ③：三步（导入 → 执行 → 看结果），含 `--default-character-set=utf8mb4` 与「它只跑一次」 |
+| `deploy/README.md` / `README.md` | 维护者视角记一笔：第四份 SQL 的分工表、生成要连库、为什么不在出包时重生成 |
+
+手册那一处带出一条**新守卫**：
+`test_windows_assets.py::test_the_sql_files_the_manual_names_are_files_that_exist_and_travel_in_the_package`
+——手册里点名的每一个 `backend\sql\*.sql` 都得**真在盘上**、**且进了 `REQUIRED_PATHS`**。
+两半都要断：文件在磁盘上却不进包，操作员在安装目录里同样找不到它，而这几份 SQL 正是
+「客户手上没有能跑的 Python」时**唯一**的路。它与上面那条（`.bat` 的名字）是同一条教训的
+**第四处**（§18 那一族：**把「看不懂」换成了「搜不到」**）。
+
+**判据只认 `backend[\\/]sql[\\/]<名字>.sql` 这一段，前缀是判据的一部分——实测过**：
+按「任何以 `.sql` 结尾的东西」扫那份手册，多出来的是 `schema.sql`（mysqldump 的**输出名**，
+客户自己起的）和光秃秃一个 `.sql`（「`backend\sql\` 里」那句话本身）——两条都是误报，
+而**误报会让人把这条守卫关掉**。带上前缀之后剩下的正好是四个真名字。
+
+#### 跑数
+
+守卫 5 条，**变异验证 5/5 全红且逐字节还原**（`cp -p` 落盘备份 + `cmp`）；手册那条新守卫
+另做 **3/3**（改名一处、从 `REQUIRED_PATHS` 删一行、把守卫自己的正则改坏看空转自检）。
+`make test` 从 730 → **736 passed**。生成器不改任何生产代码路径，**不碰 `make e2e`**。
 
 ## 已知缺口（动手前先看这里）
 

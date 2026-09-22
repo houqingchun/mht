@@ -31,18 +31,18 @@ import {
   createRetestPlan,
   exportCareCases,
   exportHighRiskCareCases,
+  getAnalyticsReport,
   getCareCaseDetail,
   getCareCases,
   getCounselorWorkbench,
   getCounselorReminders,
-  getDimensionDistribution,
   getMe,
   reopenCareCase,
+  type AnalyticsReport,
   type CareCaseDetail,
   type CareCaseItem,
   type CounselorWorkbench,
   type CurrentUser,
-  type DimensionDistributionItem,
   type ReminderItem
 } from '../../services/api'
 
@@ -151,7 +151,7 @@ const priorityQueue = computed(() =>
  * 未进入队列、但仍在观察中的档案数。
  *
  * 「优先工作队列」这四个字会把人带向「这就是我的全部在办档案」，而它其实是一张
- * **筛选过的**表：未逾期、非待复核、且未超出一般范围的那批不在里面。演示数据上
+ * **筛选过的**表：未逾期、非待复核、且未超出一般范围的记录不在里面。
  * 9 条在队列、12 份在办——差的那 3 份此前**只在这个队列为空时**才被解释一句，
  * 于是有 9 行的时候读者看到的就是「都在这里了」。
  *
@@ -202,8 +202,10 @@ function metricTone(count: number | undefined | null, tone: string) {
  */
 const overdueCount = computed(() => cases.value.filter(c => c.overdue).length)
 
-// 主要维度分布 —— 来自 /analytics/dimensions 的真实聚合，按高分占比降序。
-const dimensionDistribution = ref<DimensionDistributionItem[]>([])
+// 主要维度分布 —— 来自报表端点的真实聚合，按高分占比降序。
+// 2026-09-22 起从 /analytics/dimensions 切换到 /analytics/report.dimensions，
+// 淘汰旧端点，与五个报表页共享同一数据源。
+const dimensionDistribution = ref<Array<{ dimension_code: string; high_rate: number }>>([])
 const dimsError = ref('')
 
 // 本周提醒 —— 来自 /counselor/reminders，逾期优先。
@@ -229,21 +231,31 @@ const remindersHidden = computed(() => Math.max(0, reminderTotal.value - reminde
  * 一次 500 借它们说成了「学校没有数据」。红条只在最外层 catch 里出现，
  * 而副面板的失败根本走不到那里。
  *
+ * 2026-09-22 修：维度分布从独立的 `/analytics/dimensions` 端点切换到
+ * `/analytics/report`（与五个报表页共享同一数据源），淘汰旧端点。
+ * 由于工作台没有任务选择器，自动取最新可分析任务的报表。
+ *
  * 形状照抄 `CasesPage.vue` 的 `studentsLoading` / `studentsError`：
  * 失败必须落在**它自己那一块**里，而不是被邻居的空态吸收。
  */
 async function loadPanels() {
   dimsError.value = ''
   notesError.value = ''
-  const [dims, notes] = await Promise.allSettled([
-    getDimensionDistribution(),
+  const [report, notes] = await Promise.allSettled([
+    (async () => {
+      const tasks = await getAssessmentTasks()
+      const task = tasks.filter(t => t.completed_targets >= 5).sort((a, b) => Date.parse(b.start_at || '') - Date.parse(a.start_at || ''))[0] || tasks[0]
+      if (!task) return []
+      const r = await getAnalyticsReport([task.id], 'ALL_CALCULATED')
+      return r.dimensions.map(d => ({ dimension_code: d.dimension_code, high_rate: d.high_score_rate ?? 0 })).filter(d => d.high_rate > 0)
+    })(),
     getCounselorReminders()
   ])
-  if (dims.status === 'fulfilled') {
-    dimensionDistribution.value = [...dims.value].sort((a, b) => b.high_rate - a.high_rate)
+  if (report.status === 'fulfilled') {
+    dimensionDistribution.value = [...report.value].sort((a, b) => b.high_rate - a.high_rate)
   } else {
     dimensionDistribution.value = []
-    dimsError.value = dims.reason instanceof Error ? dims.reason.message : '维度分布加载失败'
+    dimsError.value = report.reason instanceof Error ? report.reason.message : '维度分布加载失败'
   }
   if (notes.status === 'fulfilled') {
     reminders.value = notes.value.items
@@ -739,7 +751,7 @@ onMounted(load)
             </div>
             <!-- 这句话此前**只长在空态里**——也就是只在队列一条都没有的时候出现。
                  于是有 9 行的时候读者看到的就是「我的在办档案都在这里了」，而实际上
-                 还有 3 份在观察中的没进来（演示数据：队列 9 条 / 在办 12 份）。
+                 其他仍在观察、但尚未形成工作项的档案不会进入该队列。
                  它与下面「近期提醒」那句「另有 N 项未显示」是同一类声明（§10：
                  凡是截断，都要自己说出来），区别只是那一处截的是**条数**、这一处截的是
                  **判据**——两处都在回答「你看到的这份清单是不是全部」。 -->

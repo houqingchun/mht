@@ -130,20 +130,22 @@ def ensure_database(url: URL) -> None:
         connection.close()
 
 
-def run_migrations(url: URL, revision: str = "head") -> None:
-    """在 `url` 上跑 `alembic upgrade <revision>`。
+def _run_alembic(url: URL, *arguments: str) -> None:
+    """在 `url` 上跑一条 alembic 命令。`run_migrations` 与 `downgrade_to` 共用这一处。
 
     走子进程与环境变量，因为 `alembic/env.py:18` 无条件覆盖 `sqlalchemy.url`
-    （见模块 docstring）。
+    （见模块 docstring）。**环境构造只有这一份**：它复制一份就是「两处定义会漂」的
+    形状，而漂了的那一份会把迁移指向**开发库**——`env.py:18` 拿 `get_settings()`
+    的库名盖掉 `alembic.ini` 里那个，而 `env_file` 是 CWD 相对的（这里 CWD 就是
+    `backend/`，那份 `.env` 指的正是开发库）。
     """
     env = dict(os.environ)
     env["XLP_DATABASE_URL"] = url.render_as_string(hide_password=False)
-    # 别让一个恰好存在的 .env 盖过我们要指的那个库：`env_file` 是 CWD 相对的，
-    # 而这里 CWD 就是 backend/。
+    # 别让一个恰好存在的 .env 盖过我们要指的那个库。
     env.pop("XLP_TEST_DATABASE_URL", None)
 
     completed = subprocess.run(
-        [sys.executable, "-m", "alembic", "upgrade", revision],
+        [sys.executable, "-m", "alembic", *arguments],
         cwd=BACKEND_DIR,
         env=env,
         capture_output=True,
@@ -151,9 +153,32 @@ def run_migrations(url: URL, revision: str = "head") -> None:
     )
     if completed.returncode != 0:  # pragma: no cover - 迁移坏了才会走到
         raise RuntimeError(
-            f"`alembic upgrade {revision}` 在 {url.render_as_string(hide_password=True)} 上失败：\n"
+            f"`alembic {' '.join(arguments)}` 在 {url.render_as_string(hide_password=True)} 上失败：\n"
             f"--- stdout ---\n{completed.stdout}\n--- stderr ---\n{completed.stderr}"
         )
+
+
+def run_migrations(url: URL, revision: str = "head") -> None:
+    """在 `url` 上**升级**到 `revision`（默认 head）。"""
+    _run_alembic(url, "upgrade", revision)
+
+
+def downgrade_to(url: URL, revision: str) -> None:
+    """在 `url` 上**降级**到 `revision`。
+
+    单列一条而不是给 `run_migrations` 加方向参数：它的名字就是它的语义，而这里
+    需要的恰恰是**另一条命令**。写它是因为 `alembic upgrade <更老的 revision>` 在
+    已经处于 head 的库上**不是**降级——`command.upgrade()` 走
+    `script._upgrade_revs(destination, current_rev)`，拿到「上界比下界老」时返回空集，
+    退出码 0、不报错、**什么都不做**（`alembic/command.py:476` 与
+    `alembic/script/base.py:411`）。所以 `test_migration_total_includes_validity.py`
+    里那条「升过、降过、再升一次」的用例此前从来没真正降过级——它跑的一直是一次
+    无声的空转，直到有人发现那条 `downgrade()` 一次都没被执行过。
+
+    只给 `test_migration_*.py` 那类**自己控制起点**的用例用：`conftest.py` 的
+    session 级库必须停在 head，降它会让同一轮里后面的用例拿到一张旧表。
+    """
+    _run_alembic(url, "downgrade", revision)
 
 
 def engine_for(url: URL) -> Engine:

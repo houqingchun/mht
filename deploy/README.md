@@ -408,6 +408,60 @@ python -m app.db.ensure_schema      ← 再校对一遍，并由它念出最终�
 
 ---
 
+## 一份空库的初始化数据：`seed_mysql8.sql`
+
+**这是第四份随包走的 SQL**，四份的分工：
+
+| 文件 | 建表吗 | 删行吗 | 写行吗 | 谁用 |
+|---|---|---|---|---|
+| `reset_to_baseline.sql` | 不 | 删（清成基线） | 不 | 把库清回「只有 admin + 量表与基本配置」 |
+| `schema_mysql8.sql` | **建**（34 张表） | 不 | 不 | 操作员自己建表那一路 |
+| `upgrade_from_v1_0_0.sql` | 改（`0012 → 0018`） | 不 | 不 | 停在 V1.0.0 的库 |
+| `seed_mysql8.sql` | 不 | 不 | **写**（6 张表 105 行） | 自己建了空库的人：**没有数据就登录不进去** |
+
+**内容边界**：只有系统基础数据与管理员账号——MHT 量表与 100 道题、评分规则、admin
+（初始口令 `123456`）、学校那一行。**不含任何演示数据**（从不跑 `seed_demo.py`）。
+这个终点不是这份文件定的：它由 `reset_to_baseline.sql` **独家保证**，生成器只是把那个
+结果 dump 出来（遍历 `Base.metadata.sorted_tables`，非空就写），所以将来那条线挪了，
+这份文件自动跟上。
+
+**它是生成的，而且生成它要连一台活着的 MySQL。** 生成器 `deploy/build_seed_sql.py`
+（`make db-seed-sql`）真的跑一遍：建 `<主库名>_init` → `alembic upgrade head` →
+`app.db.seed` → `app.db.reset_to_baseline --yes` → 读结果 → 删库。**不能做成纯文件操作**，
+因为数据里有 id 引用（`user_scope.school_id` / `scale_question.scale_id` /
+`scale_rule.scale_id`），它们是 `seed.py` 里 `db.flush()` 的**执行结果**、不是它的代码；
+在 SQL 里再抄一份必然漂移，而一份抄错的规则 JSON 会让那个库的评分与别处不同、且看不出来。
+`_safety_checked_names()` 动手之前先把三件事断掉（库名以 `_init` 结尾、与主库不同名、
+是 mysql），所以 `make db-seed-sql` **只碰那一个库**。
+
+**但它不在出包时重新生成**（与 `upgrade_from_v1_0_0.sql` 那条路不同，也**不是**漏了）：
+那条的两个来源都长在当前源码树上，出包时源码树就是最新的；这一份多了一个**外部来源**
+（一个库），出包时重生成反而会**掩盖**「有人改了 `seed.py` 却没重跑 `make db-seed-sql`」
+——那个信号应该由守卫红在那次 `make test` 上，不该被一次静默重生成盖掉。它与
+`schema_mysql8.sql` 同一档：**仓库里的快照，随 `backend/` 一起进包**（`REQUIRED_PATHS`
+钉住它），靠守卫保鲜——`backend/app/tests/test_seed_sql.py` 拿 `compose(...)` 的产物与
+盘上那份逐字节比，红的出路是重跑 `make db-seed-sql` 并把那份文件一起提交。
+
+**三个非确定源被固定下来，判据才回得到「逐字节」**：`password_hash`（bcrypt 的盐是随机的）
+与 `assessment_scale.published_at` 换成模块级常量；各表的 `created_at` / `updated_at`
+**不写进 INSERT**，交给客户那台库的 `DEFAULT (now())`（它回答的是「这一行什么时候落进
+**这个**库」，语义上更对）。第三条的判据是「`server_default` 的文本含 `now()` /
+`CURRENT_TIMESTAMP`」，**不是**「凡是有 `server_default` 的列都不写」——后者会漏掉
+`must_change_password` 这种，症状是客户库里的值悄悄变成默认值。
+
+**怎么跑**：表要先有（安装程序第 4 步会把它建出来），然后
+`mysql --default-character-set=utf8mb4 … <库名> < backend\sql\seed_mysql8.sql`。面向操作员
+的三步写在《部署说明.txt》的「数据库我自己准备」那一节（③），两句话跟着它走：
+**`--default-character-set=utf8mb4` 不能省**（文件里有中文——校名、题干——按别的编码读会
+得到一串乱码，而它**看起来像导入成功**），以及**它只跑一次**（第二遍会在第一张表上撞
+`Duplicate entry`；这是有意的，静默跳过会让人以为跑过了。要清空重来是另一个文件：
+`reset_to_baseline.sql`）。
+
+**与安装器不冲突**：`seed.py` 的四个 seed 函数都有早退守卫，所以「先手工灌这份 SQL、
+再走选 1 / 选 3 安装」不会撞 `Duplicate entry`，安装器只会把已有的那些行跳过。
+
+---
+
 ## 加一个依赖：改**两处**
 
 ```toml

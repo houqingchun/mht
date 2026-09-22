@@ -30,7 +30,15 @@ from app.models.care import StudentCareCase
 from app.models.organization import ClassGroup, Grade, Student
 from app.models.scale import AssessmentScale, ScaleQuestion, ScaleRule
 from app.scale_engine.engine import DEFAULT_RULE_CONFIG, rule_config_to_json
-from app.services.scale_rule_service import rule_version_for
+from app.services.scale_rule_service import MHT_RULE_VERSION
+
+
+# 「另一个版本号」一律从 `MHT_RULE_VERSION` 派生，不写字面量。下面两条用例造的是
+# **已废止的历史版本**，而清理的判据是**当前**那一行——当前那一行会随算法变更 +1
+# （2026-09-21 总分口径改成「效度题也计入」时就是这么 +1 的）。写死 `MHT-RULE-1.1.1`
+# 这样的字面量会在下一次 +1 时撞上 `uq_scale_rule_version(scale_id, rule_version)`，
+# 而报出来的是一句 IntegrityError，红在一个与「清理能不能收敛规则行」无关的地方。
+_OTHER_RULE_VERSIONS = [f"{MHT_RULE_VERSION.rpartition('.')[0]}.{tail}" for tail in ("2", "3")]
 
 
 def _count(db, model) -> int:
@@ -54,7 +62,7 @@ def test_the_fixture_really_enforces_foreign_keys(db_session):
 
 def test_purge_leaves_exactly_the_baseline(db_session):
     seed_demo_data(db_session)
-    assert _count(db_session, Student) == 28  # S001 + 27 演示学生
+    assert _count(db_session, Student) == 1 + len(demo_roster())  # S001 + 当前演示名册
 
     summary = purge_demo_data(db_session)
 
@@ -155,11 +163,11 @@ def test_purge_drops_an_unreachable_archived_scale_and_keeps_the_published_one(d
 def test_purge_normalizes_a_published_scale_rule_set(db_session):
     """反复编辑已发布量表会攒下一堆规则行（§6），清理后回到唯一那一行。"""
     scale = db_session.scalar(select(AssessmentScale))
-    for suffix in ("1.1.1", "1.1.2"):
+    for rule_version in _OTHER_RULE_VERSIONS:
         db_session.add(
             ScaleRule(
                 scale_id=scale.id,
-                rule_version=f"MHT-RULE-{suffix}",
+                rule_version=rule_version,
                 rule_type="MHT_SCORING",
                 status="RETIRED",
                 config_json=rule_config_to_json(DEFAULT_RULE_CONFIG),
@@ -172,7 +180,7 @@ def test_purge_normalizes_a_published_scale_rule_set(db_session):
 
     assert summary["rules_normalized"] == [MHT_SCALE_VERSION]
     rules = db_session.scalars(select(ScaleRule)).all()
-    assert [rule.rule_version for rule in rules] == [rule_version_for("MHT", MHT_SCALE_VERSION)]
+    assert [rule.rule_version for rule in rules] == [MHT_RULE_VERSION]
     assert rules[0].status == "ACTIVE"
 
 
@@ -190,7 +198,7 @@ def test_purge_never_rewrites_a_threshold_a_school_actually_edited(db_session):
     db_session.add(
         ScaleRule(
             scale_id=scale.id,
-            rule_version="MHT-RULE-1.1.1",
+            rule_version=_OTHER_RULE_VERSIONS[0],
             rule_type="MHT_SCORING",
             status="RETIRED",
             config_json=edited,

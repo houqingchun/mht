@@ -61,7 +61,8 @@ from app.schemas.care import (
 )
 from app.security.passwords import hash_password
 from app.services import assessment_import_service, assessment_service, care_service
-from app.services.scale_rule_service import rule_version_for
+from app.services.scale_rule_service import MHT_RULE_VERSION
+from app.services.target_snapshot import target_snapshot
 
 DEFAULT_PASSWORD = "123456"
 SEED = 20260916
@@ -85,9 +86,10 @@ GIVEN = ["子涵", "雨桐", "浩然", "欣怡", "梓萱", "俊杰", "思远", "
 # (年级, 班级列表)
 GRADES = [("初一", ["1班", "2班"]), ("初二", ["1班", "2班", "3班"]), ("初三", ["1班", "2班"])]
 
-# 4 students per class keeps the cohort realistic without making the seeder slow
-# (each student runs a full submission through the engine).
-STUDENTS_PER_CLASS = 4
+# 聚合报表为保护隐私，会隐藏少于 5 人的班级精确数据。每班 8 人，即使保留约 15%
+# 的未完成人员，也能让班级画像、年级对比等演示报表稳定拥有可查看的数据。
+# 每名学生仍通过完整的 100 题 service 提交流程生成，避免 mock 绕过业务规则。
+STUDENTS_PER_CLASS = 8
 
 
 class DemoStudent(NamedTuple):
@@ -229,12 +231,13 @@ def _create_cohort(db: Session, school: School, rng: random.Random) -> list[Stud
         age = date.today().year - (2014 - entry.grade_order) + profile_rng.choice([0, 0, 0, -1, 1])
         existing = db.scalar(select(Student).where(Student.student_no == student_no))
         if existing:
-            # 补齐在 0009 迁移之前建好的行。名册属性不是原始答卷事实，
-            # 就地补写不违反「四层事实模型」。
-            if existing.gender is None:
-                existing.gender = gender
-            if existing.age is None:
-                existing.age = age
+            # 演示名册扩容或调整后，把**明确属于本种子的学号**同步到当前名册。
+            # 这里只改 student 当前态；历史测评仍由 target 的快照列保存，不改原始答卷事实。
+            existing.school_id = school.id
+            existing.grade_id = grade.id
+            existing.class_id = class_group.id
+            existing.gender = existing.gender or gender
+            existing.age = age
             students.append(existing)
             continue
 
@@ -308,12 +311,14 @@ def seed_demo_data(db: Session) -> dict:
         raise RuntimeError("请先运行 python -m app.db.seed 初始化基础数据")
 
     if not db.scalar(select(ScaleRule).where(ScaleRule.scale_id == scale.id)):
-        # 兜底：种子/导入都会给量表建规则，这里只是防止一个没有规则的表量把演示数据卡住。
-        # 标识必须由 `rule_version_for` 推出——量表是动态查的（最新已发布版本），
-        # 写死 `MHT-RULE-1.0.0` 会给出一个与该量表版本无关的名字（§6）。
+        # 兜底：种子/导入都会给量表建规则，这里只是防止一个没有规则的量表把演示数据卡住。
+        # 版本号走 `MHT_RULE_VERSION` 这一处常量，**不走** `rule_version_for`：后者由
+        # **量表版本**派生，而这一行的号 2026-09-21 因总分口径变更 +1 过一次、量表版本
+        # 没动（`seed.py` / `purge.py` 那两处的注释是同一句话）。三个创建方必须是同一个
+        # 号，否则演示库与全新装的库在「当前规则叫什么」上各说各话。
         db.add(ScaleRule(
             scale_id=scale.id,
-            rule_version=rule_version_for(scale.code, scale.version),
+            rule_version=MHT_RULE_VERSION,
             rule_type="MHT_SCORING",
             status="ACTIVE",
             config_json=rule_config_to_json(DEFAULT_RULE_CONFIG),
@@ -358,9 +363,19 @@ def seed_demo_data(db: Session) -> dict:
             if task is retest_task and student.grade_id != grade9.id:
                 continue
             # `school_id_snapshot` 没有默认值，见 `seed.py` 里同一条注释。
-            _get_or_create(db, AssessmentTarget, {"status": "NOT_STARTED"},
-                           task_id=task.id, student_id=student.id,
-                           school_id_snapshot=student.school_id)
+            target, _ = _get_or_create(
+                db,
+                AssessmentTarget,
+                {"status": "NOT_STARTED", **target_snapshot(student)},
+                task_id=task.id,
+                student_id=student.id,
+            )
+            # 兼容在名册快照字段加入之前生成的开发数据。只补空字段，不改已经冻结的
+            # 发放快照；否则年级/班级报表会把这些目标错误归入“未分年级”。
+            snapshot = target_snapshot(student)
+            for field, value in snapshot.items():
+                if getattr(target, field) is None:
+                    setattr(target, field, value)
 
         # 主任务：大部分学生已完成
         already = db.scalar(

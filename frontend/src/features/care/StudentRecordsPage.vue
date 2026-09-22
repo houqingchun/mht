@@ -23,6 +23,7 @@ import { useRoute, useRouter } from 'vue-router'
 import DataTable, { type Column } from '../../components/DataTable.vue'
 import SkeletonBlock from '../../components/SkeletonBlock.vue'
 import ErrorState from '../../components/ErrorState.vue'
+import Modal from '../../components/Modal.vue'
 import TrendChart from '../../components/TrendChart.vue'
 import ClassComparisonPanel from '../../components/ClassComparisonPanel.vue'
 import {
@@ -39,9 +40,11 @@ import {
 import {
   getClassComparison,
   getStudentAssessmentRecords,
+  getSessionFullAnswers,
   type AssessmentHistoryEntry,
   type ClassComparison,
-  type StudentAssessmentRecords
+  type StudentAssessmentRecords,
+  type FullAnswerItem
 } from '../../services/api'
 
 const route = useRoute()
@@ -135,13 +138,48 @@ const historyColumns: Column[] = [
   { key: 'submitted_at', label: '测评日期', sortable: true, width: '124px' },
   { key: 'source', label: '来源', sortable: true, order: SOURCE_ORDER },
   { key: 'total_level', label: '关注等级', sortable: true, order: LEVEL_ORDER },
-  { key: 'total_score', label: '总分', sortable: true, align: 'right', width: '90px' }
+  { key: 'total_score', label: '总分', sortable: true, align: 'right', width: '90px' },
+  { key: 'actions', label: '操作', width: '120px' }
 ]
 
 /** 去这名学生的关注档案。按钮只在真的有档案时出现，所以点进去一定打得开。 */
 function openCase() {
   if (!records.value) return
   router.push(`/counselor/cases/${records.value.student.id}`)
+}
+
+/** 查看完整答卷 */
+const showAnswers = ref(false)
+const answersLoading = ref(false)
+const answerError = ref('')
+const answers = ref<FullAnswerItem[]>([])
+const currentSessionId = ref<number | null>(null)
+const answerPurpose = ref('')
+
+async function openAnswers(sessionId: number) {
+  currentSessionId.value = sessionId
+  showAnswers.value = true
+  answerPurpose.value = ''
+  answers.value = []
+  answerError.value = ''
+}
+
+async function loadAnswers() {
+  if (!answerPurpose.value.trim()) {
+    answerError.value = '请填写查看原因'
+    return
+  }
+  if (!currentSessionId.value || !records.value) return
+  answersLoading.value = true
+  answerError.value = ''
+  try {
+    const data = await getSessionFullAnswers(records.value.student.id, currentSessionId.value, answerPurpose.value)
+    answers.value = data.items
+  } catch (err) {
+    answerError.value = err instanceof Error ? err.message : '加载答卷失败'
+  } finally {
+    answersLoading.value = false
+  }
 }
 </script>
 
@@ -253,6 +291,9 @@ function openCase() {
             <template #total_score="{ row }">
               {{ row.total_score ?? '—' }}
             </template>
+            <template #actions="{ row }">
+              <button class="btn-link" @click="openAnswers(row.session_id)">查看完整答卷</button>
+            </template>
           </DataTable>
         </div>
       </div>
@@ -293,5 +334,83 @@ function openCase() {
         </div>
       </div>
     </template>
+
+    <!-- 完整答卷弹层 -->
+    <Modal v-model="showAnswers" title="查看完整答卷">
+      <template v-if="answersLoading">
+        <SkeletonBlock variant="cards" :rows="3" />
+      </template>
+      <template v-else-if="answers.length === 0 && !answerError">
+        <div class="purpose-form">
+          <p>查看原因（必填，将写入审计日志）：</p>
+          <textarea v-model="answerPurpose" placeholder="例：家访前核实学生测评详情" rows="3"></textarea>
+          <div class="form-actions">
+            <button class="btn" @click="showAnswers = false">取消</button>
+            <button class="btn primary" :disabled="!answerPurpose.trim()" @click="loadAnswers">确认查看</button>
+          </div>
+        </div>
+      </template>
+      <template v-else>
+        <div class="answers-panel">
+          <div class="answers-header">
+            <span class="muted tiny">共 {{ answers.length }} 道题</span>
+            <button class="btn-link" @click="showAnswers = false">关闭</button>
+          </div>
+          <div class="answers-list">
+            <div v-for="item in answers" :key="item.question_no" class="answer-row">
+              <span class="q-no">{{ item.question_no }}</span>
+              <span class="q-text">{{ item.question_text }}</span>
+              <span :class="['q-answer', item.answer === 'YES' ? 'yes' : 'no']">
+                {{ item.answer === 'YES' ? '是' : '否' }}
+              </span>
+            </div>
+          </div>
+        </div>
+      </template>
+      <div v-if="answerError" class="notice error" style="margin-top:12px">{{ answerError }}</div>
+    </Modal>
   </div>
 </template>
+
+<style scoped>
+.btn-link {
+  background: none;
+  border: none;
+  color: #0876d9;
+  cursor: pointer;
+  padding: 4px 8px;
+  font-size: 13px;
+}
+.btn-link:hover { text-decoration: underline; }
+
+.purpose-form { padding: 16px 0; }
+.purpose-form p { margin: 0 0 8px; color: #536878; font-size: 14px; }
+.purpose-form textarea {
+  width: 100%;
+  min-height: 60px;
+  padding: 8px 10px;
+  border: 1px solid #cbd8e2;
+  border-radius: 4px;
+  font: inherit;
+  resize: vertical;
+}
+.form-actions { display: flex; gap: 8px; margin-top: 12px; justify-content: flex-end; }
+
+.answers-panel { max-height: 70vh; display: flex; flex-direction: column; }
+.answers-header { display: flex; justify-content: space-between; align-items: center; padding-bottom: 8px; border-bottom: 1px solid #edf1f4; }
+.answers-list { overflow-y: auto; margin-top: 8px; }
+.answer-row {
+  display: grid;
+  grid-template-columns: 40px 1fr 60px;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid #f0f3f5;
+  align-items: baseline;
+  font-size: 14px;
+}
+.q-no { color: #72828d; text-align: center; font-weight: 700; }
+.q-text { color: #183447; }
+.q-answer { text-align: center; font-weight: 700; font-size: 15px; }
+.q-answer.yes { color: #c0392b; }
+.q-answer.no { color: #6a7b87; }
+</style>

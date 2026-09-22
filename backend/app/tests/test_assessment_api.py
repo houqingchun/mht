@@ -2,6 +2,7 @@ from sqlalchemy import func, select, update
 
 from app.models.assessment import AssessmentResult, RiskEvent
 from app.models.scale import ScaleQuestion
+from app.services.scale_rule_service import MHT_RULE_VERSION
 from app.tests.conftest import auth_headers
 
 
@@ -102,7 +103,9 @@ def test_submit_complete_answers_calculates_result_and_risk_event(client, db_ses
     data = response.json()["data"]
     assert data["result"]["total_score"] == 1
     assert data["result"]["validity_score"] == 0
-    assert data["result"]["rule_version"] == "MHT-RULE-1.1.0"
+    # 结果落在**当前生效**那一行的版本号上，所以这里读常量而不是写死字面量：写死会在
+    # 下一次换算法（`MHT_RULE_VERSION` +1）时红在一个与「提交能不能算分」无关的地方。
+    assert data["result"]["rule_version"] == MHT_RULE_VERSION
     assert len(data["risk_events"]) == 1
     assert data["risk_events"][0]["trigger_rule"] == "KEY_QUESTION_85_YES"
 

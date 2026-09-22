@@ -10,7 +10,7 @@ const branding = ref<Branding | null>(null)
 
 const role = ref<Role>('student')
 // Never prefilled: credentials in a form field are one screenshot away from
-// being leaked, and a pre-filled form reads as a demo rather than a real system.
+// being leaked, and a pre-filled form can be mistaken for a real credential.
 const account = ref('')
 const password = ref('')
 const loading = ref(false)
@@ -143,4 +143,3 @@ async function submit() {
     </section>
   </main>
 </template>
-

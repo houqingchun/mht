@@ -547,6 +547,28 @@ export async function getClassComparison(studentId: number): Promise<ClassCompar
   return apiRequest<ClassComparison>(`/care-cases/${studentId}/comparison`)
 }
 
+/**
+ * 一场测评的完整答卷（100 道题的逐题答案）。
+ *
+ * 与 `getKeyQuestionAnswers` 共享 `KeyQuestionReader` 能力矩阵——完整答卷比
+ * 重点题多 98 道题，但敏感度相同（都是原始作答内容）。
+ * 每次查看都写审计，必须提供查看原因（`purpose`）。
+ */
+export interface FullAnswerItem {
+  question_no: number
+  question_text: string
+  answer: string
+}
+
+export async function getSessionFullAnswers(
+  studentId: number,
+  sessionId: number,
+  purpose: string
+): Promise<{ items: FullAnswerItem[]; session_id: number }> {
+  const query = new URLSearchParams({ purpose })
+  return apiRequest(`/students/${studentId}/sessions/${sessionId}/full-answers?${query}`)
+}
+
 export async function createManualReview(
   caseId: number,
   payload: {
@@ -738,6 +760,82 @@ export interface DimensionDistributionItem {
 export async function getDimensionDistribution(): Promise<DimensionDistributionItem[]> {
   const data = await apiRequest<{ items: DimensionDistributionItem[] }>('/analytics/dimensions')
   return data.items
+}
+
+export type AnalyticsMode = 'ALL_CALCULATED' | 'VALIDITY_UNFLAGGED'
+
+export interface ReportDimension {
+  dimension_code: string
+  score_min: number
+  score_max: number
+  score_direction: string
+  n_evaluable: number
+  n_excluded: number
+  mean_score: number | null
+  distribution: Array<{ range_code: string; count: number; rate: number | null }>
+  high_score_count: number | null
+  high_score_rate: number | null
+  screening_rule_available: boolean
+  screening_count: number | null
+  screening_rate: number | null
+  suppression: { suppressed: boolean; reason: string | null }
+}
+
+export interface ReportCohort {
+  grade_name: string
+  class_name: string | null
+  target_count: number
+  eligible_count: number
+  completed_count: number
+  sample_count: number
+  coverage_rate: number | null
+  dimensions: ReportDimension[]
+}
+
+export interface AnalyticsReport {
+  report_id: string
+  task: { id: number; name: string }
+  tasks: Array<{ id: number; name: string }>
+  as_of: string
+  timezone: string
+  scale: { code: string | null; version: string | null; rule_versions: string[] }
+  analysis_mode: AnalyticsMode
+  sample_quality: {
+    target_count: number
+    eligible_count: number
+    completed_count: number
+    validity_unflagged_count: number
+    validity_flagged_count: number
+    n_evaluable: number
+    coverage_rate: number | null
+  }
+  overview: {
+    sample_count: number
+    signal_student_count: number
+    signal_rate: number | null
+    pending_review_work_items: number
+    completed_review_work_items: number
+    signal_type_stats: Array<{ signal_type: string; student_count: number }>
+  }
+  dimensions: ReportDimension[]
+  grades: ReportCohort[]
+  classes: ReportCohort[]
+  interpretation_warnings: string[]
+  permissions: {
+    can_drill_down_aggregate: boolean
+    can_open_student_detail: boolean
+    can_export: boolean
+  }
+}
+
+export async function getAnalyticsReport(
+  taskIds: number | number[],
+  analysisMode: AnalyticsMode
+): Promise<AnalyticsReport> {
+  const ids = Array.isArray(taskIds) ? taskIds : [taskIds]
+  const query = new URLSearchParams({ analysisMode })
+  ids.forEach(id => query.append('taskIds', String(id)))
+  return apiRequest<AnalyticsReport>(`/analytics/report?${query}`)
 }
 
 export interface ReminderItem {

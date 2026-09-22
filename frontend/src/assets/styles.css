@@ -27,10 +27,16 @@
   --font-small: 13px;
   --font-table: 14px;
   --font-student: 18px;
+  --font-family-ui: Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-page-title: clamp(1.55rem, 2.2vw, 2rem);
+  --font-section-title: 1.08rem;
+  --font-body: 0.92rem;
+  --font-caption: 0.76rem;
+  --line-body: 1.65;
 
   color: var(--text);
   background: var(--bg);
-  font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-family: var(--font-family-ui);
   font-size: var(--font-ui);
 }
 
@@ -176,7 +182,9 @@
 .card h2 {
   margin: 0;
   color: var(--navy);
-  font-size: 1.08rem;
+  font-size: var(--font-section-title);
+  line-height: 1.4;
+  font-weight: 750;
 }
 
 /* ========== Metric tile ========== */
@@ -377,7 +385,8 @@
 .page-head h1 {
   margin: 0;
   color: var(--navy);
-  font-size: clamp(1.55rem, 2.2vw, 2rem);
+  font-size: var(--font-page-title);
+  font-weight: 780;
   line-height: 1.25;
   letter-spacing: -0.02em;
 }
@@ -468,6 +477,9 @@ body {
 .nav {
   display: grid;
   gap: 5px;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
 }
 
 .nav-btn {
@@ -495,6 +507,46 @@ body {
   background: rgba(77, 139, 238, 0.23);
   color: #fff;
   box-shadow: inset 3px 0 #75dce2;
+}
+
+.nav-group {
+  display: grid;
+  gap: 4px;
+}
+
+.nav-group-trigger {
+  width: 100%;
+  font: inherit;
+}
+
+.nav-chevron {
+  margin-left: auto;
+  font-size: 1.1rem;
+  transform: rotate(90deg);
+  transition: transform 0.18s ease;
+}
+
+.nav-group-trigger[aria-expanded="false"] .nav-chevron {
+  transform: rotate(0);
+}
+
+.nav-submenu {
+  display: grid;
+  gap: 3px;
+  margin: 0 0 5px 17px;
+  padding-left: 10px;
+  border-left: 1px solid rgba(169, 189, 209, 0.28);
+}
+
+.nav-subitem {
+  min-height: 38px;
+  padding: 8px 10px;
+  font-size: 0.84rem;
+}
+
+.nav-subitem .nav-icon {
+  width: 16px;
+  font-size: 0.78rem;
 }
 
 .nav-icon {
@@ -723,6 +775,8 @@ body {
 
 .content {
   padding: 27px 30px 38px;
+  width: 100%;
+  min-width: 0;
   max-width: 1560px;
   margin: auto;
 }
@@ -740,7 +794,8 @@ body {
 .page-desc {
   margin-top: 7px;
   color: var(--muted);
-  font-size: 0.92rem;
+  font-size: var(--font-body);
+  line-height: var(--line-body);
 }
 
 /* 页脚：目前只有「账号与权限」用（那一页要显示系统版本，操作员照屏幕报故障用的）。
@@ -2075,7 +2130,7 @@ tbody tr:hover td {
    **三个短字段一行 + 「关联测评任务」自己占一整行**（后者见下面 `.field-task`）。
 
    为什么不是四格一行，这是**量出来的**：`<select>` 的当前值显示的是整条选中项的文字，
-   而这一项的选项是任务名——演示库里最长的一条
+   而这一项的选项是任务名——测试时最长的一条
    `2026春季MHT心理健康筛查（外部平台导入）（IMPORT-202605-1 · 已结束）` 实测 565px。
    四格一行时即使把另外三格压到最小，「关联任务」也只分得到 ~425px，**四个选项里三个
    仍然被截断**，就是用户报的那一处拥挤换了个宽度复发。整行给它有 1049px 可用。
@@ -2267,11 +2322,35 @@ tbody tr:hover td {
 }
 
 .tiny {
-  font-size: 0.76rem;
+  font-size: var(--font-caption);
 }
 
 .muted {
   color: var(--muted);
+}
+
+/* 全应用标题与辅助文字语义层级。业务页只选语义类，不再各自定义字号与颜色。 */
+.section-title {
+  margin: 0;
+  color: var(--navy);
+  font-size: var(--font-section-title);
+  font-weight: 750;
+  line-height: 1.4;
+}
+
+.hint,
+.minor,
+.helper-text {
+  color: var(--muted);
+  font-size: var(--font-caption);
+  line-height: 1.6;
+}
+
+.loading {
+  padding: 60px 0;
+  color: var(--muted);
+  font-size: var(--font-body);
+  text-align: center;
 }
 
 /* ========== 图表（自绘 SVG，不引图表库） ==========
@@ -2624,6 +2703,22 @@ tbody tr:hover td {
        这一条与 `overflow-x: auto` 是一对，缺一条就等于没有。 */
     min-width: 0;
     flex: 1 1 auto;
+    overflow-y: hidden;
+  }
+
+  .nav-group,
+  .nav-submenu {
+    display: contents;
+  }
+
+  .nav-group-trigger .nav-chevron {
+    display: none;
+  }
+
+  .nav-subitem {
+    min-height: 53px;
+    padding: 5px 7px;
+    font-size: 0.68rem;
   }
   /* 窄屏的底栏里，品牌副标题与分区标签不承载导航信息，让位给按钮本身。 */
   .brand-sub,
@@ -2713,6 +2808,21 @@ tbody tr:hover td {
 }
 
 @media (max-width: 680px) {
+  .topbar > :first-child {
+    min-width: 0;
+  }
+
+  .top-actions {
+    flex: 0 0 auto;
+    gap: 6px;
+  }
+
+  .top-actions .btn {
+    min-height: 34px;
+    padding-inline: 9px;
+    white-space: nowrap;
+  }
+
   .toast-container {
     left: 12px;
     right: 12px;
@@ -2721,6 +2831,20 @@ tbody tr:hover td {
   .toast {
     min-width: auto;
     max-width: none;
+  }
+}
+
+@media (max-width: 480px) {
+  .top-title {
+    max-width: 70px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.9rem;
+  }
+
+  .top-actions .avatar {
+    display: none;
   }
 }
 

@@ -1,4 +1,4 @@
-.PHONY: install dev backend frontend test e2e docker-up docker-down docker-logs clean reset seed seed-demo purge-demo db-upgrade-sql deploy-package
+.PHONY: install dev backend frontend test e2e docker-up docker-down docker-logs clean reset seed seed-demo purge-demo db-upgrade-sql db-seed-sql deploy-package
 
 # Install dependencies
 install:
@@ -71,6 +71,24 @@ purge-demo:
 # 只写文件、不碰数据库，所以在开发机上跑是安全的。
 db-upgrade-sql:
 	cd backend && source .venv/bin/activate && python ../deploy/build_migration_sql.py
+
+# 重新渲染 backend/sql/seed_mysql8.sql（+ dist/ 一份）——「只有系统基础数据与管理员账号」
+# 的那份 DML 脚本。
+#
+# **它要连上一台活着的 MySQL**（与 db-upgrade-sql 不同，那一份是纯文件操作）：这份文件的
+# 数据段必须来自 `seed.py` 的**结果**，不是它**代码**的副本——行里的 id 引用是 `db.flush()`
+# 的产物，而在 SQL 里再抄一份基线必然漂移（CLAUDE.md §16）。所以它真的跑一遍
+# `<主库名>_init` 这个一次性库：建库 → 迁移 → seed → reset_to_baseline → 读结果 → 删库。
+#
+# 它**只**碰 `<主库名>_init`（生成器里有三条断言把着：以 `_init` 结尾、与主库不同名、是
+# mysql），**不碰开发库本身**。改过 `seed.py` / `data/mht_scale.json` / `reset_to_baseline.sql`
+# 就要跑它，然后把 `backend/sql/seed_mysql8.sql` 一起提交——`test_seed_sql.py` 逐字节盯着。
+#
+# **不在 `make deploy-package` 里重新生成**（与 upgrade_from_v1_0_0.sql 相反）：那一份的
+# 两个来源都长在当前源码树上，出包时源码树就是最新的；这一份多了一个**外部来源**（一个库），
+# 出包时重生成反而会**盖掉**「有人改了 seed 却没重跑这里」这个信号。
+db-seed-sql:
+	cd backend && source .venv/bin/activate && python ../deploy/build_seed_sql.py
 
 # 打 Windows 一键安装包 -> dist/心晴部署包.zip
 #

@@ -17,7 +17,11 @@ import SettingsPage from '../features/admin/SettingsPage.vue'
 import TasksPage from '../features/admin/TasksPage.vue'
 import ExportCenterPage from '../features/admin/ExportCenterPage.vue'
 import AuditPage from '../features/admin/AuditPage.vue'
-import AnalyticsPage from '../features/analytics/AnalyticsPage.vue'
+import ReportOverviewPage from '../features/analytics/views/OverviewPage.vue'
+import ReportDimensionsPage from '../features/analytics/views/DimensionsPage.vue'
+import ReportGradesPage from '../features/analytics/views/GradesPage.vue'
+import ReportClassPage from '../features/analytics/views/ClassPortraitPage.vue'
+import ReportExportPage from '../features/analytics/views/ReportExportPage.vue'
 import StudentHistoryPage from '../features/student/StudentHistoryPage.vue'
 
 export const routes: RouteRecordRaw[] = [
@@ -43,7 +47,12 @@ export const routes: RouteRecordRaw[] = [
       // 像是档案的一部分，而它恰恰不是。
       { path: 'counselor/students/:studentId/records', component: StudentRecordsPage, meta: { role: 'counselor', title: '学生测评记录' } },
       { path: 'counselor/data', component: DataCenterPage, meta: { role: 'counselor', title: '数据中心' } },
-      { path: 'counselor/analytics', component: AnalyticsPage, meta: { role: 'counselor', title: '统计分析' } },
+      { path: 'counselor/analytics', redirect: '/counselor/analytics/overview', meta: { role: 'counselor', title: '统计分析' } },
+      { path: 'counselor/analytics/overview', component: ReportOverviewPage, meta: { role: 'counselor', title: '全校预警总览' } },
+      { path: 'counselor/analytics/dimensions', component: ReportDimensionsPage, meta: { role: 'counselor', title: '全校八维度分析' } },
+      { path: 'counselor/analytics/grades', component: ReportGradesPage, meta: { role: 'counselor', title: '年级维度对比' } },
+      { path: 'counselor/analytics/classes', component: ReportClassPage, meta: { role: 'counselor', title: '班级维度画像' } },
+      { path: 'counselor/analytics/report', component: ReportExportPage, meta: { role: 'counselor', title: '专业解读与导出' } },
       { path: 'counselor/audit', component: AuditPage, meta: { role: 'counselor', title: '审计日志' } },
       { path: 'counselor/exports', component: ExportCenterPage, meta: { role: 'counselor', title: '导出中心' } },
       { path: 'counselor/tasks', component: TasksPage, meta: { role: 'counselor', title: '测评任务' } },
@@ -51,7 +60,12 @@ export const routes: RouteRecordRaw[] = [
       // Leader
       { path: 'leader/overview', component: LeaderOverviewPage, meta: { role: 'leader', title: '领导总览' } },
       { path: 'leader/progress', component: ProgressPage, meta: { role: 'leader', title: '重点进展' } },
-      { path: 'leader/analytics', component: AnalyticsPage, meta: { role: 'leader', title: '学校统计' } },
+      { path: 'leader/analytics', redirect: '/leader/analytics/overview', meta: { role: 'leader', title: '学校统计' } },
+      { path: 'leader/analytics/overview', component: ReportOverviewPage, meta: { role: 'leader', title: '全校预警总览' } },
+      { path: 'leader/analytics/dimensions', component: ReportDimensionsPage, meta: { role: 'leader', title: '全校八维度分析' } },
+      { path: 'leader/analytics/grades', component: ReportGradesPage, meta: { role: 'leader', title: '年级维度对比' } },
+      { path: 'leader/analytics/classes', component: ReportClassPage, meta: { role: 'leader', title: '班级维度画像' } },
+      { path: 'leader/analytics/report', component: ReportExportPage, meta: { role: 'leader', title: '专业解读与导出' } },
       { path: 'leader/tasks', component: TasksPage, meta: { role: 'leader', title: '测评任务' } },
       { path: 'leader/audit', component: AuditPage, meta: { role: 'leader', title: '审计日志' } },
 

@@ -2918,6 +2918,49 @@ def test_the_operator_manual_names_the_buttons_as_they_are_on_disk():
     assert not unknown, f"手册里提到了磁盘上没有的按钮：{unknown}；磁盘上有的是 {sorted(known)}"
 
 
+def test_the_sql_files_the_manual_names_are_files_that_exist_and_travel_in_the_package():
+    r"""手册里点名的每一个 `backend\sql\*.sql` 都得真在 `backend/sql/` 里，且跟着进包。
+
+    与上面那一条（`.bat` 的名字）是同一条教训的第四处：**操作员照着纸上的路径去目录里
+    翻，翻不到同一个东西**。2026-09-21 这份手册里**第一次**出现 `backend\sql\...` 这个
+    形状（选 2 那节的 ③ 与选 3 那节各一处，此前它一个 SQL 文件名都不提），所以此前
+    没有任何东西挡着「给那份文件改个名，只改了手册」或者反过来的那一半。
+
+    **为什么非要有两半判据。** 文件在磁盘上、却不进包，操作员在安装目录里同样找不到它
+    ——而那正是这份文件存在的全部意义：`schema_prepared` 与「数据库我自己准备」那两条路
+    上，客户手上没有能跑的 Python，这几份 SQL 是他们唯一的路。只断前半条的话，
+    「从 `REQUIRED_PATHS` 里删一行」会是静默的（手册照旧指着它）。
+
+    判据只认 `backend[\\/]sql[\\/]<名字>.sql` 这一段，不是整串相等：手册里既有
+    `backend\sql\seed_mysql8.sql`，也有 `C:\xinliceping\backend\sql\...` 那种带盘符的
+    整路径。**前缀是判据的一部分，实测过**：把同一份手册按「任何以 `.sql` 结尾的东西」
+    扫一遍，多出来的是 `schema.sql`（选 3 那节里 mysqldump 的**输出名**，客户自己起的，
+    磁盘上当然没有）和光秃秃一个 `.sql`（「`backend\sql\` 里」那句话本身，没有文件名）
+    ——两条都是误报，而误报会让人把这条守卫关掉。带上前缀之后，剩下的正好是四个真名字。
+
+    网眼：它只管「叫得出名字的那几个文件在不在」，管不了**说的是哪一件事**——把
+    「先导 seed 再导 schema」写成反的它照样绿（两个文件都在）。这一点与上面那一条逐字
+    相同。
+    """
+    manual = (WINDOWS_ASSETS / "部署说明.txt").read_text(encoding="utf-8-sig")
+
+    seen = set(re.findall(r"backend[\\/]sql[\\/]([A-Za-z0-9_]+\.sql)", manual))
+    assert len(seen) >= 3, f"只扫到 {len(seen)} 个 SQL 文件名，正则八成坏了：{sorted(seen)}"
+
+    on_disk = {path.name for path in (BACKEND_DIR / "sql").glob("*.sql")}
+    unknown = sorted(name for name in seen if name not in on_disk)
+    assert not unknown, (
+        f"手册里提到了 backend\\sql\\ 下没有的文件：{unknown}；那个目录里有的是 {sorted(on_disk)}"
+    )
+
+    required = list_literal(build_package_text(), "REQUIRED_PATHS")
+    absent = sorted(name for name in seen if f'"backend/sql/{name}"' not in required)
+    assert not absent, (
+        f"手册把操作员指到了 {absent}，而它不在 REQUIRED_PATHS 里——装出来的包里不会有这几份"
+        "文件，操作员会照着纸去找一个不存在的东西（而这是他们唯一的路，见 docstring）"
+    )
+
+
 def test_the_operator_manual_has_the_section_the_triage_points_at():
     r"""「网页打不开」那一段把操作员指到手工启动那一节，而那一节真的在，且说了三件事。
 

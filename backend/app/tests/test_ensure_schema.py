@@ -349,7 +349,7 @@ def _nothing_yet() -> SchemaDiff:
 
 #: 跟着 `alembic/versions/` 的 head 走。加一条迁移就改它——`_read_state` 会在
 #: `ScriptDirectory.get_current_head()` 与它不一致时当场喊出来，所以它不会悄悄过期。
-HEAD = "0018_row_conflict_resolution"
+HEAD = "0019_total_includes_validity"
 OLDER = "0010_import_source"
 
 

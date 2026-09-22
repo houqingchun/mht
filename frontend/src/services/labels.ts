@@ -426,8 +426,8 @@ export const OUT_OF_SCOPE_REASON_LABELS: Record<string, string> = {
  * **只有第二面能保护它，而第二面在这一张表上今天是空的**——与第 5 期的
  * `AGE_RESOLUTION_LABELS` / `OUT_OF_SCOPE_REASON_LABELS` 是同一处取舍（§26）：
  * 四个中文只渲染在 MHT 明细弹层的冲突行上，而 e2e 里 **`CONFLICT` 这一档到不了**
- * （演示名册的班级叫 `1班`，文件里那一列按学校编号必须写数字，于是任何一行都匹配
- * 不上学生，走不到「以哪一份为准」）。要覆盖它得先让共享演示库长出一个叫 `704` 的
+ * （测试名册的班级叫 `1班`，文件里那一列按学校编号必须写数字，于是任何一行都匹配
+ * 不上学生，走不到「以哪一份为准」）。要覆盖它得先为测试名册增加一个叫 `704` 的
  * 班级，而那会改动别的用例看到的名册（§测试注意：跑 e2e 不许改数据）。后端那一侧
  * 是钉住的（`test_import_conflict_resolution.py` 逐档断言），漏的是「视图有没有调用
  * 标签函数」。
@@ -435,7 +435,7 @@ export const OUT_OF_SCOPE_REASON_LABELS: Record<string, string> = {
  * **这四个码仍然列进 `UNTRANSLATED_CODES`**（`e2e/vocabulary.spec.ts`），与 §3 里
  * `IMPORTED` / `SUPPLEMENT` 那两个同一条：它们是 `SCREAMING_SNAKE` 的码，不会在别的
  * 文案里当普通词出现（`overwrite` 被排除出那份清单**正是**因为这个），而今天没有数据
- * 不代表以后没有——列在那里，哪天演示数据里真有一条冲突行，它自己就开始生效。
+ * 不代表以后没有——列保留在这里，真实导入出现冲突行时会直接生效。
  * 反面是 §24 里 `STUDENT` 那条：它被移除不是因为零覆盖，是因为它**会无故变红**
  * （审计页只显示最新 20 行，而另一个 spec 并发地往那 20 行里写）。这两个判据别混。
  */
@@ -1139,4 +1139,101 @@ export function careEventTone(code: string | null | undefined): Tone {
   if (code === 'CASE_OPENED' || code === 'CASE_REOPENED') return 'red'
   if (code && code in CARE_EVENT_LABELS) return 'blue'
   return 'gray'
+}
+
+/**
+ * **维度得分分布区间** —— 后端 `_dimension_report` 的 `distribution[].range_code`（`LOW` / `MEDIUM` / `HIGH`）。
+ *
+ * 与 `LEVEL_LABELS`（关注等级）是**两个轴**：那是「这个学生整体是什么状态」，
+ * 这是「这名学生在**这一个维度**上落在哪个分数段」。同一份答卷，总分可能是
+ * `GENERAL_RANGE`，但「学习焦虑」维度落在 `HIGH`——那是两件事。
+ *
+ * 键序 = 分数从低到高（低分区间 → 中分区间 → 高分区间），与量表分段的排列次序一致。
+ * **没有 `*_ORDER`**：读者是描述性的一行字或分布图例，不是 `DataTable` 的可排序列（§3 第四面）。
+ */
+export const SCORE_DISTRIBUTION_LABELS: Record<string, string> = {
+  LOW: '低分区间',
+  MEDIUM: '中分区间',
+  HIGH: '高分区间'
+}
+
+export function scoreDistributionLabel(code: string | null | undefined) {
+  return labelOf(SCORE_DISTRIBUTION_LABELS, code)
+}
+
+/**
+ * **分析模式** —— 报表中心 `analysisMode`（§1.4 样本质量与效度分层）。
+ *
+ * 两档回答的是「这份统计报告纳入了哪些结果」：
+ *   - `ALL_CALCULATED`：所有已计算的测评结果，含效度触发复测建议的；
+ *   - `VALIDITY_UNFLAGGED`：只纳入效度未触发复测建议的结果。
+ *
+ * 模式切换后所有 KPI、各维度 N、图表、年级/班级基准必须同步重算——
+ * 这不是一个可选的筛选，而是一个**统计口径**的切换。
+ *
+ * **没有 `*_ORDER`**：读者是下拉选项，不是可排序的列。
+ */
+export const ANALYSIS_MODE_LABELS: Record<string, string> = {
+  ALL_CALCULATED: '全部已计算',
+  VALIDITY_UNFLAGGED: '效度未触发提示'
+}
+
+export function analysisModeLabel(code: string | null | undefined) {
+  return labelOf(ANALYSIS_MODE_LABELS, code)
+}
+
+/**
+ * **样本质量指标** —— 报表中心 `sample_quality` 各字段的中文标签。
+ *
+ * 这八个指标回答的是「这份报告的统计基础是什么」，不是「结果是什么」。
+ * 它们与 §1.2 的 T/E/D/C/N 统计概念逐字对应：
+ *
+ * | 字段 | 概念 |
+ * |---|---|
+ * | `target_count` | 任务目标人数 T |
+ * | `eligible_count` | 实际应测人数 D = T − E |
+ * | `completed_count` | 技术完成人数 C |
+ * | `validity_unflagged_count` | 效度未触发提示人数 |
+ * | `validity_flagged_count` | 效度触发提示人数 |
+ * | `n_evaluable` | 统计有效样本 N |
+ * | `coverage_rate` | 覆盖率 C/D |
+ *
+ * **没有 `*_ORDER`**：读者是样本质量条的那一排格子，不是可排序的列。
+ */
+export const SAMPLE_QUALITY_LABELS: Record<string, string> = {
+  target_count: '任务目标',
+  eligible_count: '实际应测',
+  completed_count: '技术完成',
+  validity_unflagged_count: '效度未触发提示',
+  validity_flagged_count: '效度触发提示',
+  n_evaluable: '可评价样本',
+  coverage_rate: '样本覆盖率'
+}
+
+export function sampleQualityLabel(key: string) {
+  return SAMPLE_QUALITY_LABELS[key] || key
+}
+
+/**
+ * **筛查信号类型** —— 后端 `RiskEvent.signal_type`（§18.8）。
+ *
+ * 三档各自回答「这一条风险提示是怎么来的」：
+ *   - `SCREENING_SIGNAL`：总分或维度分落入预警区间，引擎自动触发；
+ *   - `MANUAL_REVIEW`：重点题（85 / 97）答「是」，需要人看原始答卷；
+ *   - `RETEST_RECOMMENDATION`：效度题触发复测建议，需要确认这份答卷可不可信。
+ *
+ * 与 `RISK_EVENT_STATUS_LABELS`（待复核 / 已复核）是**两个维度**：
+ * 那一张说「这条风险提示处理了没有」，这一张说「这条风险提示是怎么产生的」。
+ * 同一行既有类型也有状态。
+ *
+ * **没有 `*_ORDER`**：读者是统计面板的图例，不是可排序的列。
+ */
+export const SIGNAL_TYPE_LABELS: Record<string, string> = {
+  SCREENING_SIGNAL: '普通筛查信号',
+  MANUAL_REVIEW: '重点题人工复核',
+  RETEST_RECOMMENDATION: '效度复测建议'
+}
+
+export function signalTypeLabel(code: string | null | undefined) {
+  return labelOf(SIGNAL_TYPE_LABELS, code)
 }

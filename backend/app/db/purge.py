@@ -68,7 +68,7 @@ from app.models.importing import (
 from app.models.organization import ClassGroup, Grade, Student
 from app.models.scale import AssessmentScale, ScaleQuestion, ScaleRule
 from app.scale_engine.engine import DEFAULT_RULE_CONFIG, rule_config_from_json, rule_config_to_json
-from app.services.scale_rule_service import RULE_TYPE, rule_version_for
+from app.services.scale_rule_service import MHT_RULE_VERSION, RULE_TYPE
 
 # Child before parent. `manual_review` must precede `risk_event` (NOT NULL FK),
 # `risk_event` / the care records / `audit_log` must precede `student` and
@@ -395,7 +395,14 @@ def _normalize_rules(db: Session, deleted: dict[str, int]) -> list[str]:
         # Already the single canonical row (a database that was only ever seeded):
         # replacing it would be a no-op that still burns a row id and rewrites the
         # one row an audit trail might name. Leave it.
-        if rule_versions == [rule_version_for(scale.code, scale.version)]:
+        #
+        # 判据是 `MHT_RULE_VERSION`（随这一版程序发布的那个号），不是
+        # `rule_version_for(scale.code, scale.version)`：后者由**量表版本**派生，
+        # 而这一行的版本号 2026-09-21 因总分口径变更 +1 过一次、量表的版本号没动
+        # （理由与 `seed.py` 那一处同源，见 `scale_rule_service.MHT_RULE_VERSION`
+        # 的注释）。用派生写法的话，一个刚被 `0019` 升过级的库会被判成「不是规范行」
+        # 而整批删掉重建。
+        if rule_versions == [MHT_RULE_VERSION]:
             continue
         if db.scalar(
             select(func.count(AssessmentResult.id)).where(
@@ -410,7 +417,9 @@ def _normalize_rules(db: Session, deleted: dict[str, int]) -> list[str]:
         db.add(
             ScaleRule(
                 scale_id=scale.id,
-                rule_version=rule_version_for(scale.code, scale.version),
+                # 与 `seed.py` 写的那一行**必须**是同一个版本号，否则清过库的库与
+                # 全新装的库在「当前规则叫什么」上各说各话（常量自己的注释写了这一条）。
+                rule_version=MHT_RULE_VERSION,
                 rule_type=RULE_TYPE,
                 status="ACTIVE",
                 config_json=mht_rule_config(),

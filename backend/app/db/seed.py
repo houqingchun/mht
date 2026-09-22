@@ -12,7 +12,7 @@ from app.models.organization import ClassGroup, Grade, School, Student
 from app.models.scale import AssessmentScale, ScaleQuestion, ScaleRule
 from app.scale_engine.engine import DEFAULT_RULE_CONFIG, default_mht_questions, rule_config_to_json
 from app.security.passwords import hash_password
-from app.services.scale_rule_service import rule_version_for
+from app.services.scale_rule_service import MHT_RULE_VERSION
 from app.services.target_snapshot import target_snapshot
 
 # The version the seed ships. Kept in one place because three things have to
@@ -198,7 +198,12 @@ def seed_mht_scale(db: Session) -> None:
     db.add(
         ScaleRule(
             scale_id=scale.id,
-            rule_version=rule_version_for(scale.code, scale.version),
+            # 不写 `rule_version_for(scale.code, scale.version)`：那个函数由**量表版本**
+            # 派生标识，而种子这一行的版本号已经与量表版本脱钩了——2026-09-21 总分口径
+            # 改成「效度题也计入」时 +1 过一次，而量表的版本号没动。全新装出来的库与
+            # 升级上来的库必须落到同一个号上，判据就是 `MHT_RULE_VERSION` 这一处
+            # （`0019_total_includes_validity` 那条迁移是它的另一半，注释在那边）。
+            rule_version=MHT_RULE_VERSION,
             rule_type="MHT_SCORING",
             status="ACTIVE",
             # The engine reads this at scoring time, so it must be complete.

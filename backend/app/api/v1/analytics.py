@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_role
@@ -13,6 +13,7 @@ from app.services.analytics_service import (
     analytics_by_class,
     analytics_by_grade,
     analytics_overview,
+    analytics_report,
     counselor_reminders,
     dimension_distribution,
     leader_progress,
@@ -57,6 +58,23 @@ def dimensions(
 ):
     """Per-dimension aggregate for the workbench / analytics bar charts."""
     return ok({"items": dimension_distribution(db, current_user)})
+
+
+@router.get("/analytics/report")
+def report(
+    current_user: AggregateStatsReader,
+    db: Annotated[Session, Depends(get_db)],
+    task_id: int | None = Query(default=None, alias="taskId", ge=1),
+    task_ids: list[int] | None = Query(default=None, alias="taskIds"),
+    analysis_mode: str = Query(default="ALL_CALCULATED", alias="analysisMode"),
+):
+    """按一个或多个测评任务返回报表快照；跨任务时每名学生只取最新结果。"""
+    normalized_ids = list(dict.fromkeys(task_ids or ([] if task_id is None else [task_id])))
+    if len(normalized_ids) > 20:
+        from app.core.errors import AppError
+
+        raise AppError("VALIDATION_ERROR", "一次最多合并分析20个测评任务", 422)
+    return ok(analytics_report(db, current_user, task_id, analysis_mode, normalized_ids))
 
 
 @router.get("/counselor/reminders")

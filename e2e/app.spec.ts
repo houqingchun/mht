@@ -393,38 +393,51 @@ test.describe('Leader Overview', () => {
   });
 });
 
-// ========== Analytics Page Tests（心理老师与德育领导复用同一组件）==========
+// ========== Analytics Report Center（五类报表共用任务选择器）==========
 
 test.describe('Analytics', () => {
-  /**
-   * 口径必须出现在**标题**里，而不只是角落里的小字。
-   *
-   * 此前心理老师进来看到的是「学校心理筛查统计」加一行「我的授权范围口径」的脚注——
-   * 标题说学校，脚注说范围，而标题是唯一会被截图、被转述、被记进会议纪要的那一句。
-   */
-  test('counselor is told their numbers describe their own scope', async ({ page }) => {
+  test('counselor analytics entry opens the newest task automatically', async ({ page }) => {
     await loginAs(page, 'counselor');
     await page.goto('/counselor/analytics');
-    await expect(page.getByRole('heading', { name: '我的范围筛查统计' })).toBeVisible();
-    await expect(page.locator('.page-desc')).toContainText('我的授权范围口径');
+    await expect(page).toHaveURL(/\/counselor\/analytics\/overview$/);
+    await expect(page.getByText('已自动加载最新可分析任务')).toBeVisible();
+    await expect(page.getByRole('heading', { name: '筛查信号类型分布' })).toBeVisible();
+    await expect(page.locator('.task-option input:checked')).toHaveCount(1);
   });
 
-  test('leader is told their numbers describe the whole school', async ({ page }) => {
+  test('leader analytics entry opens the report center', async ({ page }) => {
     await loginAs(page, 'leader');
     await page.goto('/leader/analytics');
-    await expect(page.getByRole('heading', { name: '学校筛查统计' })).toBeVisible();
-    await expect(page.locator('.page-desc')).toContainText('全校口径');
+    await expect(page).toHaveURL(/\/leader\/analytics\/overview$/);
+    await expect(page.getByText('已自动加载最新可分析任务')).toBeVisible();
+    await expect(page.getByRole('heading', { name: '筛查信号类型分布' })).toBeVisible();
   });
 
-  /**
-   * 「关注占比」的分母是**已测评人数**，不是测评次数——复测过的学生只算一次。
-   * 这一格此前数的是所有 assessment_result，于是跨场次重复计数、而且只增不减。
-   */
-  test('counselor sees the attention ratio on its own denominator', async ({ page }) => {
+  test('multiple imported batches can be selected together', async ({ page }) => {
     await loginAs(page, 'counselor');
-    await page.goto('/counselor/analytics');
-    const foot = page.locator('.metric-foot').nth(1);
-    await expect(foot).toContainText('占已测评');
+    await page.goto('/counselor/analytics/overview');
+    await expect(page.getByText('已自动加载最新可分析任务')).toBeVisible();
+    await page.locator('.task-picker summary').click();
+    const extraTask = page.locator('.task-option input:not(:checked)').first();
+    await expect(extraTask).toBeVisible();
+    await extraTask.check();
+    await page.getByRole('button', { name: /查询/ }).click();
+    await expect(page.locator('.task-picker summary')).toHaveText('已选择 2 个任务');
+    await expect(page.locator('.task-picker')).not.toHaveAttribute('open', '');
+  });
+
+  test('analytics submenu toggles and stays open when another section is selected', async ({ page }) => {
+    await loginAs(page, 'counselor');
+    const trigger = page.getByRole('button', { name: /统计分析/ });
+    const child = page.getByRole('link', { name: '年级维度对比' });
+    await expect(child).not.toBeVisible();
+    await trigger.click();
+    await expect(child).toBeVisible();
+    await trigger.click();
+    await expect(child).not.toBeVisible();
+    await trigger.click();
+    await page.getByRole('link', { name: '重点学生' }).click();
+    await expect(child).toBeVisible();
   });
 
   /**
@@ -434,21 +447,95 @@ test.describe('Analytics', () => {
    * 两种文案都收：演示数据里每个班的已测评人数刚好在门槛附近，写死哪一种都会随数据漂移。
    * 真正钉住这条规则的是后端 `test_analytics_basis.py`。
    */
-  test('a too-small cohort is labelled instead of given a percentage', async ({ page }) => {
+  test('grade comparison renders a publishable column chart from demo data', async ({ page }) => {
     await loginAs(page, 'counselor');
-    await page.goto('/counselor/analytics');
-    const cells = page.locator('table tbody tr td:nth-child(7)');
-    await expect(cells.first()).toBeVisible();
-    for (const text of await cells.allInnerTexts()) {
-      expect(text.trim()).toMatch(/^(样本过小|\d+%)$/);
-    }
+    await page.goto('/counselor/analytics/grades');
+    await expect(page.getByText('已自动加载最新可分析任务')).toBeVisible();
+    const card = page.locator('.chart-card', { hasText: '各年级高分比例' });
+    await card.locator('select').selectOption({ label: '冲动倾向' });
+    await expect(card.getByRole('heading', { name: '冲动倾向 · 各年级高分比例' })).toBeVisible();
+    await expect(card.getByRole('img', { name: '柱形统计图' })).toBeVisible();
+    await expect(card.locator('svg rect').first()).toBeAttached();
+    await expect(card.locator('svg text').filter({ hasText: '%' }).first()).toBeVisible();
   });
 
-  test('counselor sees the level band distribution', async ({ page }) => {
+  test('reset returns the report to the newest task', async ({ page }) => {
     await loginAs(page, 'counselor');
-    await page.goto('/counselor/analytics');
-    const legend = page.locator('.band-legend .band-name');
-    await expect(legend).toHaveText(['一般观察', '需要关注', '重点关注']);
+    await page.goto('/counselor/analytics/overview');
+    await expect(page.getByText('已自动加载最新可分析任务')).toBeVisible();
+    await page.getByRole('button', { name: /重置/ }).click();
+    await expect(page.getByText('已重置为最新可分析任务')).toBeVisible();
+    await expect(page.locator('.task-option input:checked')).toHaveCount(1);
+  });
+});
+
+test.describe('Analytics report functions', () => {
+  test.beforeEach(async ({ page }) => {
+    await loginAs(page, 'counselor');
+  });
+
+  test('overview queries selected tasks and renders aggregate results', async ({ page }) => {
+    await page.goto('/counselor/analytics/overview');
+    await expect(page.getByRole('heading', { name: '全校预警总览' })).toBeVisible();
+    await expect(page.getByText('实际应测人数')).toBeVisible();
+    await page.locator('.task-picker summary').click();
+    await page.locator('.task-option input:not(:checked)').first().check();
+    await page.getByRole('button', { name: /查询/ }).click();
+    await expect(page.locator('.task-picker')).not.toHaveAttribute('open', '');
+    await expect(page.locator('.task-picker summary')).toHaveText('已选择 2 个任务');
+    await expect(page.getByRole('heading', { name: '测评完成情况' })).toBeVisible();
+  });
+
+  test('dimensions switches validity basis and all three result views', async ({ page }) => {
+    await page.goto('/counselor/analytics/dimensions');
+    await expect(page.getByRole('heading', { name: '全校八维度分析' })).toBeVisible();
+    await page.getByLabel('分析口径').selectOption('VALIDITY_UNFLAGGED');
+    await page.getByRole('button', { name: /查询/ }).click();
+    await expect(page.getByText('各维度高分人次')).toBeVisible();
+    await page.getByRole('button', { name: '平均得分' }).click();
+    await expect(page.getByText('不同维度满分不同')).toBeVisible();
+    await page.getByRole('button', { name: '得分分布' }).click();
+    await expect(page.locator('.dist-row')).toHaveCount(8);
+  });
+
+  test('grade report changes dimension and renders the matching chart', async ({ page }) => {
+    await page.goto('/counselor/analytics/grades');
+    const card = page.locator('.chart-card');
+    await card.getByLabel('比较维度').selectOption({ label: '冲动倾向' });
+    await expect(card.getByRole('heading', { name: '冲动倾向 · 各年级高分比例' })).toBeVisible();
+    await expect(card.getByRole('img', { name: '柱形统计图' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '年级样本与覆盖率' })).toBeVisible();
+  });
+
+  test('class report cascades grade and class then refreshes the selected cohort', async ({ page }) => {
+    await page.goto('/counselor/analytics/classes');
+    await expect(page.getByRole('heading', { name: '班级维度画像' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '班级样本质量' })).toBeVisible();
+    await page.getByLabel('年级').selectOption({ label: '初二' });
+    const classSelect = page.getByLabel('班级');
+    await expect(classSelect.locator('option')).toHaveText(['全部班级', '1班', '2班', '3班']);
+    await classSelect.selectOption({ label: '3班' });
+    await page.getByLabel('统计指标').selectOption('average');
+    await page.getByRole('button', { name: /查询/ }).click();
+    await expect(page.getByText('初二（3班）')).toBeVisible();
+    await expect(page.getByRole('heading', { name: '班级样本质量' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '维度对比数据' })).toBeVisible();
+  });
+
+  test('report saves interpretation and exports current results', async ({ page }) => {
+    await page.goto('/counselor/analytics/report');
+    await expect(page.getByRole('heading', { name: '专业解读与导出' })).toBeVisible();
+    await page.getByLabel('1. 整体情况说明').fill('基于当前任务实际统计结果形成的专业说明。');
+    await page.getByRole('button', { name: '保存草稿' }).click();
+    await expect(page.getByText('已保存（浏览器本地草稿）')).toBeVisible();
+    await page.getByRole('button', { name: '进入导出设置' }).click();
+    await page.getByLabel('文件格式').selectOption('html');
+    const downloadPromise = page.waitForEvent('download');
+    await page.getByRole('button', { name: '生成报告' }).click();
+    const download = await downloadPromise;
+    expect(download.suggestedFilename()).toBe('心晴_心理测评聚合统计报告.html');
+    await expect(page.getByRole('status').filter({ hasText: '已导出' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '专业解释与导出记录' })).toBeVisible();
   });
 });
 
@@ -1379,7 +1466,7 @@ test.describe('缺陷回归', () => {
 
   test('整页加载失败时只报错，不摆出一屏空态', async ({ page }) => {
     await failApiPaths(page, {
-      '/api/v1/analytics/overview': '总览暂时不可用',
+      '/api/v1/analytics/report': '总览暂时不可用',
       '/api/v1/care-cases': '档案列表暂时不可用',
     });
 

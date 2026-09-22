@@ -160,6 +160,54 @@ def key_question_answers(
     return ok({"items": items})
 
 
+@router.get("/students/{student_id}/sessions/{session_id}/full-answers")
+def session_full_answers(
+    student_id: int,
+    session_id: int,
+    request: Request,
+    purpose: str,
+    current_user: KeyQuestionReader,
+    db: Annotated[Session, Depends(get_db)],
+):
+    """完整答卷（100 道题的逐题答案）——与重点题同一敏感度层级。
+
+    与 `key_question_answers` 共享 `KeyQuestionReader` 能力矩阵，因为完整答卷
+    比重点题多 98 道题，但敏感度相同（都是原始作答内容）。
+    每次读都写审计，在被拒时不写（与重点题同源）。
+    """
+    if not purpose.strip():
+        raise AppError("PURPOSE_REQUIRED", "查看答卷必须填写查看原因", 422)
+
+    ensure_student_in_scope(db, current_user, student_id)
+
+    # 验证 session 属于该学生
+    sitting = db.get(AssessmentSession, session_id)
+    if sitting is None or sitting.student_id != student_id:
+        raise AppError("NOT_FOUND", "该场次不属于这名学生", 404)
+
+    # 取全部 100 道题的答案 + 题干（含效度题）
+    rows = db.execute(
+        select(ScaleQuestion.question_no, ScaleQuestion.question_text, AssessmentAnswer.answer)
+        .join(AssessmentAnswer, AssessmentAnswer.question_id == ScaleQuestion.id)
+        .where(AssessmentAnswer.session_id == session_id)
+        .order_by(ScaleQuestion.question_no)
+    ).all()
+    items = [{"question_no": no, "question_text": text, "answer": answer} for no, text, answer in rows]
+
+    write_audit(
+        db,
+        action="查看完整答卷",
+        resource_type="STUDENT",
+        resource_id=str(student_id),
+        purpose=purpose,
+        actor=current_user,
+        request=request,
+        student_id=student_id,
+    )
+    db.commit()
+    return ok({"items": items, "session_id": session_id})
+
+
 @router.get("/students/{student_id}/assessment-records")
 def student_assessment_records(
     student_id: int,

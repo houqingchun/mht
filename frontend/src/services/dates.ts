@@ -3,7 +3,7 @@
  *
  * These used to be literal 2026-09-xx strings left over from the prototype,
  * which meant every "next follow-up" defaulted to a date in the past the moment
- * the demo window closed. Deriving them from today keeps the defaults sensible
+ * a fixed window closed. Deriving them from today keeps the defaults sensible
  * indefinitely.
  */
 

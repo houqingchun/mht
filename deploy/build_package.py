@@ -145,6 +145,18 @@ REQUIRED_PATHS = [
     # (`OUTPUT_NAME`)。基线换代（比如改成从 V1.1.0 升）时**这里要跟着改**——
     # 忘了改会红在下面那次自检上（「缺这个路径」），而不是静默少带一个文件。
     "backend/sql/upgrade_from_v1_0_0.sql",
+    # 「只有系统基础数据与管理员账号」的那份 **DML** 脚本（2026-09-21 加）。与上面
+    # `schema_mysql8.sql` 是一对，但方向相反：那份建表、这份写数据（admin + MHT 量表
+    # /100 题/评分规则），**一段 DDL 都没有、也不写 `alembic_version`**（那张表归
+    # Alembic，见文件头里那一句）。
+    #
+    # **它不在 `step("3/6")` 里重新生成，这是有意的**（与 `upgrade_from_v1_0_0.sql`
+    # 相反）。那一份的两个来源都长在当前源码树上，出包时源码树就是最新的；这一份多了一个
+    # **外部来源**——它的数据段必须来自 `seed.py` 的**结果**（真的跑一遍一个一次性库），
+    # 而出包时重生成会**盖掉**「有人改了 `seed.py` 却没重跑 `make db-seed-sql`」这个信号。
+    # 那个信号应该由 `app/tests/test_seed_sql.py` 红在那次 `make test` 上，不该被一次
+    # 静默重生成抹掉。它与 `schema_mysql8.sql` 同一档：**仓库里的快照，靠守卫保鲜。**
+    "backend/sql/seed_mysql8.sql",
     "backend/app/db/create_database.py",
     "data/mht_scale.json",
     "frontend/dist/index.html",

@@ -1,5 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
+from collections import defaultdict
+
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
@@ -9,13 +11,16 @@ from app.models.assessment import (
     AssessmentResult,
     AssessmentSession,
     AssessmentTarget,
+    AssessmentTask,
     DimensionResult,
+    RiskEvent,
     effective_session_predicate,
+    PARTICIPATION_REQUIRED,
 )
 from app.models.care import FollowUpRecord, RetestPlan, StudentCareCase
 from app.models.enums import RoleCode
 from app.models.organization import ClassGroup, Grade, Student
-from app.models.scale import ScaleQuestion
+from app.models.scale import AssessmentScale, ScaleQuestion
 from app.security.data_scope import ensure_student_in_scope, student_scope_predicate
 from app.services.assessment_service import latest_session, latest_session_order
 from app.security.permissions import (
@@ -51,6 +56,8 @@ MIN_COHORT_FOR_AGGREGATE = 5
 # 面板据此说「另有 N 项未显示」。没有这个数，徽标上的「20 项」在 20 与 400 两种
 # 情况下长得一模一样（2026-09-17 修）。
 REMINDER_LIMIT = 20
+
+ANALYSIS_MODES = {"ALL_CALCULATED", "VALIDITY_UNFLAGGED"}
 
 
 def ensure_leader_or_counselor(db: Session, user: UserAccount) -> None:
@@ -131,6 +138,299 @@ def rate_or_none(part: int, whole: int) -> int | None:
     if whole <= 0 or whole < MIN_COHORT_FOR_AGGREGATE:
         return None
     return round(part / whole * 100)
+
+
+def _report_rate(part: int, whole: int) -> float | None:
+    """报表中心使用一位小数；小样本与零分母均不发布比率。"""
+    if whole < MIN_COHORT_FOR_AGGREGATE:
+        return None
+    return round(part / whole * 100, 1)
+
+
+def _dimension_report(rows: list, item_counts: dict[str, int]) -> list[dict]:
+    """把一组维度结果聚合成可发布指标；被抑制的**均值与比率**不会进入响应，
+    但**分布形状**始终返回——即使 cohort 太小，读者仍该看到「这一维度的分数
+    大致落在哪里」，只是不给精确百分比（那会暴露个别学生）。"""
+    grouped: dict[str, list] = defaultdict(list)
+    for row in rows:
+        grouped[row.dimension_code].append(row)
+
+    items = []
+    for code in sorted(item_counts):
+        values = grouped.get(code, [])
+        size = len(values)
+        suppressed = 0 < size < MIN_COHORT_FOR_AGGREGATE
+        levels = {level: 0 for level in ("LOW", "MEDIUM", "HIGH")}
+        for row in values:
+            levels[row.level] = levels.get(row.level, 0) + 1
+        high = levels.get("HIGH", 0)
+        items.append(
+            {
+                "dimension_code": code,
+                "score_min": 0,
+                "score_max": int(item_counts.get(code) or 0),
+                "score_direction": "HIGHER_MORE_CONCERN",
+                "n_evaluable": size,
+                "n_excluded": 0,
+                "mean_score": (
+                    round(sum(row.score for row in values) / size, 1)
+                    if size and not suppressed
+                    else None
+                ),
+                # 分布形状始终返回——即使被抑制，读者仍该看到分数落在各区间的人数。
+                # 比率在小样本时给 null（不暴露可反推的百分比）。
+                "distribution": (
+                    [
+                        {
+                            "range_code": level,
+                            "count": count,
+                            "rate": _report_rate(count, size) if not suppressed else None,
+                        }
+                        for level, count in levels.items()
+                    ]
+                    if size
+                    else []
+                ),
+                "high_score_count": high if not suppressed else None,
+                "high_score_rate": _report_rate(high, size),
+                # 当前正式规则只有通用 HIGH_DIMENSION_SCORE，没有按维度独立的
+                # 筛查规则配置，因此不能把高分区间换个名字冒充筛查信号。
+                "screening_rule_available": False,
+                "screening_count": None,
+                "screening_rate": None,
+                "suppression": {
+                    "suppressed": suppressed,
+                    "reason": "MIN_COHORT" if suppressed else None,
+                },
+            }
+        )
+    return items
+
+
+def analytics_report(
+    db: Session,
+    user: UserAccount,
+    task_id: int | None,
+    analysis_mode: str = "ALL_CALCULATED",
+    task_ids: list[int] | None = None,
+) -> dict:
+    """报表中心统一快照；多任务时按学生去重并保留最新一次计算结果。"""
+    ensure_leader_or_counselor(db, user)
+    if analysis_mode not in ANALYSIS_MODES:
+        raise AppError("VALIDATION_ERROR", "不支持的统计模式", 422)
+
+    task_stmt = (
+        select(AssessmentTask)
+        .join(AssessmentTarget, AssessmentTarget.task_id == AssessmentTask.id)
+        .join(Student, Student.id == AssessmentTarget.student_id)
+        .where(student_scope_predicate(db, user))
+        .distinct()
+        .order_by(AssessmentTask.created_at.desc(), AssessmentTask.id.desc())
+    )
+    requested_ids = list(dict.fromkeys(task_ids or ([] if task_id is None else [task_id])))
+    if requested_ids:
+        task_stmt = task_stmt.where(AssessmentTask.id.in_(requested_ids))
+    tasks = list(db.scalars(task_stmt).unique())
+    if not tasks:
+        raise AppError("NOT_FOUND", "测评任务不存在或无权访问", 404)
+    if requested_ids and {task.id for task in tasks} != set(requested_ids):
+        raise AppError("NOT_FOUND", "部分测评任务不存在或无权访问", 404)
+    if not requested_ids:
+        tasks = tasks[:1]
+    scale_ids = {task.scale_id for task in tasks}
+    if len(scale_ids) != 1:
+        raise AppError("VALIDATION_ERROR", "不同量表的测评任务不能合并分析", 422)
+    selected_task_ids = {task.id for task in tasks}
+    primary_task = tasks[0]
+
+    target_rows = db.execute(
+        select(AssessmentTarget, Student)
+        .join(Student, Student.id == AssessmentTarget.student_id)
+        .where(
+            AssessmentTarget.task_id.in_(selected_task_ids),
+            student_scope_predicate(db, user),
+        )
+    ).all()
+    targets_by_task_student = {
+        (target.task_id, target.student_id): target for target, _ in target_rows
+    }
+    task_order = {task.id: index for index, task in enumerate(reversed(tasks))}
+    target_by_student: dict[int, AssessmentTarget] = {}
+    for target, _ in target_rows:
+        existing = target_by_student.get(target.student_id)
+        if existing is None or task_order[target.task_id] > task_order[existing.task_id]:
+            target_by_student[target.student_id] = target
+    targets = list(target_by_student.values())
+    student_ids = list(target_by_student)
+
+    result_rows = []
+    if student_ids:
+        result_rows = db.execute(
+            select(AssessmentResult, AssessmentSession)
+            .join(AssessmentSession, AssessmentSession.id == AssessmentResult.session_id)
+            .where(
+                AssessmentSession.task_id.in_(selected_task_ids),
+                AssessmentSession.student_id.in_(student_ids),
+                AssessmentSession.calculation_status == "CALCULATED",
+                effective_session_predicate(),
+            )
+        ).all()
+    latest_calculated_by_student: dict[int, tuple] = {}
+    for result, session in result_rows:
+        existing = latest_calculated_by_student.get(session.student_id)
+        current_key = (session.submitted_at is not None, session.submitted_at or session.created_at, session.id)
+        if existing is None:
+            latest_calculated_by_student[session.student_id] = (result, session)
+            continue
+        old_session = existing[1]
+        old_key = (old_session.submitted_at is not None, old_session.submitted_at or old_session.created_at, old_session.id)
+        if current_key > old_key:
+            latest_calculated_by_student[session.student_id] = (result, session)
+    calculated = list(latest_calculated_by_student.values())
+    # 分组快照应与真正入选的最新结果属于同一批；无结果的学生才回退到最新任务目标。
+    for _, session in calculated:
+        session_target = targets_by_task_student.get((session.task_id, session.student_id))
+        if session_target is not None:
+            target_by_student[session.student_id] = session_target
+    targets = list(target_by_student.values())
+    included = [
+        (result, session)
+        for result, session in calculated
+        if analysis_mode == "ALL_CALCULATED" or result.validity_status != "RETEST_RECOMMENDED"
+    ]
+    included_session_ids = [session.id for _, session in included]
+    included_student_ids = {session.student_id for _, session in included}
+
+    dimension_rows = (
+        db.scalars(
+            select(DimensionResult).where(DimensionResult.session_id.in_(included_session_ids))
+        ).all()
+        if included_session_ids
+        else []
+    )
+    dimensions_by_session: dict[int, list] = defaultdict(list)
+    for row in dimension_rows:
+        dimensions_by_session[row.session_id].append(row)
+
+    risk_rows = (
+        db.scalars(select(RiskEvent).where(RiskEvent.session_id.in_(included_session_ids))).all()
+        if included_session_ids
+        else []
+    )
+    signals_by_type: dict[str, set[int]] = defaultdict(set)
+    any_signal_students: set[int] = set()
+    pending_review = completed_review = 0
+    for event in risk_rows:
+        signals_by_type[event.signal_type].add(event.student_id)
+        any_signal_students.add(event.student_id)
+        if event.requires_manual_review:
+            if event.status == "PENDING":
+                pending_review += 1
+            else:
+                completed_review += 1
+
+    item_counts = _dimension_item_counts(db, primary_task.scale_id)
+    all_dimensions = _dimension_report(dimension_rows, item_counts)
+    target_count = len(targets)
+    eligible_count = sum(t.participation_disposition == PARTICIPATION_REQUIRED for t in targets)
+    completed_count = len(calculated)
+    validity_flagged = sum(result.validity_status != "VALID" for result, _ in calculated)
+    validity_unflagged = completed_count - validity_flagged
+    sample_count = len(included_student_ids)
+
+    def group_payload(kind: str) -> list[dict]:
+        grouped_targets: dict[tuple, list] = defaultdict(list)
+        for target in targets:
+            if kind == "grade":
+                key = (target.grade_name_snapshot or "未分年级",)
+            else:
+                key = (
+                    target.grade_name_snapshot or "未分年级",
+                    target.class_name_snapshot or "未分班级",
+                )
+            grouped_targets[key].append(target)
+
+        output = []
+        for key, group_targets in sorted(grouped_targets.items()):
+            group_student_ids = {target.student_id for target in group_targets}
+            group_session_ids = {
+                session.id for _, session in included if session.student_id in group_student_ids
+            }
+            group_dimension_rows = [
+                row for row in dimension_rows if row.session_id in group_session_ids
+            ]
+            eligible = sum(
+                target.participation_disposition == PARTICIPATION_REQUIRED
+                for target in group_targets
+            )
+            calculated_student_ids = {session.student_id for _, session in calculated}
+            completed = sum(target.student_id in calculated_student_ids for target in group_targets)
+            payload = {
+                "grade_name": key[0],
+                "class_name": key[1] if kind == "class" else None,
+                "target_count": len(group_targets),
+                "eligible_count": eligible,
+                "completed_count": completed,
+                "sample_count": len(group_session_ids),
+                "coverage_rate": _report_rate(len(group_session_ids), eligible),
+                "dimensions": _dimension_report(group_dimension_rows, item_counts),
+            }
+            output.append(payload)
+        return output
+
+    scale = db.get(AssessmentScale, primary_task.scale_id)
+    rule_versions = sorted({result.rule_version for result, _ in included})
+    warnings = []
+    if len(rule_versions) > 1:
+        warnings.append("当前任务包含多个评分规则版本，跨版本比较需谨慎解释。")
+    if validity_flagged:
+        warnings.append("部分结果触发效度复测建议；效度提示不等同技术计算失败。")
+
+    return {
+        "report_id": "ANALYTICS_P0",
+        "task": {
+            "id": primary_task.id,
+            "name": primary_task.name if len(tasks) == 1 else f"{len(tasks)}个任务合并分析",
+        },
+        "tasks": [{"id": task.id, "name": task.name} for task in tasks],
+        "as_of": datetime.now(UTC).isoformat(),
+        "timezone": "Asia/Shanghai",
+        "scale": {
+            "code": scale.code if scale else None,
+            "version": scale.version if scale else None,
+            "rule_versions": rule_versions,
+        },
+        "analysis_mode": analysis_mode,
+        "sample_quality": {
+            "target_count": target_count,
+            "eligible_count": eligible_count,
+            "completed_count": completed_count,
+            "validity_unflagged_count": validity_unflagged,
+            "validity_flagged_count": validity_flagged,
+            "n_evaluable": sample_count,
+            "coverage_rate": _report_rate(sample_count, eligible_count),
+        },
+        "overview": {
+            "sample_count": sample_count,
+            "signal_student_count": len(any_signal_students),
+            "signal_rate": _report_rate(len(any_signal_students), sample_count),
+            "pending_review_work_items": pending_review,
+            "completed_review_work_items": completed_review,
+            "signal_type_stats": [
+                {"signal_type": code, "student_count": len(student_ids)}
+                for code, student_ids in sorted(signals_by_type.items())
+            ],
+        },
+        "dimensions": all_dimensions,
+        "grades": group_payload("grade"),
+        "classes": group_payload("class"),
+        "interpretation_warnings": warnings,
+        "permissions": {
+            "can_drill_down_aggregate": True,
+            "can_open_student_detail": user.role_code == RoleCode.COUNSELOR,
+            "can_export": False,
+        },
+    }
 
 
 def analytics_overview(db: Session, user: UserAccount) -> dict:
@@ -325,19 +625,18 @@ def analytics_by_class(db: Session, user: UserAccount) -> list[dict]:
     ]
 
 
-def _dimension_item_counts(db: Session) -> dict[str, int]:
+def _dimension_item_counts(db: Session, scale_id: int | None = None) -> dict[str, int]:
     """每个维度由多少道题支撑，取自现行的题库。
 
     这个数是**展示分数的分母**：八个维度题数不等（两个 15 题、其余 10 题），
     一个裸分是歧义的——「8」在一个维度里是 53%，在另一个里是 80%。
     """
-    return dict(
-        db.execute(
-            select(ScaleQuestion.dimension_code, func.count(ScaleQuestion.id))
-            .where(ScaleQuestion.dimension_code.isnot(None), ScaleQuestion.status == "ACTIVE")
-            .group_by(ScaleQuestion.dimension_code)
-        ).all()
+    statement = select(ScaleQuestion.dimension_code, func.count(ScaleQuestion.id)).where(
+        ScaleQuestion.dimension_code.isnot(None), ScaleQuestion.status == "ACTIVE"
     )
+    if scale_id is not None:
+        statement = statement.where(ScaleQuestion.scale_id == scale_id)
+    return dict(db.execute(statement.group_by(ScaleQuestion.dimension_code)).all())
 
 
 def class_comparison(db: Session, user: UserAccount, student_id: int) -> dict:
@@ -772,21 +1071,72 @@ def leader_progress(db: Session, user: UserAccount) -> list[dict]:
         .where(StudentCareCase.status != "CLOSED")
         .order_by(StudentCareCase.updated_at.desc(), StudentCareCase.id.desc())
     ).all()
+
+    # ★ 消除 N+1：批量预取 `latest_session` + `AssessmentResult` + `FollowUpRecord`
+    # （此前是 for 循环里逐学生调 `latest_session(db, student_id)` + `db.scalar`，
+    # N 名档案学生 = 3N 条额外 SELECT。改为一次关联子查询批量取，构造上 O(1)。）
+    student_ids = [student.id for _, student, _, _, _ in rows]
+    if student_ids:
+        # 批量取最新有效会话 + 结果
+        latest_result_subq = (
+            select(
+                AssessmentSession.student_id,
+                AssessmentResult.total_level,
+                AssessmentResult.validity_status,
+                func.row_number()
+                .over(
+                    partition_by=AssessmentSession.student_id,
+                    order_by=latest_session_order(),
+                )
+                .label("rn"),
+            )
+            .join(AssessmentResult, AssessmentResult.session_id == AssessmentSession.id)
+            .where(
+                AssessmentSession.student_id.in_(student_ids),
+                effective_session_predicate(),
+            )
+            .subquery()
+        )
+        results_by_student = {
+            r.student_id: r
+            for r in db.execute(
+                select(latest_result_subq).where(latest_result_subq.c.rn == 1)
+            ).all()
+        }
+
+        # 批量取最近一次跟进日期
+        latest_followup_subq = (
+            select(
+                FollowUpRecord.student_id,
+                FollowUpRecord.next_follow_up_date,
+                func.row_number()
+                .over(
+                    partition_by=FollowUpRecord.student_id,
+                    order_by=FollowUpRecord.next_follow_up_date.desc(),
+                )
+                .label("rn"),
+            )
+            .where(
+                FollowUpRecord.student_id.in_(student_ids),
+                FollowUpRecord.status == "ACTIVE",
+            )
+            .subquery()
+        )
+        followups_by_student = {
+            r.student_id: r.next_follow_up_date
+            for r in db.execute(
+                select(latest_followup_subq).where(latest_followup_subq.c.rn == 1)
+            ).all()
+        }
+    else:
+        results_by_student = {}
+        followups_by_student = {}
+
     today = datetime.now(UTC).date()
     items = []
     for care_case, student, grade, class_group, owner in rows:
-        # 口径同个案详情与重点学生列表：施测时间最近的一场，不是 id 最大的那场。
-        sitting = latest_session(db, student.id)
-        result = (
-            db.scalar(select(AssessmentResult).where(AssessmentResult.session_id == sitting.id))
-            if sitting
-            else None
-        )
-        next_follow_up = db.scalar(
-            select(FollowUpRecord.next_follow_up_date)
-            .where(FollowUpRecord.student_id == student.id, FollowUpRecord.status == "ACTIVE")
-            .order_by(FollowUpRecord.next_follow_up_date.desc())
-        )
+        result = results_by_student.get(student.id)
+        next_follow_up = followups_by_student.get(student.id)
         items.append(
             {
                 "case_id": care_case.id,

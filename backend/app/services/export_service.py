@@ -115,6 +115,22 @@ def export_care_cases_csv(
         statement = statement.where(StudentCareCase.student_id.in_(student_ids))
 
     rows = db.execute(statement).all()
+
+    # ★ 消除 N+1：批量预取 owner 显示名（此前是逐行调 `db.get(UserAccount, owner_id)`）。
+    # 查询返回 (StudentCareCase, Student, Grade, ClassGroup, AssessmentSession, AssessmentResult)，
+    # owner_id 在 r[0].owner_id 上（StudentCareCase 的属性），不在行级元组里。
+    owner_ids = {r[0].owner_id for r in rows if r[0].owner_id}
+    owner_names = {}
+    if owner_ids:
+        for acct in db.execute(
+            select(UserAccount.id, UserAccount.display_name).where(UserAccount.id.in_(owner_ids))
+        ).all():
+            owner_names[acct.id] = acct.display_name
+
+    def _owner_label_cached(owner_id: int | None) -> str:
+        if not owner_id:
+            return "未分配"
+        return owner_names.get(owner_id, "未分配")
     output = io.StringIO()
     writer = csv.writer(output)
 
@@ -177,7 +193,7 @@ def export_care_cases_csv(
         # 与「测评是系统内做的」是两件事。
         row.append(source_label(session.source if session else None))
         row.append(case_status_label(care_case.status))
-        row.append(_owner_label(db, care_case.owner_id))
+        row.append(_owner_label_cached(care_case.owner_id))
         if include_score:
             row.append(result.total_score if result else "")
         writer.writerow(row)
@@ -185,13 +201,6 @@ def export_care_cases_csv(
     return ExportDocument(
         csv_text="﻿" + output.getvalue(), columns=tuple(header), row_count=written
     )
-
-
-def _owner_label(db: Session, owner_id: int | None) -> str:
-    if not owner_id:
-        return "未分配"
-    owner = db.get(UserAccount, owner_id)
-    return owner.display_name if owner else "未分配"
 
 
 # ---------------------------------------------------------------------------

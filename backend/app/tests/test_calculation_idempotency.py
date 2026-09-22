@@ -26,6 +26,7 @@ from app.models.organization import Student
 from app.models.scale import AssessmentScale, ScaleQuestion, ScaleRule
 from app.services import assessment_service
 from app.services.answer_snapshot import ANSWER_HASH_ALGORITHM, answer_snapshot_hash
+from app.services.scale_rule_service import MHT_RULE_VERSION
 from app.tests.conftest import auth_headers
 from app.tests.factories import make_sitting
 from app.tests.test_assessment_api import create_student_session, save_answers
@@ -275,7 +276,7 @@ def test_a_new_rule_version_does_not_rewrite_a_historical_result(client, db_sess
     assert len(rows) == 1
     assert rows[0].id == stored_id
     assert rows[0].total_level == "GENERAL_RANGE"
-    assert rows[0].rule_version == "MHT-RULE-1.1.0"
+    assert rows[0].rule_version == MHT_RULE_VERSION
 
 
 def test_the_retry_refuses_a_sitting_that_was_never_submitted(client, db_session):
