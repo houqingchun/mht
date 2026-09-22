@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { loginAs } from './helpers';
 
@@ -393,6 +393,148 @@ test.describe('Leader Overview', () => {
   });
 });
 
+/**
+ * 「关注等级分布」那张柱形图真的画出来了——**先证明有东西可扫，再断言它干净**
+ * （§测试注意：这一条在本文件里已经栽过三次，最近一次是「全部学生」页签扫到了骨架屏那一帧）。
+ *
+ * **收的是那张图自己**（`ScoreBandBars.vue` 的根元素 `.band-chart`），不是 `page`。
+ * 那张图现在挂在四个屏幕上——全校总览一张、年级页**一个年级一张**、班级页**本班与
+ * 同年级各一张**——所以「页面上只有一张」这个前提只在总览那一处成立。第一版写死
+ * `page.locator('.band-chart')`，在年级页上会直接撞 Playwright 的严格模式：它报的是
+ * 「定位器命中 N 个元素」，而那句话听起来像页面画重了，不像「这份断言假设了一页只有一张图」。
+ *
+ * 调用点因此一律写成 `expectScoreBands(某个限定了作用域的 .band-chart)`——
+ * 总览是 `page.locator('.band-chart')`，年级页是 `cell.locator('.band-chart')`。
+ *
+ * 三档的判据分四层，从「有没有」到「对不对」：
+ *
+ * 1. **三条都在、次序对**。三条中文是照 `labels.ts` 的 `LEVEL_LABELS` 逐个放的
+ *    （一般观察 / 需要关注 / 重点关注），而服务端 `LEVEL_BANDS` 是**同一序**（从轻到重），
+ *    所以这里的下标就是档位本身：一个把三档按人数重排的实现会在这里变红。
+ *    恒为三条不是巧合——服务端**三档恒发**、一个人都没有的那一档发 `0` 而不是省掉
+ *    （`analytics_service` 的 `_level_distribution`），所以这条断言在任何一个任务上都会遇到三条。
+ *
+ * 2. **柱子高度与人数成比例**，而且量的是 `getBoundingClientRect()` 出来的**真实像素**，
+ *    不是内联的那个百分比。这一层是这份断言里唯一有意义的那一句：那根柱子的
+ *    `height: 83%` 落在一个 `flex: 1 1 0` 的轨道里才有东西可算，布局一坏（轨道塌成 0 高）
+ *    它就是一根 0 高的柱子，**而内联样式里照样写着 83%**——只断 style 属性的写法在这里
+ *    全绿，屏幕上一根柱子都没有（写这个组件时就是这么塌过一次的）。
+ *
+ * 3. **最高的那根离顶留着那两成**（`本档人数 ÷ 最高的一档 ÷ 1.2`，与 `ColumnChart` 的
+ *    `max * 1.2` 同一个口径）：贴顶与只剩一小截都是坏的画法，而这两件事在百分比里看不见。
+ *
+ * 4. **合计那一句与三档人数同源**。三档按人去重、每人只落一档，所以「合计 N 人」必须等于
+ *    三者之和（也就是可评价样本）。两个数都从 DOM 里读回来，写死任何一个都会让这条失去意义
+ *    ——它交叉验证的正是组件自己在页脚上写下的那句口径。
+ *
+ * **区间那一条不写死数字**，虽然此刻两个候选任务上都是 `0~55 / 56~64 / 65~100`：
+ * 区间随**量表规则版本**走（§6），管理员在演示库里调过分段之后，写死的那一份就会红在一个
+ * 与本次改动毫无关系的地方——而「区间真的来自规则版本」这件事，e2e 证明不了（它这一层
+ * 只是从像素上确认那三段被渲染了出来），钉住它的是
+ * `test_analytics_report_extended.py::test_total_bands_follow_the_rule_version`。
+ */
+async function expectScoreBands(chart: Locator) {
+  // 演示库里两个候选任务都各有 35 人以上的已计算结果（`defaultTask()` 挑的是
+  // `completed_targets >= 5` 里 `start_at` 最新的那一场），所以有柱子可量。
+  // 一个人都没落进三档时组件换的是空态（`.data-empty`），这一行会先红。
+  await expect(chart).toBeVisible();
+
+  const labels = chart.locator('.band-axis .band-label');
+  await expect(labels).toHaveCount(3);
+  await expect(labels.nth(0)).toHaveText('一般观察');
+  await expect(labels.nth(1)).toHaveText('需要关注');
+  await expect(labels.nth(2)).toHaveText('重点关注');
+
+  const ranges = chart.locator('.band-axis .band-range');
+  await expect(ranges).toHaveCount(3);
+  for (const i of [0, 1, 2]) {
+    await expect(ranges.nth(i)).toHaveText(/^\d+~\d+ 分$/);
+  }
+
+  // 占比那一格是**两种东西之一**：分母够大时是百分比，不够大时是「样本过小」。
+  // 后者是服务端发 `null` 的地方，**不是 `0.0%`**——`?? 0` 会把它抹成一句
+  // 「这一档一个都没有」的断言（§11），两句话必须长得不一样。
+  const rates = chart.locator('.band-axis .band-rate');
+  await expect(rates).toHaveCount(3);
+  for (const i of [0, 1, 2]) {
+    await expect(rates.nth(i)).toHaveText(/^(\d+(\.\d+)?%|样本过小)$/);
+  }
+
+  // 人数从 DOM 里读回来（不写死：那是数据量，不是功能对错），下面每一条都拿它与柱子对账。
+  const counts = (await chart.locator('.band-figure strong').allInnerTexts()).map(text => Number(text));
+  expect(counts).toHaveLength(3);
+  expect(counts.every(count => Number.isInteger(count) && count >= 0)).toBe(true);
+  const sum = counts.reduce((a, b) => a + b, 0);
+  expect(sum).toBeGreaterThan(0);
+
+  const columns = chart.locator('.band-plot .band-col');
+  await expect(columns).toHaveCount(3);
+  const heights = await columns.evaluateAll((nodes) => nodes.map((node) =>
+    node.querySelector('.band-column')?.getBoundingClientRect().height ?? 0
+  ));
+  expect(heights).toHaveLength(3);
+
+  for (const i of [0, 1, 2]) {
+    if (counts[i] === 0) {
+      // 0 人的档**不画柱子**：一条 0 高的柱子与「这一档没人」在图上分不开，
+      // 而这两件事要说的话不一样（同 §11 那条 `None` vs `0`）。
+      await expect(columns.nth(i).locator('.band-column')).toHaveCount(0);
+    } else {
+      expect(heights[i]).toBeGreaterThan(0);
+    }
+  }
+
+  // 高度与人数成比例。**三条人数全相等时这一组会空转**，所以下面补一句「全相等就必须一样高」
+  // ——两句合起来才不是恒真。
+  const maxCount = Math.max(...counts);
+  const maxHeight = Math.max(...heights);
+  const comparable = counts.some(count => count > 0 && count !== maxCount);
+  for (const i of [0, 1, 2]) {
+    if (counts[i] === 0) continue;
+    if (comparable) expect(Math.abs(heights[i] / maxHeight - counts[i] / maxCount)).toBeLessThan(0.05);
+    else expect(heights[i]).toBeCloseTo(maxHeight, 0);
+  }
+
+  const trackHeight = await columns.first().locator('.band-track')
+    .evaluate((node) => node.getBoundingClientRect().height);
+  expect(maxHeight / trackHeight).toBeGreaterThan(0.6);
+  expect(maxHeight / trackHeight).toBeLessThan(0.9);
+
+  await expect(chart.locator('.band-foot')).toContainText(`合计 ${sum} 人`);
+}
+
+/**
+ * 读回那张图页脚上写着的「合计 N 人」。
+ *
+ * 它与三档人数之和是**同一个数**（`_:total` 与三档分子在服务端同源，`expectScoreBands`
+ * 里已经交叉验过一次），所以拿它去与页面别处的数对账是安全的：它比逐档相加少一次解析，
+ * 而「这张图说的是几个人」这件事只有一个说法。
+ *
+ * 取不到时**抛一句人话**，不写成 `text.match(...)![1]`——那样报出来的是
+ * 「Cannot read properties of null」，读起来像定位器坏了，而事实是页脚那句话变了。
+ */
+async function bandFootTotal(chart: Locator): Promise<number> {
+  const text = await chart.locator('.band-foot').innerText();
+  const matched = text.match(/合计\s*(\d+)\s*人/);
+  if (!matched) throw new Error(`.band-foot 里应当写着「合计 N 人」，实际读到的是：${text}`);
+  return Number(matched[1]);
+}
+
+/**
+ * 按标签定位一张 `KpiCard`，返回**卡片本身**（`.kpi-value` / `.hint` 由调用点自己取）。
+ *
+ * **不能写成 `page.locator('.kpi', { hasText: '可评价样本' })`**：班级页那张「样本覆盖率」卡的
+ * 副标题写的是「可评价样本 / 实际应测」，而 `hasText` 是**子串**匹配，于是它同时命中两张卡
+ * ——报出来的是 strict mode violation，读起来像「指标卡画重了」，而卡数一个都没错。
+ * 与上面「年级」那条定位器（撞了任务名里的「初三年级」）是同一类：**子串会命中副标题里的引用**，
+ * 所以判据落在 `.kpi-label` 上，并且用 `^…$` 收紧。
+ */
+function kpiCard(page: Page, label: string): Locator {
+  return page.locator('.kpi', {
+    has: page.locator('.kpi-label', { hasText: new RegExp(`^${label}$`) })
+  });
+}
+
 // ========== Analytics Report Center（五类报表共用任务选择器）==========
 
 test.describe('Analytics', () => {
@@ -401,7 +543,9 @@ test.describe('Analytics', () => {
     await page.goto('/counselor/analytics');
     await expect(page).toHaveURL(/\/counselor\/analytics\/overview$/);
     await expect(page.getByText('已自动加载最新可分析任务')).toBeVisible();
-    await expect(page.getByRole('heading', { name: '筛查信号类型分布' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '关注等级分布' })).toBeVisible();
+    // 总览那一张：这一页只有一张 `.band-chart`，所以直接按整页限定。
+    await expectScoreBands(page.locator('.band-chart'));
     await expect(page.locator('.task-option input:checked')).toHaveCount(1);
   });
 
@@ -410,7 +554,8 @@ test.describe('Analytics', () => {
     await page.goto('/leader/analytics');
     await expect(page).toHaveURL(/\/leader\/analytics\/overview$/);
     await expect(page.getByText('已自动加载最新可分析任务')).toBeVisible();
-    await expect(page.getByRole('heading', { name: '筛查信号类型分布' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '关注等级分布' })).toBeVisible();
+    await expectScoreBands(page.locator('.band-chart'));
   });
 
   test('multiple imported batches can be selected together', async ({ page }) => {
@@ -459,6 +604,56 @@ test.describe('Analytics', () => {
     await expect(card.locator('svg text').filter({ hasText: '%' }).first()).toBeVisible();
   });
 
+  /**
+   * 年级页上的那一张图是**一个年级一张**（`gradesWithSamples`），而「画了几张」与
+   * 「每一张画的是不是它自己那个年级的那一份」是两个问题：`v-for` 少画一个年级、
+   * 或者把同一份数据发给每一格，图都长得好好的、三档加起来也都对。
+   *
+   * 所以除了逐格过一遍 `expectScoreBands`，还有两条**跨格的对账**：
+   * ①格子上的年级名按序恰好是侧栏那张表里「可评价」大于 0 的那些年级（`sample_count > 0`
+   * 这个判据在界面上的样子）；②每一格页脚那句「合计 N 人」等于侧栏表里**同一个年级**
+   * 的那一格数。②是这一条真正值钱的地方——它把「这一格」与「这个年级」钉在一起，
+   * 而单独看任何一边都看不出来。
+   *
+   * 两个数都是从 DOM 里读回来的，谁都不是写死的（§测试注意：数行数要问接口要）。
+   */
+  test('grade page draws one level band chart per sampled grade, each from its own cohort', async ({ page }) => {
+    await loginAs(page, 'counselor');
+    await page.goto('/counselor/analytics/grades');
+    await expect(page.getByText('已自动加载最新可分析任务')).toBeVisible();
+
+    const card = page.locator('.band-card');
+    await expect(card.getByRole('heading', { name: '各年级关注等级分布' })).toBeVisible();
+
+    // 侧栏「年级样本与覆盖率」的列是 td[0] 年级 · td[1] 应测 · td[2] **可评价** · td[3] 覆盖率。
+    // 这一页只有这一张表带这四列，所以 `.side-panel table tbody tr` 是唯一的。
+    const sideRows = page.locator('.side-panel table tbody tr');
+    const sampledGrades: string[] = [];
+    const sampledCounts: number[] = [];
+    for (let i = 0; i < await sideRows.count(); i++) {
+      const tds = sideRows.nth(i).locator('td');
+      const count = Number((await tds.nth(2).innerText()).trim());
+      if (count > 0) {
+        sampledGrades.push((await tds.nth(0).innerText()).trim());
+        sampledCounts.push(count);
+      }
+    }
+
+    // 先证明有东西可扫：一个可评价样本都没有时这一块渲染的是空态那一句，下面每一条都会落空
+    // ——一条空转的断言在屏幕全白时也是绿的（§测试注意那条的第五次发作，见 `vocabulary.spec.ts`）。
+    expect(sampledGrades.length).toBeGreaterThan(0);
+
+    const cells = card.locator('.band-cell');
+    await expect(cells).toHaveCount(sampledGrades.length);
+    await expect(cells.locator('.band-cell-title')).toHaveText(sampledGrades);
+
+    for (let i = 0; i < sampledGrades.length; i++) {
+      const chart = cells.nth(i).locator('.band-chart');
+      await expectScoreBands(chart);
+      expect(await bandFootTotal(chart)).toBe(sampledCounts[i]);
+    }
+  });
+
   test('reset returns the report to the newest task', async ({ page }) => {
     await loginAs(page, 'counselor');
     await page.goto('/counselor/analytics/overview');
@@ -477,7 +672,12 @@ test.describe('Analytics report functions', () => {
   test('overview queries selected tasks and renders aggregate results', async ({ page }) => {
     await page.goto('/counselor/analytics/overview');
     await expect(page.getByRole('heading', { name: '全校预警总览' })).toBeVisible();
-    await expect(page.getByText('实际应测人数')).toBeVisible();
+    // `exact: true` 是必须的：`getByText` 是**子串**匹配，而「实际应测人数」既是这一格 KPI 卡的
+    // 标签，也是覆盖率卡片脚注里那句分母口径（「可评价样本 ÷ 实际应测人数」）的一部分——
+    // 不收严就是 strict mode violation。这不改变这条断言要说的事（报表默认加载并渲染出 KPI），
+    // 只是把它从子串收成全等；脚注那句口径**不许**为了迁就定位器改措辞，那个词是
+    // `eligible_count` 的正式中文名（`labels.ts` 的口径表）。
+    await expect(page.getByText('实际应测人数', { exact: true })).toBeVisible();
     await page.locator('.task-picker summary').click();
     await page.locator('.task-option input:not(:checked)').first().check();
     await page.getByRole('button', { name: /查询/ }).click();
@@ -511,15 +711,89 @@ test.describe('Analytics report functions', () => {
     await page.goto('/counselor/analytics/classes');
     await expect(page.getByRole('heading', { name: '班级维度画像' })).toBeVisible();
     await expect(page.getByRole('heading', { name: '班级样本质量' })).toBeVisible();
-    await page.getByLabel('年级').selectOption({ label: '初二' });
-    const classSelect = page.getByLabel('班级');
+    // 定位器收在筛选栏里，不按整页找「年级」这两个字：任务选择器里每一个复选框的
+    // 无障碍名字都来自它那一行的任务名，而演示数据里有一个任务叫**「初三年级复测任务」**
+    // ——`getByLabel('年级')` 于是同时命中那个复选框与这个下拉框，报的是 strict mode
+    // violation，红在一个与「年级联动班级」毫无关系的地方。这不是新功能的问题，
+    // 是定位器依赖了名册/任务名里恰好有什么字（§测试注意那条「数据依赖的假设」）。
+    //
+    // 所以这里按**角色**找那个下拉框，名字用 `^` 锚在开头：`<select>` 的无障碍名字是
+    // 「年级 全部年级初一初三初二」（它把 option 的文字也算进去），只有它是以「年级」
+    // 开头的 combobox，而那个复选框的 role 是 checkbox。
+    const filters = page.locator('.filters');
+    await filters.getByRole('combobox', { name: /^年级/ }).selectOption({ label: '初二' });
+    const classSelect = filters.getByRole('combobox', { name: /^班级/ });
     await expect(classSelect.locator('option')).toHaveText(['全部班级', '1班', '2班', '3班']);
     await classSelect.selectOption({ label: '3班' });
     await page.getByLabel('统计指标').selectOption('average');
     await page.getByRole('button', { name: /查询/ }).click();
-    await expect(page.getByText('初二（3班）')).toBeVisible();
+    // 「当前是哪个班」这句话落在「任务目标」那张卡的副标题上（`activeClassName` 一处拼的）。
+    // **不写成 `getByText('初二（3班）')`**：下面那张分布图的小标题写作「本班 · 初二（3班）」，
+    // 而 `getByText` 按子串匹配、两个都命中——报出来的是 strict mode violation，
+    // 读起来像页面画重了，而这一页是对的。
+    await expect(kpiCard(page, '任务目标').locator('.hint')).toHaveText('初二（3班）');
     await expect(page.getByRole('heading', { name: '班级样本质量' })).toBeVisible();
     await expect(page.getByRole('heading', { name: '维度对比数据' })).toBeVisible();
+  });
+
+  /**
+   * 班级页上是**一张卡里两张图**（本班 / 同年级）——报表里第一次出现这种对照，
+   * 而它有两个可能各说各话的地方，一条钉一个：
+   *
+   * ①左边那张的名字与上面「任务目标」卡的副标题是同一串（`activeClassName` 一处拼的）；
+   * 两处各拼一次就会出现「卡上写着初二（3班）、图上写着初二（1班）」而两边都像对的。
+   * ②右边那张是**所属**年级的全年级，不是任取一个年级——所以判据是「它的标题带着左边
+   * 那个班的年级名」，而那个年级名从页面上读回来，不写死「初二」。
+   *
+   * 末尾那条人数对账把「本班那一份」与 `.mini-table` 里同一列钉在一起：两个数走的是
+   * 两条渲染路径（一个经组件、一个直接插值），而它们必须来自同一列 `sample_count`。
+   * 这一组有 `beforeEach` 登录，所以这里不再 `loginAs`。
+   */
+  test('class portrait draws the class beside its own grade, from the same cohort numbers', async ({ page }) => {
+    await page.goto('/counselor/analytics/classes');
+    await expect(page.getByRole('heading', { name: '班级维度画像' })).toBeVisible();
+
+    // 年级/班级联动照抄上面那条用例（含 `/^年级/` 那个锚，理由见那一处的注释）。
+    const filters = page.locator('.filters');
+    await filters.getByRole('combobox', { name: /^年级/ }).selectOption({ label: '初二' });
+    await filters.getByRole('combobox', { name: /^班级/ }).selectOption({ label: '3班' });
+    await page.getByRole('button', { name: /查询/ }).click();
+
+    const card = page.locator('.band-card');
+    await expect(card.getByRole('heading', { name: '关注等级分布' })).toBeVisible();
+
+    // 这一页的对照关系恰好一对：左边本班（`.band-cell` 第一格）、右边同年级（第二格）。
+    // 取不到年级那一组时右边换的是一句说明（`.band-cell-empty`），那时下面第一条会先红。
+    const cells = card.locator('.band-cell');
+    await expect(cells).toHaveCount(2);
+
+    // 页面当前是哪个班——这一串**从页面上读回来**，下面两张图的标题都拿它拼期望值。
+    // 但紧接着那一句 `toBe` 是必须的：联动一旦静默失效（比如下拉框换了名字、
+    // `selectOption` 落到别处），读回来的是「初一（1班）」，而两张图的标题也会**一起**
+    // 变成初一（1班）——两边同源，于是「它们是不是同一个班」这条照样绿。
+    // 所以这里先钉住「联动真的选中了 3班」，下面那两条才有意义（§测试注意：
+    // 先证明有东西可扫，再断言它干净）。这一句与上面那条用例的判据是同一个值。
+    const className = (await kpiCard(page, '任务目标').locator('.hint').innerText()).trim();
+    expect(className).toBe('初二（3班）');
+    const gradeName = className.split('（')[0];
+
+    await expect(cells.nth(0).locator('.band-cell-title')).toHaveText(`本班 · ${className}`);
+    await expect(cells.nth(1).locator('.band-cell-title')).toHaveText(`同年级 · ${gradeName}全年级`);
+
+    const classChart = cells.nth(0).locator('.band-chart');
+    const gradeChart = cells.nth(1).locator('.band-chart');
+    await expectScoreBands(classChart);
+    await expectScoreBands(gradeChart);
+
+    const classTotal = await bandFootTotal(classChart);
+    const gradeTotal = await bandFootTotal(gradeChart);
+    // 一个班是它所属年级的子集，所以右边那份不可能比左边小。**不写严格大于**：
+    // 只有一个班的年级上两边天然相等，那不是故障。反过来说，右边比左边小就一定拿错了组。
+    expect(gradeTotal).toBeGreaterThanOrEqual(classTotal);
+
+    // 本班那张的人数与「班级样本质量」里「可评价样本」那一行同源（同一列 `sample_count`）。
+    const tableCount = Number((await page.locator('.mini-table tr', { hasText: '可评价样本' }).locator('td').innerText()).trim());
+    expect(classTotal).toBe(tableCount);
   });
 
   test('report saves interpretation and exports current results', async ({ page }) => {
@@ -1446,8 +1720,14 @@ test.describe('缺陷回归', () => {
   });
 
   test('副面板加载失败时说的是失败，不是「没有数据」', async ({ page }) => {
+    // 桩要打在**页面真的会调的那个端点**上。工作台那一格 2026-09-22 从独立的
+    // `/analytics/dimensions` 换成 `/analytics/report`（与五个报表页共享同一数据源，
+    // 见 `CounselorWorkbenchPage.loadPanels`），而这个桩当时没跟着走——于是那一次
+    // 没有任何请求会失败，面板正常渲染出内容，断言红在「找不到那句错误文案」上。
+    // 这条与 §测试注意那条「写死的定位器会红在一个与功能无关的地方」同源：
+    // 换了端点，桩、断言与页面三处必须一起走。
     await failApiPaths(page, {
-      '/api/v1/analytics/dimensions': '维度聚合暂时不可用',
+      '/api/v1/analytics/report': '维度聚合暂时不可用',
       '/api/v1/counselor/reminders': '提醒服务暂时不可用',
     });
     await loginAs(page, 'counselor');

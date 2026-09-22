@@ -20,9 +20,13 @@ from app.models.assessment import (
 from app.models.care import FollowUpRecord, RetestPlan, StudentCareCase
 from app.models.enums import RoleCode
 from app.models.organization import ClassGroup, Grade, Student
-from app.models.scale import AssessmentScale, ScaleQuestion
+from app.models.scale import AssessmentScale, ScaleQuestion, ScaleRule
+from app.scale_engine.engine import rule_config_from_json
 from app.security.data_scope import ensure_student_in_scope, student_scope_predicate
 from app.services.assessment_service import latest_session, latest_session_order
+# 规则类型不在这里再写一份字面量：`MHT_SCORING` 的出处是 `scale_rule_service`，抄一遍
+# 就会有两份会各说各话的常量（§「同一处只许有一个定义」）。
+from app.services.scale_rule_service import RULE_TYPE
 from app.security.permissions import (
     AGGREGATE_STATS,
     MANAGE,
@@ -145,6 +149,67 @@ def _report_rate(part: int, whole: int) -> float | None:
     if whole < MIN_COHORT_FOR_AGGREGATE:
         return None
     return round(part / whole * 100, 1)
+
+
+def _level_distribution(counts: dict[str, int], total: int) -> list[dict]:
+    """三档关注等级的计数与占比 ——**全报表唯一的这一处定义**（全校与每个年级/班级共用）。
+
+    计数**按人**，所以三个数加起来恰好等于 `total`（§11 那句「按人取最近一场」）。
+    与「按场」的完成率不是一回事：一个学生参加了两次普查，在这里只落一档。
+
+    三档**恒发**，一个人都没有的那一档发 `0` 而不是省掉：`0` 是「这一档没人」，
+    是一句完整的话（§11：计数不受小样本限制），而少一根柱子会让图上那三档的形状
+    随数据变形，读者看不出「本来有几档」。键序取自 `LEVEL_BANDS`（**从轻到重**），
+    认不出的码按字典序排在最后、仍然发出来：漏一个码要看得见（同 §3 的 `labelOf`）。
+
+    占比在分母小于 `MIN_COHORT_FOR_AGGREGATE` 时是 `None` 而不是 `0`：`0%` 是一句
+    「这一档一个都没有」的断言，而三四个人的分母算出来的百分比是**反推**（§11）。
+    """
+    order = list(LEVEL_BANDS)
+    order += sorted(code for code in counts if code not in LEVEL_BANDS)
+    return [
+        {
+            "level_code": code,
+            "student_count": counts.get(code, 0),
+            "rate": _report_rate(counts.get(code, 0), total),
+        }
+        for code in order
+    ]
+
+
+def _report_total_bands(db: Session, scale_id: int, rule_versions: list[str]) -> list[dict] | None:
+    """总分分段的**区间出处**：把阈值随响应发下来，让视图只负责渲染。
+
+    报表上要写「正常（1~55 分）」这类话，而 `1` 与 `55` 是**阈值**不是文案。把区间写在
+    视图里就成了一份与 `scale_rule.config_json` 平行的第二定义：改规则时它不会跟着动，
+    而屏幕上看不出这件事（CLAUDE.md §6：阈值属于量表规则版本，不属于界面）。
+
+    取的是**这批结果自己的**规则版本那一行，不是当前 ACTIVE 那一行——两者可以不同
+    （改过已发布规则之后，老结果仍指着旧版本，`rule_version` 就是为这件事存的）。拿新
+    版本的区间去标注旧结果算出来的分档，正好是 §6 要防的那件事。
+
+    三个「不发」的分支，各自都在说「不知道」，都不猜一个默认值：
+
+    * 这批结果横跨多个规则版本 —— 它们本来就没有**一套**阈值（`interpretation_warnings`
+      里那句「跨版本比较需谨慎解释」说的就是它）；
+    * 那一行查不到 —— 规则行被清理过，或版本号早于本库；
+    * 那一行解析不出分段 —— 与「三个区间」在界面上必须长得不一样（§11 那条 `None ≠ 0`）。
+    """
+    if len(rule_versions) != 1:
+        return None
+    rule = db.scalar(
+        select(ScaleRule).where(
+            ScaleRule.scale_id == scale_id,
+            ScaleRule.rule_type == RULE_TYPE,
+            ScaleRule.rule_version == rule_versions[0],
+        )
+    )
+    if rule is None:
+        return None
+    bands = rule_config_from_json(rule.config_json).total_bands
+    if not bands:
+        return None
+    return [{"code": band.code, "min": band.min, "max": band.max} for band in bands]
 
 
 def _dimension_report(rows: list, item_counts: dict[str, int]) -> list[dict]:
@@ -365,6 +430,14 @@ def analytics_report(
             )
             calculated_student_ids = {session.student_id for _, session in calculated}
             completed = sum(target.student_id in calculated_student_ids for target in group_targets)
+            # 这一组的关注等级分布：与全校那一份**同一个函数**算出来（`_level_distribution`），
+            # 只是集合换成了「本组的学生」。分母刻意取 `len(group_session_ids)` —— 它同时也是
+            # 上面那个 `sample_count`，所以图上那句「合计 N 人」与本行「可评价样本 N」
+            # **构造上不可能各说各话**（§11：指标卡上的数必须与它点进去的那个列表同源）。
+            group_level_counts: dict[str, int] = defaultdict(int)
+            for result, session in included:
+                if session.student_id in group_student_ids:
+                    group_level_counts[result.total_level] += 1
             payload = {
                 "grade_name": key[0],
                 "class_name": key[1] if kind == "class" else None,
@@ -373,6 +446,9 @@ def analytics_report(
                 "completed_count": completed,
                 "sample_count": len(group_session_ids),
                 "coverage_rate": _report_rate(len(group_session_ids), eligible),
+                "level_distribution": _level_distribution(
+                    group_level_counts, len(group_session_ids)
+                ),
                 "dimensions": _dimension_report(group_dimension_rows, item_counts),
             }
             output.append(payload)
@@ -380,6 +456,11 @@ def analytics_report(
 
     scale = db.get(AssessmentScale, primary_task.scale_id)
     rule_versions = sorted({result.rule_version for result, _ in included})
+    # 全校的三档分布。算法与每个年级 / 每个班级那几份**同一处**（`_level_distribution`），
+    # 所以全校那一份恒等于各组之和——四个数各自漂移这件事在构造上不会发生。
+    level_counts: dict[str, int] = defaultdict(int)
+    for result, _ in included:
+        level_counts[result.total_level] += 1
     warnings = []
     if len(rule_versions) > 1:
         warnings.append("当前任务包含多个评分规则版本，跨版本比较需谨慎解释。")
@@ -399,6 +480,8 @@ def analytics_report(
             "code": scale.code if scale else None,
             "version": scale.version if scale else None,
             "rule_versions": rule_versions,
+            # 区间随规则版本走；取不到就是 None（「本次不展示区间」），不编一个默认区间。
+            "total_bands": _report_total_bands(db, primary_task.scale_id, rule_versions),
         },
         "analysis_mode": analysis_mode,
         "sample_quality": {
@@ -420,6 +503,7 @@ def analytics_report(
                 {"signal_type": code, "student_count": len(student_ids)}
                 for code, student_ids in sorted(signals_by_type.items())
             ],
+            "level_distribution": _level_distribution(level_counts, sample_count),
         },
         "dimensions": all_dimensions,
         "grades": group_payload("grade"),

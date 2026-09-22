@@ -254,8 +254,14 @@ def test_reset_clears_assessment_data_but_keeps_the_roster(db_session):
 
     summary = reset_assessment_data(db_session)
 
-    assert _count(db_session, Student) == 28  # 名册留着
-    assert _count(db_session, UserAccount) == 31
+    # 名册留着：S001 + 当前演示名册，账号也一个不少（每个演示学生一个）。
+    # **不写死数字**（原来是 28 / 31，而那两对数在 V1.1.3 把演示名册扩到 55 人之后就过期了，
+    # 红在一句 `assert 56 == 28` 上——那与"测评数据清干净了没有"毫无关系）。
+    # 与上面 `test_purge_leaves_exactly_the_baseline` 同一个写法，也与 §测试注意那条
+    # 「数行数要问接口要，不要写死」同源：这条用例要说的是"清理没动名册与账号"，
+    # 那就让两边都从**同一份**演示名册派生，它自己变了也不影响这句话。
+    assert _count(db_session, Student) == 1 + len(demo_roster())  # 名册留着
+    assert _count(db_session, UserAccount) == 4 + len(demo_roster())
     assert _count(db_session, StudentCareCase) == 0
     assert _count(db_session, AssessmentAnswer) == 0
     assert _count(db_session, AuditLog) == 0  # 审计整表清空，与 reset-db 原来的行为一致

@@ -26,6 +26,42 @@ export const LEVEL_LABELS: Record<string, string> = {
  * 加新码时想清楚它排在哪一端，不要顺手追加到末尾。
  */
 export const LEVEL_ORDER: readonly string[] = Object.keys(LEVEL_LABELS)
+
+/**
+ * ★ 这里曾经有一张 `SCORE_BAND_LABELS`（`GENERAL_RANGE` →「正常」、`NEEDS_ATTENTION` →
+ * 「心理状态欠佳或有问题倾向」、`KEY_ATTENTION` →「心理问题倾向较严重」），2026-09-22 删掉了。
+ *
+ * 它的键与 `LEVEL_LABELS` **一模一样**（`total_level` 就是这三个码），理由是「同一批码、
+ * 另一种读法」——而那句话在 §3 已经被裁过一次，同一个码在一屏上不能有两个名字：
+ * 「高度关注」那条裁决把「功能名」与「等级名」并存的问题处置成**在用户将要动手的那一处
+ * 写出等号**，因为两套名字并存会让同一个人在两处读到两个标签。**同一个码的「另一种读法」
+ * 比「另一个功能的名字」更没有立足点**：它们连「这是两件事」都说不出来——读者看到的
+ * 只是三档里的某一档被叫了两个名字。
+ *
+ * 它想挡的那件事（区间文字被读成对某个学生的结论）改由**位置**回答，不由第二套中文回答：
+ * 区间那一句（`scoreBandRangeText`）写在**档名下面**，档名本身是关注等级那一套。
+ * 产品边界那句话（本系统不做诊断）在 `PrivacyNote` 与「统计解释边界」里逐条写着。
+ *
+ * 删掉之后 `grep scoreBandLabel` 在全仓库零命中——它当时只有一个读者（`ScoreBandBars.vue`），
+ * 所以这次删除不改动任何别处的措辞。
+ */
+
+/**
+ * 「1~55 分」那一句的范围文字，两个数都来自服务端发下来的规则分段。
+ *
+ * `totals` 是 `AnalyticsReport.scale.total_bands`；找不到这个码就返回**空串**
+ * （调用方整句不显示），不猜一个区间——一个不存在的区间比没有区间更糟，它会被人
+ * 照着它去理解分数。上界用 `max`：它是规则里的**闭区间**上界（`classify()` 对超过
+ * 所有区间的分数回落到最后一档，所以最后一档的 `100` 是「65 分及以上」的写法）。
+ */
+export function scoreBandRangeText(
+  totals: Array<{ code: string; min: number; max: number }> | null | undefined,
+  code: string | null | undefined
+): string {
+  if (!code || !totals) return ''
+  const band = totals.find(b => b.code === code)
+  return band ? `${band.min}~${band.max} 分` : ''
+}
 // Keys must match the backend's StudentCareCase.status values exactly
 // (see app/services/care_service.py): PENDING_REVIEW / FOLLOWING / OBSERVING / CLOSED.
 // 顺序 = 一份档案的**流程先后**（新开的在待复核，办完的已关闭），见 `CASE_STATUS_ORDER`。
@@ -1219,19 +1255,26 @@ export function sampleQualityLabel(key: string) {
  *
  * 三档各自回答「这一条风险提示是怎么来的」：
  *   - `SCREENING_SIGNAL`：总分或维度分落入预警区间，引擎自动触发；
- *   - `MANUAL_REVIEW`：重点题（85 / 97）答「是」，需要人看原始答卷；
- *   - `RETEST_RECOMMENDATION`：效度题触发复测建议，需要确认这份答卷可不可信。
+ *   - `MANUAL_REVIEW_REQUIRED`：重点题（85 / 97）答「是」，需要人看原始答卷；
+ *   - `RETEST_RECOMMENDED`：效度题触发复测建议，需要确认这份答卷可不可信。
+ *
+ * 三个码的出处是 `scale_engine/engine.py` 的 `SIGNAL_TYPE_BY_RISK_TYPE`。
+ * **这张表的键曾经写错过两个**（`MANUAL_REVIEW` / `RETEST_RECOMMENDATION`），而它
+ * 一个错误都没有报——因为写下它的时候全站**没有任何读者**：`OverviewPage.vue` 自己
+ * 抄了一份三目表达式在视图里。键错的表 + 视图自己抄一份，两处互相掩护，于是两条
+ * 通路都看不见真相（同 §3「表在 `labels.ts` 里而没人从那儿取也算没接上」）。现在视图
+ * 取用这里的函数，`test_status_vocabulary.py` 也从后端那一侧钉住这三个码。
  *
  * 与 `RISK_EVENT_STATUS_LABELS`（待复核 / 已复核）是**两个维度**：
  * 那一张说「这条风险提示处理了没有」，这一张说「这条风险提示是怎么产生的」。
  * 同一行既有类型也有状态。
  *
- * **没有 `*_ORDER`**：读者是统计面板的图例，不是可排序的列。
+ * **没有 `*_ORDER`**：读者是统计面板的图例与指标条，不是可排序的列。
  */
 export const SIGNAL_TYPE_LABELS: Record<string, string> = {
   SCREENING_SIGNAL: '普通筛查信号',
-  MANUAL_REVIEW: '重点题人工复核',
-  RETEST_RECOMMENDATION: '效度复测建议'
+  MANUAL_REVIEW_REQUIRED: '重点题人工复核',
+  RETEST_RECOMMENDED: '效度复测建议'
 }
 
 export function signalTypeLabel(code: string | null | undefined) {

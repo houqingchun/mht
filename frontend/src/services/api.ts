@@ -781,6 +781,21 @@ export interface ReportDimension {
   suppression: { suppressed: boolean; reason: string | null }
 }
 
+/**
+ * 三档关注等级的人数与占比 —— 全校、每个年级、每个班级各一份，**服务端同一个函数算出来的**
+ * （`analytics_service._level_distribution`），所以四份的形状与键序完全一致。
+ *
+ * 三个 `student_count` 相加恒等于那一份的 `sample_count`；一个人都没有的那一档发 0，
+ * 而不是省略（图上那三档的形状不该随数据变形）。`rate` 在分母 < MIN_COHORT_FOR_AGGREGATE
+ * 时是 `null` —— 与计数分开，**不许 `?? 0`**：`0%` 是一句「这一档一个人都没有」的断言，
+ * 而三四个人的分母算出来的百分比是**反推**（CLAUDE.md §11）。
+ */
+export interface ReportLevelDistributionItem {
+  level_code: string
+  student_count: number
+  rate: number | null
+}
+
 export interface ReportCohort {
   grade_name: string
   class_name: string | null
@@ -789,6 +804,8 @@ export interface ReportCohort {
   completed_count: number
   sample_count: number
   coverage_rate: number | null
+  // 本组的三档分布。与全校那一份同口径（按人取最近一场），**不是**按场。
+  level_distribution: ReportLevelDistributionItem[]
   dimensions: ReportDimension[]
 }
 
@@ -798,7 +815,15 @@ export interface AnalyticsReport {
   tasks: Array<{ id: number; name: string }>
   as_of: string
   timezone: string
-  scale: { code: string | null; version: string | null; rule_versions: string[] }
+  scale: {
+    code: string | null
+    version: string | null
+    rule_versions: string[]
+    // 总分分段的区间，**随规则版本走**（CLAUDE.md §6）。`null` = 这批结果横跨多个
+    // 规则版本、或那一行查不到 —— 即「本次不展示区间」，界面据此整句不显示，
+    // **不回落成一组写死的区间**（一个不存在的区间比没有区间更糟）。
+    total_bands: Array<{ code: string; min: number; max: number }> | null
+  }
   analysis_mode: AnalyticsMode
   sample_quality: {
     target_count: number
@@ -816,6 +841,8 @@ export interface AnalyticsReport {
     pending_review_work_items: number
     completed_review_work_items: number
     signal_type_stats: Array<{ signal_type: string; student_count: number }>
+    // 三档总分分布，**按人**（每人取最新一场已计算结果，与 `sample_count` 同口径）。
+    level_distribution: ReportLevelDistributionItem[]
   }
   dimensions: ReportDimension[]
   grades: ReportCohort[]

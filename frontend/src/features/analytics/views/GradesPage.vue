@@ -5,6 +5,7 @@ import FilterBar from '../components/FilterBar.vue'
 import ReportPageHeader from '../components/ReportPageHeader.vue'
 import KpiCard from '../components/KpiCard.vue'
 import ColumnChart from '../components/ColumnChart.vue'
+import ScoreBandBars from '../components/ScoreBandBars.vue'
 import PrivacyNote from '../components/PrivacyNote.vue'
 import ErrorState from '../../../components/ErrorState.vue'
 import { getAnalyticsReport, type AnalyticsReport } from '../../../services/api'
@@ -17,6 +18,14 @@ const selectedDimCode = ref('')
 const grades = computed(() => report.value?.grades || [])
 const totalTarget = computed(() => grades.value.reduce((a, g) => a + g.target_count, 0))
 const totalValid = computed(() => grades.value.reduce((a, g) => a + g.sample_count, 0))
+/**
+ * 三档区间随规则版本走（§6）——与 `OverviewPage` 取的是同一个字段，因为这一页与那一页
+ * 说的是同一批结果的同一件事，只是切成了按年级。取不到就是 `null`，图上只出人数、
+ * 不出「N~M 分」那一句，**不回落成一组写死的区间**。
+ */
+const totalBands = computed(() => report.value?.scale?.total_bands ?? null)
+/** 有可评价样本的年级才画图：全 0 的年级画出来是三条空柱子，与「一个都没测」不像。 */
+const gradesWithSamples = computed(() => grades.value.filter(g => g.sample_count > 0))
 const selectedDimension = computed(() => report.value?.dimensions.find(d => d.dimension_code === selectedDimCode.value) || report.value?.dimensions[0])
 const publishedGrades = computed(() => grades.value.flatMap(g => {
   const dimension = g.dimensions.find(d => d.dimension_code === selectedDimension.value?.dimension_code)
@@ -117,6 +126,19 @@ function reset() { report.value = null; error.value = ''; selectedDimCode.value 
         </section>
       </div>
     </div>
+
+    <section class="card band-card">
+      <h2 class="section-title">各年级关注等级分布</h2>
+      <p class="muted tiny">按总分区间分档，每名可评价学生只落一档，三档互不叠加；区间取自本次结果所用的量表评分规则版本。与全校总览那张图**同一个算法**，所以各年级三档之和恒等于全校那一份。</p>
+      <div v-if="gradesWithSamples.length" class="band-grid">
+        <div v-for="g in gradesWithSamples" :key="g.grade_name" class="band-cell">
+          <h3 class="band-cell-title">{{ g.grade_name }}</h3>
+          <ScoreBandBars :items="g.level_distribution" :totals="totalBands" :total="g.sample_count"/>
+        </div>
+      </div>
+      <div v-else class="data-empty">当前范围内没有可评价的年级样本。没有已计算结果的学生不进这三档，全员未测评与全员一般观察不是一回事。</div>
+    </section>
+
     <PrivacyNote/>
   </template>
   <div v-else class="empty">请选择测评任务后点击查询</div>
@@ -132,6 +154,12 @@ section.card { min-width: 0; padding: 18px; overflow: hidden }
 .heat-table td { text-align: center; font-weight: 700; padding: 10px 8px }
 .heat-table th { text-align: center; padding: 10px 8px }
 .chart-card { margin-top: 16px }
+/* 一个年级一张图。`auto-fit` 而不是写死三列：年级数由学校的学段决定（初中三个、
+   完中六个），写死一列数会让某一档年级被挤成半宽或被拉成整宽。 */
+.band-card { margin-bottom: 16px }
+.band-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-top: 12px }
+.band-cell { min-width: 0; border: 1px solid #e6edf6; border-radius: 10px; padding: 12px 14px 6px; background: #fbfdff }
+.band-cell-title { margin: 0 0 4px; font-size: 14px; font-weight: 700; color: #1d3f63 }
 .chart-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px }
 .chart-heading label { display: grid; flex: 0 0 160px; gap: 4px; color: #536879; font-size: 12px; font-weight: 600 }
 .chart-heading select { width: 100%; min-height: 36px; border: 1px solid #cbd8e2; border-radius: 6px; background: #fff; color: #183447; padding: 0 8px }

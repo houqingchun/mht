@@ -16,6 +16,12 @@ from app.tests.test_assessment_api import create_student_session, save_answers
 CASE_STATUSES = {"PENDING_REVIEW", "FOLLOWING", "OBSERVING", "CLOSED"}
 # Must match frontend/src/services/labels.ts LEVEL_LABELS.
 TOTAL_LEVELS = {"KEY_ATTENTION", "NEEDS_ATTENTION", "GENERAL_RANGE"}
+# Must match frontend/src/services/labels.ts SIGNAL_TYPE_LABELS.
+# 写入方只有一个：`scale_engine/engine.py` 的 `SIGNAL_TYPE_BY_RISK_TYPE`（六个 risk_type 映到
+# 这三个码），落进 `risk_event.signal_type`，再由 `analytics_service` 按人去重成
+# `overview.signal_type_stats`。**这张表一度没有任何守卫**：报表那两条用例断的是某一个码
+# 的计数，一个漏译的新码在它们那里是绿的；下面那条用例两半都断。
+SIGNAL_TYPES = {"SCREENING_SIGNAL", "MANUAL_REVIEW_REQUIRED", "RETEST_RECOMMENDED"}
 # Must match frontend/src/services/labels.ts GENDER_LABELS.
 GENDERS = {"MALE", "FEMALE"}
 # Must match frontend/src/services/labels.ts SOURCE_LABELS.
@@ -151,6 +157,44 @@ def test_case_status_transitions_use_the_documented_vocabulary(client):
 def test_total_level_uses_the_documented_vocabulary(client):
     counselor, case = open_case(client)
     assert case["total_level"] in TOTAL_LEVELS
+
+
+def test_signal_types_use_the_documented_vocabulary(client):
+    """三类筛查信号的码必须是 labels.ts 认得的（`SIGNAL_TYPE_LABELS`）。
+
+    两半，缺一不可：
+
+    ① **常量对常量**：判据取自 `SIGNAL_TYPE_BY_RISK_TYPE` 的**值**，不是这里重抄一遍
+       字面量——重抄的话，引擎把某个码改名时这里照样全绿，而界面上会开始显示原始码
+       （§3 第一面要挡的正是这件事）。取 `values()` 而不是 `keys()`：六个 risk_type 映到
+       三个码（`MANUAL_REVIEW_REQUIRED` 有两个来源），所以这张表说的是**发出的那一侧**。
+    ② **走一趟真实链路**：交一份能触发信号的卷子，读报表的
+       `overview.signal_type_stats` —— 那是这三个码在界面上唯一的渲染来源。
+       只断①的话，「引擎会发、但报表换个键发出去」这种漂移看不见。
+
+    漏译的后果是具体的：总览页那三格会直接印出 `SCREENING_SIGNAL`（它是 `MetricStrip`
+    的 label，不是自由文本），而「存在筛查信号」那张 KPI 卡仍然显示一个正常的数字。
+    """
+    from app.scale_engine.engine import SIGNAL_TYPE_BY_RISK_TYPE
+
+    assert set(SIGNAL_TYPE_BY_RISK_TYPE.values()) == SIGNAL_TYPES, (
+        "引擎能发出的信号类型与 labels.ts 的词表对不上"
+    )
+
+    # 85 是重点题（→ MANUAL_REVIEW_REQUIRED），那七道有效度题（→ RETEST_RECOMMENDED）。
+    student_headers, session_id = create_student_session(client)
+    save_answers(client, student_headers, session_id, yes_numbers={85, 82, 84, 86, 88, 90, 92, 94})
+    response = client.post(
+        f"/api/v1/assessment-sessions/{session_id}/submit", headers=student_headers
+    )
+    assert response.status_code == 200, response.text
+
+    report = client.get(
+        "/api/v1/analytics/report", headers=auth_headers(client, "counselor", "13800000001")
+    ).json()["data"]
+    emitted = {stat["signal_type"] for stat in report["overview"]["signal_type_stats"]}
+    assert emitted, "这份卷子一条信号都没发出来，上面那条子集断言是空转的"
+    assert not emitted - SIGNAL_TYPES, f"报表发出了前端无法映射的信号类型: {emitted - SIGNAL_TYPES}"
 
 
 def test_dimension_codes_use_the_documented_vocabulary(client):

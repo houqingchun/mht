@@ -6,6 +6,7 @@ import ReportPageHeader from '../components/ReportPageHeader.vue'
 import KpiCard from '../components/KpiCard.vue'
 import GroupedBarChart from '../components/GroupedBarChart.vue'
 import RadarChart from '../components/RadarChart.vue'
+import ScoreBandBars from '../components/ScoreBandBars.vue'
 import PrivacyNote from '../components/PrivacyNote.vue'
 import ErrorState from '../../../components/ErrorState.vue'
 import { getAnalyticsReport, type AnalyticsReport, type ReportCohort } from '../../../services/api'
@@ -49,6 +50,12 @@ const gradeValues = computed(() => dims.value.map(d => metricValue(dimensionFor(
 const hasPublishedComparison = computed(() => classValues.value.some(v => v != null) && gradeValues.value.some(v => v != null))
 const chartClassValues = computed(() => classValues.value)
 const chartGradeValues = computed(() => gradeValues.value)
+/** 三档区间随规则版本走（§6）——与全校总览、年级页取的是同一个字段，不写死区间。 */
+const totalBands = computed(() => report.value?.scale?.total_bands ?? null)
+/** 「本班（初一 1班）」这一串在两处出现过：图上的小标题与上面那张 KPI 卡的副标题。 */
+const activeClassName = computed(() => activeClass.value
+  ? activeClass.value.grade_name + '（' + (activeClass.value.class_name || '未分班级') + '）'
+  : '')
 const radarData = computed(() => dims.value.map(d => ({ label: dimensionLabel(d.dimension_code), value: metricValue(dimensionFor(activeClass.value, d.dimension_code)) ?? 0, max: d.score_max || 15 })))
 function diff(i: number) {
   const classValue = classValues.value[i]
@@ -96,7 +103,10 @@ function reset() {
   <div v-else-if="loading" class="loading">加载中…</div>
   <template v-else-if="report && activeClass">
     <div class="kpis">
-      <KpiCard label="任务目标" :value="activeClass.target_count" :hint="activeClass.grade_name+'（'+(activeClass.class_name || '未分班级')+')'"/>
+      <!-- 括号两半必须同宽：这里原本是 `（` 配半角 `)`，渲染成「初二（3班)」，
+           而全站其余出处（页头、班级选择器、其他报表）都是全角一对。
+           这一串现在也用在下面那两张分布图的标题上，所以归 `activeClassName` 一处拼。 -->
+      <KpiCard label="任务目标" :value="activeClass.target_count" :hint="activeClassName"/>
       <KpiCard label="实际应测" :value="activeClass.eligible_count" hint="当前班级"/>
       <KpiCard label="可评价样本" :value="activeClass.sample_count" :hint="'覆盖率 '+ (activeClass.coverage_rate != null ? activeClass.coverage_rate.toFixed(1)+'%' : '—')" tone="green"/>
       <KpiCard label="样本覆盖率" :value="activeClass.coverage_rate != null ? activeClass.coverage_rate.toFixed(1)+'%' : '样本不足'" hint="可评价样本 / 实际应测" tone="blue" icon="chart"/>
@@ -128,6 +138,24 @@ function reset() {
         <p class="hint">比较结果用于教育需求研判，不用于班级排名。</p>
       </section>
     </div>
+
+    <section class="card band-card">
+      <h2 class="section-title">关注等级分布</h2>
+      <p class="muted tiny">按总分区间分档，每名可评价学生只落一档，三档互不叠加；区间取自本次结果所用的量表评分规则版本。左边是本班，右边是所属年级的全体——与上面「本班与同年级对比」是同一个对照关系，换了一个维度看。</p>
+      <div class="band-grid">
+        <div class="band-cell">
+          <h3 class="band-cell-title">本班 · {{ activeClassName }}</h3>
+          <ScoreBandBars :items="activeClass.level_distribution" :totals="totalBands" :total="activeClass.sample_count"/>
+        </div>
+        <div v-if="gradeForClass" class="band-cell">
+          <h3 class="band-cell-title">同年级 · {{ gradeForClass.grade_name }}全年级</h3>
+          <ScoreBandBars :items="gradeForClass.level_distribution" :totals="totalBands" :total="gradeForClass.sample_count"/>
+        </div>
+        <!-- 取不到年级那一组时**不留一个空框**：那一格会是三条 0 高的柱子，看起来像
+             「这个年级一个都没有」，而事实是这份报表里没有这一组。 -->
+        <div v-else class="band-cell band-cell-empty">当前报表里没有这个年级的汇总数据。</div>
+      </div>
+    </section>
 
     <div class="bottom-grid">
       <section class="card">
@@ -166,6 +194,12 @@ function reset() {
 .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin: 0 0 16px }
 .split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-bottom: 16px }
 .bottom-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 16px; margin-bottom: 16px }
+/* 本班 / 同年级各一张，固定两列（这一页的对照关系就是一对，不像年级页那样随年级数变）。 */
+.band-card { margin-bottom: 16px }
+.band-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 12px }
+.band-cell { min-width: 0; border: 1px solid #e6edf6; border-radius: 10px; padding: 12px 14px 6px; background: #fbfdff }
+.band-cell-title { margin: 0 0 4px; font-size: 14px; font-weight: 700; color: #1d3f63 }
+.band-cell-empty { display: flex; align-items: center; justify-content: center; padding: 34px 18px; color: #687c93; font-size: 13px; text-align: center }
 .split > *, .bottom-grid > * { min-width: 0 }
 section.card { min-width: 0; padding: 18px; overflow: hidden }
 .callout { display: flex; gap: 12px; align-items: center; background: #edf9f2; border: 1px solid #c4e8d7; border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; font-size: 13px }
@@ -188,7 +222,7 @@ td { padding: 9px 8px; border-top: 1px solid #e6edf6 }
 tbody tr:hover { background: #f8fbff }
 .privacy { margin-top: 16px }
 .hint { margin: 8px 0 0 }
-@media(max-width:1200px) { .split, .bottom-grid { grid-template-columns: 1fr } }
+@media(max-width:1200px) { .split, .bottom-grid, .band-grid { grid-template-columns: 1fr } }
 @media(max-width:1100px) { .kpis { grid-template-columns: 1fr 1fr } }
 @media(max-width:600px) {
   .kpis { grid-template-columns: 1fr }
