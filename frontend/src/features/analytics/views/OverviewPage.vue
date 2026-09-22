@@ -34,7 +34,15 @@ const signalTypes = computed(() => overview.value?.signal_type_stats?.map(s => (
          s.signal_type === 'SCREENING_SIGNAL' ? '普通筛查信号' : s.signal_type,
   value: s.student_count
 })) || [])
-const gradeSignalRates = computed(() => grades.value.map(g => g.coverage_rate))
+// 覆盖率是「可能不发布」的比率：分母小于 MIN_COHORT_FOR_AGGREGATE 时服务端发 None。
+// **不许 `?? 0` 把它抹平**——`0` 是「一个都没测」，`None` 是「这几个人算出来不足为凭」，
+// 两者在屏幕上必须长得不一样（CLAUDE.md §11）。所以这里按 GradesPage 的既有写法分成两支：
+// 进柱状图的只有真值，被抑制的那些在下面单列一句话说明。
+const publishedGradeRates = computed(() => grades.value.flatMap(g =>
+  g.coverage_rate == null ? [] : [{ grade: g, value: g.coverage_rate }]
+))
+const suppressedGradeNames = computed(() => grades.value
+  .filter(g => g.coverage_rate == null).map(g => g.grade_name))
 
 async function loadReport(taskIds: number[]) {
   loading.value = true
@@ -80,7 +88,13 @@ function reset() { report.value = null; error.value = ''; loading.value = false 
       </section>
       <section class="card">
         <h2 class="section-title">各年级样本覆盖率</h2>
-        <ColumnChart :labels="grades.map(g=>g.grade_name)" :values="gradeSignalRates" :max="100" suffix="%"/>
+        <ColumnChart
+          v-if="publishedGradeRates.length"
+          :labels="publishedGradeRates.map(item=>item.grade.grade_name)"
+          :values="publishedGradeRates.map(item=>item.value)"
+          :max="100" suffix="%"/>
+        <div v-else class="data-empty">当前没有可发布的年级覆盖率。样本量不足时，系统不会展示可反推个体的精确数值。</div>
+        <p v-if="suppressedGradeNames.length" class="hint">{{ suppressedGradeNames.join('、') }}因样本量不足未进入柱状图。</p>
       </section>
     </div>
 
@@ -121,6 +135,9 @@ function reset() { report.value = null; error.value = ''; loading.value = false 
 
 <style scoped>
 .empty { text-align: center; padding: 40px 0; color: #708198; font-size: 14px }
+/* 与 GradesPage 同一套口径：图里放不下的一档，在下面单列一句话说明（同 §11 的「样本过小」）。 */
+.data-empty { padding: 34px 18px; border: 1px dashed #cbd8e2; border-radius: 8px; background: #f8fafc; color: #687c93; text-align: center; line-height: 1.7 }
+.hint { margin: 10px 0 0; color: #708198; font-size: 13px }
 .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin: 0 0 16px }
 .overview-chart { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-bottom: 16px }
 .bottom-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 16px; margin-bottom: 16px }

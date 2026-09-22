@@ -32,6 +32,7 @@ import {
   exportCareCases,
   exportHighRiskCareCases,
   getAnalyticsReport,
+  getAssessmentTasks,
   getCareCaseDetail,
   getCareCases,
   getCounselorWorkbench,
