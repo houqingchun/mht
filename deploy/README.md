@@ -179,7 +179,7 @@ Administrators，它得读得到那个文件才连得上库。单机用法把当
 |---|---|---|
 | 面向 | 装不了 Docker 的 Windows 服务器 | 任何有 Docker 的机器 |
 | 前端 | 后端**同一个端口**托管（`XLP_WEB_DIR`） | `frontend/nginx.conf` 反代 |
-| 产物 | `dist/心晴部署包.zip` | `docker compose up -d` |
+| 产物 | `dist/心晴部署包_V<版本>.zip` | `docker compose up -d` |
 | 入口 | `deploy/build_package.py` | `docker-compose.yml` |
 
 **前端必须同源**（`services/api.ts` 里 `API_BASE = '/api/v1'` 是相对路径，
@@ -193,7 +193,7 @@ Administrators，它得读得到那个文件才连得上库。单机用法把当
 make deploy-package
 ```
 
-出 `dist/心晴部署包.zip`（约 11MB）。**在开发机（macOS / Linux）上跑，不是在目标机上。**
+出 `dist/心晴部署包_V<版本>.zip`（约 11MB）。**在开发机（macOS / Linux）上跑，不是在目标机上。**
 
 它做五件事：
 
@@ -212,12 +212,12 @@ make deploy-package
 
 ```bash
 python deploy/build_package.py --reuse-frontend   # 跳过 npm build（确认 dist 是新的时用）
-python deploy/build_package.py --keep             # 保留上一次解开的 dist/心晴部署包/（省下 wheel 的下载）
+python deploy/build_package.py --keep             # 保留上一次解开的 dist/心晴部署包_V<版本>/（省下 wheel 的下载）
 ```
 
 `--keep` 省的是第 2 步那 31 个 wheel 的重新下载，用在**上一次出包失败在半路**的时候
 （2026-09-18 之前它其实是坏的：第二次跑到「复制源码与前端」会撞
-`FileExistsError: ... dist/心晴部署包/data`，而那个错与「包坏了」毫无关系）。
+`FileExistsError: ... dist/心晴部署包_V<版本>/data`，而那个错与「包坏了」毫无关系）。
 **代价**是源里**删掉**的文件不会从产物里消失——`MUST_NOT_EXIST` 只钉住了
 `python/` 与 `deploy/task.xml` 两个。所以有「删文件」的改动时，出**不带 `--keep`** 的
 那一次；平时升级文件内容用 `--keep` 是安全的（逐文件覆盖）。
@@ -227,7 +227,7 @@ python deploy/build_package.py --keep             # 保留上一次解开的 dis
 ## 包里是什么
 
 ```
-心晴部署包/
+心晴部署包_V<版本>/
   一键安装.bat            ★ 操作员双击的就是它
   部署说明.txt              给操作员看的（UTF-8 with BOM，记事本直接看得对）
   deploy/
@@ -887,7 +887,7 @@ ERROR 安装没有完成：在此对象上找不到属性"Count"。请确认该�
 这与 `function_body` 的 docstring 里那条是同一件事：在 PowerShell 上写半吊子词法器，
 错的时候是无声的——而这里会**无故变红**，一条会无故变红的守卫很快会被人关掉。
 
-能用的是**差分**：把 `dist/心晴部署包.zip` 里那一份解出来（它是**上一次真机上跑通过**的
+能用的是**差分**：把 `dist/心晴部署包_V<版本>.zip` 里那一份解出来（它是**上一次真机上跑通过**的
 版本），与磁盘上这份 `difflib.unified_diff`，断言 `{` 与 `}` 的**增量相等**、且
 「新增行的净 `{` 数 − 删除行的净 `{` 数 = 0」。它不需要懂 PowerShell 的词法，
 只要求「形状与那一版相同」。前提是手上有一个跑通过的旧版本——所以它替不了逐字读一遍。
@@ -917,7 +917,7 @@ ERROR 安装没有完成：在此对象上找不到属性"Count"。请确认该�
 
 ### 两条都走
 
-1. 把 `dist/心晴部署包.zip` 拷到一台**干净**的 Windows（或至少换一个安装目录），
+1. 把 `dist/心晴部署包_V<版本>.zip` 拷到一台**干净**的 Windows（或至少换一个安装目录），
    解压，双击 `一键安装.bat`，第 0 问按这一遍要验的那种答。
 2. 故意填错一次数据库密码 —— 应当在「准备数据库」那一步停下来，并且**用中文说清**是
    连不上还是密码错，而不是丢一个 traceback。

@@ -29,7 +29,7 @@
 | `make purge-demo` | 把 `seed-demo` 填进去的一切删干净，回到只有 `seed.py` 基线的状态。**仅用于开发库** |
 | `mysql … < backend/sql/reset_to_baseline.sql` | 清到「只有 admin + 基本配置」。给**别处的新环境**用，见 §16 |
 | `make db-upgrade-sql` | 重新渲染 `backend/sql/upgrade_from_v1_0_0.sql`（+ `dist/` 一份）。**改过 alembic 迁移就要跑**，见 §30 |
-| `make deploy-package` | 打 Windows 一键安装包 → `dist/心晴部署包.zip`。**在开发机上跑**，见 §18 |
+| `make deploy-package` | 打 Windows 一键安装包 → `dist/心晴部署包_V<版本>.zip`。**在开发机上跑**，见 §18 |
 | `python backend/run_server.py` | 生产启动器（`chdir` + 日志轮转 + 数据库等待 + 崩溃重试）。计划任务跑的就是它 |
 | `make clean` | 清理编译产物 |
 
@@ -81,7 +81,7 @@ deploy/
   README.md                  面向维护者：怎么重出包、加一个依赖要改哪两处
 ```
 
-产物 `dist/心晴部署包.zip`（约 11MB）→ 拷到目标机 → 解压 → 双击。包里带着 Windows 版的
+产物 `dist/心晴部署包_V<版本>.zip`（约 11MB）→ 拷到目标机 → 解压 → 双击。包里带着 Windows 版的
 wheel 与构建好的前端，运行环境是**安装时用目标机上那个 Python 3.11 现建的 venv**
 （2026-09-18 起不再内嵌 CPython，见下文），所以目标机上不需要 pip、不需要网络，
 唯一要有的外部东西是 Python 3.11 x64 与 MySQL 8.0。**运维文档面向两种人，是两份东西**：

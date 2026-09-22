@@ -90,10 +90,10 @@ db-upgrade-sql:
 db-seed-sql:
 	cd backend && source .venv/bin/activate && python ../deploy/build_seed_sql.py
 
-# 打 Windows 一键安装包 -> dist/心晴部署包.zip
+# 打 Windows 一键安装包 -> dist/心晴部署包_V<版本>.zip
 #
-# **在开发机（macOS / Linux）上跑，不是在目标机上跑。** 它要下载 Windows 版的
-# CPython 与 win_amd64 的 wheel，并重新构建前端；目标机那边只解压、只双击。
+# **在开发机（macOS / Linux）上跑，不是在目标机上跑。** 它要下载 win_amd64 的 wheel
+# 并重新构建前端；目标机那边只解压、只双击（Python 3.11 与 MySQL 得先装好，见 §18）。
 # 用它自己的 venv 跑：这个脚本要 import `packaging`（随 [test] extra 一起装）。
 #
 # 出完包请照 `deploy/README.md` 里那张清单在 Windows 上真装一次——

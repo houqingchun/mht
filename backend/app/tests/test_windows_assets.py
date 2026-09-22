@@ -1314,7 +1314,8 @@ def test_keep_can_actually_be_used_twice():
 
     2026-09-18 顺手撞到的：`--keep` 跳过 `rmtree`，而 `data/` 与 `frontend/dist/` 那两次
     `copytree` 没有 `dirs_exist_ok=True`，于是第二次跑到「复制源码与前端」直接
-    `FileExistsError: ... dist/心晴部署包/data`。**它从来没有成功用过**——不传 `--keep` 时
+    `FileExistsError: ... dist/心晴部署包/data`（那两层的目录名 2026-09-22 起都带版本号，
+    形状不变）。**它从来没有成功用过**——不传 `--keep` 时
     上面那行 `rmtree` 已经把目录删干净了，所以这个错只在「它唯一的用法」（上一次失败在半路，
     想把那 31 个 wheel 省下来）下才出现。
 

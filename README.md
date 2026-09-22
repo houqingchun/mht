@@ -120,16 +120,17 @@ mysql -h 127.0.0.1 -u root -p xinliceping < sql/reset_to_baseline.sql
 ### 出一份包（在开发机上）
 
 ```bash
-make deploy-package     # -> dist/心晴部署包.zip，约 22MB
+make deploy-package     # -> dist/心晴部署包_V<版本>.zip，约 11MB
 ```
 
-包里带着 Windows 版的 CPython、Windows 版的依赖 wheel、已经构建好的前端，
-所以目标机上**不需要** Python、不需要 pip、不需要网络——唯一要有的外部东西是 MySQL 8.0。
+包里带着 Windows 版的依赖 wheel 与已经构建好的前端，**运行环境是安装时用目标机上那个
+Python 3.11 现建的 venv**（2026-09-18 起不再内嵌 CPython，zip 从 22MB 降到 11MB），
+所以目标机上不需要 pip、不需要网络——要有的外部东西是 **Python 3.11 x64** 与 MySQL 8.0。
 自检会在出包时逐个核对必需文件、依赖闭环、编码约定与中文文件名。
 
 ### 在目标机上装
 
-1. 把 `心晴部署包.zip` 拷过去
+1. 把 `心晴部署包_V<版本>.zip` 拷过去
 2. **解压**
 3. 双击 `一键安装.bat`（会弹一次 UAC）
 

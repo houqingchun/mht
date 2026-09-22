@@ -2,7 +2,10 @@
 
 在 **Mac / Linux 上跑**（这台开发机），产出一个自包含的目录与一个 zip：
 
-    dist/心晴部署包.zip
+    dist/心晴部署包_V1.1.4.zip
+
+**两个名字里都带着版本号**（2026-09-22 起，见下面 `package_dir` / `zip_path` 那一段：
+`dist/` 里堆着几个包时，不带版本的那个名字读不出任何东西）。
 
 包里带着 Windows 版的依赖 wheel 与已经构建好的前端，所以目标机上**不需要** pip、
 不需要网络。但**目标机上必须已经装好 CPython 3.11（64 位）**——2026-09-18 起包里的
@@ -60,8 +63,36 @@ import build_migration_sql  # noqa: E402 —— 必须在上面那行 sys.path �
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "deploy"
 DIST = ROOT / "dist"
-PACKAGE_DIR = DIST / "心晴部署包"
-ZIP_PATH = DIST / "心晴部署包.zip"
+
+
+# --- 产物路径：**带版本号**，而且是两个函数不是两个常量 --------------------------
+#
+# 2026-09-22 用户要求：「打包时，也请加上版本号以便于区分，比如 心晴部署包_V1.1.4.zip」。
+# 起因很实在：`dist/` 里堆着几个不同版本的包时，`心晴部署包.zip` 这个名字读不出任何东西，
+# 拷给别人的时候要靠文件时间猜——而拷过去的那一份**收不回来**。
+#
+# 三件事写在签名里，而不是留给读者去猜：
+#
+# 1. **它们是函数，不是常量。** 版本号的唯一出处是 `backend/app/version.py`（CLAUDE.md §19），
+#    要到运行时才读得到；模块级常量在 import 那一刻就定型了，拿不到它。所以路径由版本派生
+#    （`read_app_version()` 在下面，`write_package_info` 也读同一处）。**别把它们改回常量**：
+#    改回去的唯一办法是把版本号在常量区再抄一份，那正是 §19 要消掉的东西。
+#
+# 2. **用 `V{__version__}`（`V1.1.4`），不是 `VERSION_LABEL`（`V1.1`）。** 后者刻意丢掉修订号
+#    （§19：`V1.1` 是给人念的，`1.1.3` 是给机器认的），于是 `1.1.2` / `1.1.3` / `1.1.4` 三个包
+#    会叫同一个名字——**恰好实现不了这次要的「便于区分」**。`test_app_version.py` 里有一条
+#    盯着这个差别。
+#
+# 3. **zip 里面那层根目录也带版本**（`write_zip` 压的是目录本身）。两次解压到同一个地方时
+#    互相覆盖，是操作员做得出的事——而覆盖掉的那一份里可能有他没跑完的安装。
+def package_dir(version: str) -> Path:
+    """`dist/心晴部署包_V1.1.4/`——出包时铺开的目录。"""
+    return DIST / f"心晴部署包_V{version}"
+
+
+def zip_path(version: str) -> Path:
+    """`dist/心晴部署包_V1.1.4.zip`——**交给操作员的那一个**（拷过去的是它）。"""
+    return DIST / f"心晴部署包_V{version}.zip"
 
 LOCK_FILE = DEPLOY / "requirements.lock.txt"
 WINDOWS_ASSETS = DEPLOY / "windows"
@@ -307,16 +338,39 @@ def copy_windows_assets(target: Path) -> None:
     shutil.copy2(LOCK_FILE, scripts / LOCK_FILE.name)
 
 
-def write_package_info(target: Path) -> str:
-    # 读的是 `app/version.py` 的 `__version__`，**不是** pyproject —— 后者
-    # 2026-09-19 起是 `dynamic = ["version"]`，那里已经没有字面量了，读它只会
-    # 拿到下面那个 `0.0.0` 兜底，而且**不报错**：包照出，版本那一行变成假的。
-    # 唯一出处是那一个文件，这里是它的第二个读者（第一个是 setuptools）。
-    version = "0.0.0"
+# 读 `backend/app/version.py` 的 `__version__` —— 全仓库唯一的出处（§19）。
+# 这里是它的第二个读者（第一个是 setuptools 的 `attr:`，第三个是
+# `build_migration_sql._version_label`）。**读的是那个文件，不是 `pyproject.toml`**：
+# 后者 2026-09-19 起是 `dynamic = ["version"]`，那里已经没有字面量可读了。
+#
+# **读不到就停，没有兜底值。** 这里从前有一个 `version = "0.0.0"`，读不到时包照出、
+# `package-info.txt` 里写着 `0.0.0+20260922`。2026-09-22 起这个值还会进**文件名**
+# （`心晴部署包_V0.0.0.zip`）——那正是 §19 那条「没人设过、却看起来像设过」的形状：
+# 一个名字与内容对不上的交付物，而它会被人拷过去。
+#
+# 上面这几行写成 `#` 注释、不是 docstring，是**有意的**：`test_app_version.py` 那条
+# 守卫用 `without_comments` 剥掉注释之后再找 `version.py` 这几个字，而 docstring 不是
+# 注释、剥不掉——写成 docstring 的话，下面那段真正的读取被删掉之后守卫照样是绿的
+# （它命中的是这段说明里的字）。
+def read_app_version() -> str:
     source = (ROOT / "backend" / "app" / "version.py").read_text(encoding="utf-8")
     match = re.search(r'^__version__\s*=\s*"([^"]+)"', source, re.MULTILINE)
-    if match:
-        version = match.group(1)
+    if not match:
+        sys.exit(
+            "[X] 读不到 backend/app/version.py 里的 __version__；"
+            "版本号只有一个出处，读不到就别出包（这里没有兜底值——"
+            "兜底会造出一个名字与内容对不上的交付物）"
+        )
+    return match.group(1)
+
+
+def write_package_info(target: Path, version: str) -> str:
+    """写 `deploy/package-info.txt`，返回 `1.1.4+20260922` 那个构建戳。
+
+    `version` 由调用方从 `read_app_version()` 拿进来，**不在这里再读一遍文件**：
+    同一次出包里两处各读一次，读到的当然是同一个值，但那一处正则会在某次改动里
+    悄悄漂成第二个定义（`test_app_version.py` 有一条盯着「这里不再自己读」）。
+    """
     stamp = time.strftime("%Y-%m-%d %H:%M")
     built = f"{version}+{time.strftime('%Y%m%d')}"
 
@@ -591,8 +645,11 @@ def write_zip(package: Path, path: Path) -> None:
     step("6/6 压缩")
     if path.exists():
         path.unlink()
-    # 压缩的是**目录本身**，不是它的内容：Windows 上「解压到」会得到一个 心晴部署包\
-    # 文件夹；压内容的话，一堆文件会直接散在操作员选的那个目录里。
+    # 压缩的是**目录本身**，不是它的内容：Windows 上「解压到」会得到一个
+    # 心晴部署包_V1.1.4\ 文件夹；压内容的话，一堆文件会直接散在操作员选的那个目录里。
+    #
+    # 那层目录名本身带版本号，所以两次解压到同一个地方不会互相覆盖（见 package_dir
+    # 上面第 3 条）。`install.ps1` 用的是 `%~dp0`，即相对自身——目录叫什么它不关心。
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zipped:
         for item in sorted(package.rglob("*")):
             zipped.write(item, item.relative_to(package.parent).as_posix())
@@ -636,7 +693,11 @@ def main() -> int:
         action="store_true",
         help="跳过 npm run build，直接用磁盘上的 frontend/dist（只在确认它是新的时用）",
     )
-    parser.add_argument("--keep", action="store_true", help="保留上一次的 dist/心晴部署包/ 目录")
+    parser.add_argument(
+        "--keep",
+        action="store_true",
+        help="保留本次要用的 dist/心晴部署包_V<版本>/ 目录（省下重新下载 wheel 的那几分钟）",
+    )
     args = parser.parse_args()
 
     if not WINDOWS_ASSETS.is_dir():
@@ -644,8 +705,20 @@ def main() -> int:
     if sys.platform == "win32":
         sys.exit("[X] 这个脚本要在开发机（macOS / Linux）上跑，不是在目标机上跑")
 
+    # 版本号**先读**，排在 npm build 之前：读不到就停在这里，而不是让操作员等完
+    # 一两分钟的构建再收到一句与版本无关的话。
+    #
+    # 产物的两个名字都由它派生（`package_dir` / `zip_path`），所以**本组的 `--keep`
+    # 语义跟着版本走**：同一个版本重跑仍是同一个目录（原样），版本号升了就是另一个
+    # 目录——那一次会把 31 个 wheel 重新下一遍。这是有意的：「省下 wheel」是
+    # `--keep` 的用途，而跨版本复用一份 wheel 目录等于假设两个版本的依赖完全一样。
+    version = read_app_version()
+    pkg_dir = package_dir(version)
+    pkg_zip = zip_path(version)
+
     print("心晴 · Windows 一键安装包")
     print(f"仓库根 {ROOT}")
+    print(f"版本   {version}")
 
     # 编码这件事**先查**：它是唯一一类「在 Mac 上一切都对、到 Windows 上才炸」的错，
     # 而查它只要一毫秒。放到最后（verify_package 里）也查，那次是查产物。
@@ -664,11 +737,11 @@ def main() -> int:
 
     frontend_dist = build_frontend(rebuild=not args.reuse_frontend)
 
-    if PACKAGE_DIR.exists() and not args.keep:
-        shutil.rmtree(PACKAGE_DIR)
-    PACKAGE_DIR.mkdir(parents=True, exist_ok=True)
+    if pkg_dir.exists() and not args.keep:
+        shutil.rmtree(pkg_dir)
+    pkg_dir.mkdir(parents=True, exist_ok=True)
 
-    wheels = PACKAGE_DIR / "wheels"
+    wheels = pkg_dir / "wheels"
     download_wheels(wheels)
 
     # 增量 SQL **必须在下面那次整份拷贝之前**生成：它落在 `backend/sql/` 里，而
@@ -685,28 +758,29 @@ def main() -> int:
         log(f"{sql_path.relative_to(ROOT)}  ({sql_path.stat().st_size} 字节)")
 
     step("4/6 复制源码与前端")
-    copy_backend(PACKAGE_DIR / "backend")
+    copy_backend(pkg_dir / "backend")
     # `dirs_exist_ok=True` 是给 `--keep` 用的：不加的话，第二次跑（也就是 `--keep`
     # **唯一**的用法——上一次出包失败在半路，想把那 31 个 wheel 省下来）会在这一行
-    # 撞 `FileExistsError: ... dist/心晴部署包/data`，而那个错与「包坏了」毫无关系。
-    # 之前一直没被发现，是因为不传 `--keep` 时上面那行 rmtree 已经把目录删干净了。
+    # 撞 `FileExistsError: ... dist/心晴部署包_V1.1.4/data`，而那个错与「包坏了」
+    # 毫无关系。之前一直没被发现，是因为不传 `--keep` 时上面那行 rmtree 已经把目录
+    # 删干净了。
     #
     # 代价说清楚：留着旧目录意味着**源里删掉的文件不会从产物里消失**。这正是
     # `MUST_NOT_EXIST`（`python/`、`deploy/task.xml`）存在的理由，新增「删掉某个文件」
     # 的改动时，要出**不带 `--keep`** 的那一次。
-    shutil.copytree(ROOT / "data", PACKAGE_DIR / "data", dirs_exist_ok=True)
-    shutil.copytree(frontend_dist, PACKAGE_DIR / "frontend" / "dist", dirs_exist_ok=True)
-    copy_windows_assets(PACKAGE_DIR)
-    version = write_package_info(PACKAGE_DIR)
-    log(f"backend/ data/ frontend/dist/ deploy/ 就位，版本 {version}")
+    shutil.copytree(ROOT / "data", pkg_dir / "data", dirs_exist_ok=True)
+    shutil.copytree(frontend_dist, pkg_dir / "frontend" / "dist", dirs_exist_ok=True)
+    copy_windows_assets(pkg_dir)
+    built = write_package_info(pkg_dir, version)
+    log(f"backend/ data/ frontend/dist/ deploy/ 就位，版本 {built}")
 
-    verify_package(PACKAGE_DIR, wheels)
-    write_zip(PACKAGE_DIR, ZIP_PATH)
-    report(PACKAGE_DIR)
+    verify_package(pkg_dir, wheels)
+    write_zip(pkg_dir, pkg_zip)
+    report(pkg_dir)
 
     print("\n交付给操作员的是这两个之一：")
-    print(f"  {ZIP_PATH.relative_to(ROOT)}          ← 拷这个过去")
-    print(f"  {PACKAGE_DIR.relative_to(ROOT)}/             ← 或者整个目录拷过去")
+    print(f"  {pkg_zip.relative_to(ROOT)}   ← 拷这个过去")
+    print(f"  {pkg_dir.relative_to(ROOT)}/     ← 或者整个目录拷过去")
     return 0
 
 

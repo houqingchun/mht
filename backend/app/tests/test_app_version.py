@@ -153,19 +153,88 @@ def test_pyproject_carries_no_version_literal():
     assert attr == "app.version.__version__", f"dynamic 的 attr 指向了 {attr!r}"
 
 
-def test_the_packager_reads_the_single_source():
-    """打包器读 `app/version.py`，不读 `pyproject.toml`。
+def load_build_package():
+    """把出包脚本当模块导进来，好**真的调一次**它那两个算路径的函数。
 
-    pyproject 改成 `dynamic` 之后那里**没有字面量可读**，而 `write_package_info`
-    读不到时会静默退回它开头的 `"0.0.0"` 兜底 —— 包照出，版本那一行变成假的，
-    且没有任何东西报错。这正是本文件要挡的形状。
+    与 `test_windows_assets.py` 里那个同名函数同形（两处各写一份：那个文件的地盘是
+    Windows 侧资产，这一条属于「版本号只有一个出处」）。顶层 import 全是标准库
+    （`packaging` 那段有 try/except 兜底），脚本本体在 `if __name__ == "__main__":`
+    之下，所以导入它没有副作用。
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "version_guard_build_package", ROOT / "deploy" / "build_package.py"
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_packager_reads_the_single_source():
+    """打包器读 `app/version.py`，不读 `pyproject.toml` —— 而且**只读这一处**。
+
+    pyproject 改成 `dynamic` 之后那里**没有字面量可读**；读取处读不到时曾经会静默退回
+    一个 `"0.0.0"` 兜底 —— 包照出、版本那一行是假的，且没有任何东西报错。这正是本文件
+    要挡的形状（兜底 2026-09-22 去掉了，见下一条）。
+
+    三个判据分两次断（2026-09-22 从一条拆成两条：版本读取抽进了 `read_app_version`，
+    而**版本号从这一天起还会进产物文件名**，所以「读的是哪个文件」这一件事有两处要守）：
+
+    - `read_app_version` 是**唯一**读版本的地方，读 `version.py`、不读 pyproject；
+    - `write_package_info` 收一个 `version` 参数，**自己不再读文件** —— 同一次出包里
+      两处各读一次，那一处正则会在某次改动里悄悄漂成第二个定义。
+
+    两处都过 `without_comments`：它们上面都有 `#` 说明写着「不读 pyproject」这句话本身，
+    把注释算进去会让守卫**因为文档写得对而变红**（改注释去迁就测试是更糟的方向）。
+
+    **判据里的文件名一律带引号**（`"version.py"`、`"pyproject`），不是裸子串 ——
+    这一点 2026-09-22 写着这条时当场红过一次：**本文件自己就叫
+    `test_app_version.py`，它含 `version.py` 这个子串**，而 `without_comments` 只剥
+    `#` 注释、**不剥 docstring**。于是任何一段提到「本文件有一条盯着它」的说明都会让
+    反向断言在**说明写得越对越红**。加引号之后锚定的是**代码里的那个字面量**，
+    与说明文字无关（真正被读的那个文件在代码里写的就是 `"version.py"`）。
     """
     text = (ROOT / "deploy" / "build_package.py").read_text("utf-8")
-    body = without_comments(function_body(text, "write_package_info"))
-    assert "version.py" in body, "`write_package_info` 没在读 app/version.py"
-    assert "pyproject" not in body, (
-        "`write_package_info` 又在读 pyproject.toml 了；它已经是 dynamic 的，"
-        "读不到字面量会静默退回 0.0.0"
+
+    reader = without_comments(function_body(text, "read_app_version"))
+    assert '"version.py"' in reader, "`read_app_version` 没在读 app/version.py"
+    assert '"pyproject' not in reader, (
+        "`read_app_version` 又在读 pyproject.toml 了；它已经是 dynamic 的，读不到字面量"
+    )
+
+    writer = without_comments(function_body(text, "write_package_info"))
+    assert "read_text" not in writer and '"version.py"' not in writer, (
+        "`write_package_info` 自己读版本了；它该收一个 `version` 参数 —— "
+        "版本只许由 `read_app_version` 读一处"
+    )
+
+
+def test_the_package_artifacts_carry_the_full_version():
+    """产物名是 `心晴部署包_V1.1.4.zip`：**完整三段**版本号，不是界面那个 `V1.1`。
+
+    这条钉的是「为什么不用 `VERSION_LABEL`」。那一串刻意丢掉修订号（§19：`V1.1` 是
+    给人念的，`1.1.4` 是给机器认的），于是 `1.1.2` / `1.1.3` / `1.1.4` 三个包会叫
+    **同一个名字** —— 而用户 2026-09-22 要的正是「便于区分」，拿人念的那一串去命名文件
+    恰好做不到这件事。两个名字都得带：zip 与解开的目录（`--keep` 认的是后者）。
+
+    判据是**真调**那两个函数，不是读源码文本：名字是算出来的，文本断言证明不了算得对。
+    顺带把「打包器正则读出的版本」与「本文件 import 的那个」绑在一起 —— 两处分岔时，
+    产物名会与 `/openapi.json`、界面页脚各说各话。
+    """
+    module = load_build_package()
+    assert module.read_app_version() == __version__, (
+        "打包器从 version.py 正则读出来的版本与本文件 import 的不是同一个"
+    )
+
+    name = f"心晴部署包_V{__version__}"
+    assert module.zip_path(__version__).name == f"{name}.zip", (
+        f"zip 名是 {module.zip_path(__version__).name!r}；"
+        "用了 VERSION_LABEL 的话它会是 心晴部署包_V1.1.zip —— 丢掉修订号就区分不出补丁版"
+    )
+    assert module.package_dir(__version__).name == name, (
+        f"解开的目录名是 {module.package_dir(__version__).name!r}"
     )
 
 

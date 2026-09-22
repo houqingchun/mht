@@ -2,7 +2,7 @@
 -- 心晴 · 数据库增量升级脚本
 --
 -- 从  V1.0.0（迁移 0012_drop_care_case_unique）
--- 到  V1.1.3（迁移 0019_total_includes_validity）
+-- 到  V1.1.4（迁移 0019_total_includes_validity）
 --
 -- 由 deploy/build_migration_sql.py 生成，**不要手工编辑**：它的数据源是
 -- 链上 7 条迁移各自的 PRECHECKS 常量与 alembic 的离线渲染。
