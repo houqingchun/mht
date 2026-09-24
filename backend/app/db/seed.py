@@ -199,10 +199,10 @@ def seed_mht_scale(db: Session) -> None:
         ScaleRule(
             scale_id=scale.id,
             # 不写 `rule_version_for(scale.code, scale.version)`：那个函数由**量表版本**
-            # 派生标识，而种子这一行的版本号已经与量表版本脱钩了——2026-09-21 总分口径
-            # 改成「效度题也计入」时 +1 过一次，而量表的版本号没动。全新装出来的库与
+            # 派生标识，而种子这一行的版本号已经与量表版本脱钩了——总分口径
+            # 每次改变都会独立升级规则版本，而量表的版本号不动。全新装出来的库与
             # 升级上来的库必须落到同一个号上，判据就是 `MHT_RULE_VERSION` 这一处
-            # （`0019_total_includes_validity` 那条迁移是它的另一半，注释在那边）。
+            # （`0020_total_excludes_validity` 那条迁移是它的另一半）。
             rule_version=MHT_RULE_VERSION,
             rule_type="MHT_SCORING",
             status="ACTIVE",

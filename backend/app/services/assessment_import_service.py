@@ -586,6 +586,7 @@ SUMMARY_TOTAL_LABELS = ("总分", "总得分", "总分（标准分）", "总得�
 # 输入变成合法的。本地引擎算出来的分同样落在这个区间里。
 SCORE_MIN = 0
 SCORE_MAX = 100
+TOTAL_SCORE_MAX = 90
 
 # 八个维度的中文列名 → 维度码。**`labels.ts` 的 `DIMENSION_LABELS` 是同一批中文**，
 # 而它们没法互认（后端 import 不了 `.ts`），所以这里是一份**镜像**，由
@@ -1687,8 +1688,8 @@ def _parse_total_score(value: str) -> tuple[int | None, list[str]]:
     这一行**唯一**的分数来源——没有它，导进去的是一场没有任何结果的空会话，
     在界面上与「这个学生测了但是没事」长得一模一样。所以宁可让操作员改文件。
 
-    范围按 MHT 标准分（0–100）。写死的上下界在这里是安全的：这一档的分是**平台算好的**
-    （我们只做搬运），而本地引擎算出来的分在同一个 0–100 区间里——
+    范围按 MHT 内容题总分（0–90）。效度题不计入总分，因此只有平台汇总分的导入
+    也必须遵守同一上限——
     `test_assessment_import_api.py` 用一条「本地引擎与导入的分段判级一致」的用例盯着这一点。
     """
     if not value:
@@ -1696,10 +1697,10 @@ def _parse_total_score(value: str) -> tuple[int | None, list[str]]:
         # 不是内部字段名——他拿着这句话要去改的是那个文件
         return None, ["缺少总分"]
     if not value.isascii() or not value.isdigit():
-        return None, [f"总分「{value}」不是 0–{SCORE_MAX} 的整数"]
+        return None, [f"总分「{value}」不是 0–{TOTAL_SCORE_MAX} 的整数"]
     score = int(value)
-    if not SCORE_MIN <= score <= SCORE_MAX:
-        return None, [f"总分 {score} 超出 0–{SCORE_MAX} 的范围"]
+    if not SCORE_MIN <= score <= TOTAL_SCORE_MAX:
+        return None, [f"总分 {score} 超出 0–{TOTAL_SCORE_MAX} 的范围"]
     return score, []
 
 

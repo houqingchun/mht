@@ -16,7 +16,7 @@ import hashlib
 from datetime import date
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -228,14 +228,16 @@ def assessment_import_batch_rows(
     batch_id: int,
     current_user: AssessmentImporter,
     db: Annotated[Session, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ):
     """某一批的逐行明细：文件里那一行长什么样、匹配到了谁、为什么没匹配上。
 
     **这一层按读者的数据范围过滤**（见 `list_import_rows`）：批次是共享的，而它
-    逐行给出姓名与学号。行数有界（一份普查是几百行），所以排序分页在客户端（§10）。
+    逐行给出姓名与学号。服务端按 `limit/offset` 分页，避免大批次一次传输全部明细。
     """
     batch = load_batch(db, batch_id)
-    result = list_import_rows(db, batch, actor=current_user)
+    result = list_import_rows(db, batch, actor=current_user, limit=limit, offset=offset)
     return ok(
         {
             "items": import_rows_payload(db, result["items"]),

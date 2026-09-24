@@ -1883,7 +1883,10 @@ export async function getAssessmentImportBatches(): Promise<AssessmentImportBatc
  * 界面上都写，不互相顶替。这个「不同源」是有意的：那三个数坐在提交按钮旁边，必须与
  * 提交时的整批判据一致。
  */
-export async function getAssessmentImportRows(batchId: number): Promise<{
+export async function getAssessmentImportRows(
+  batchId: number,
+  options: { limit?: number; offset?: number } = {}
+): Promise<{
   items: AssessmentImportRow[]
   total: number
   rowCounts: AssessmentRowCounts | null
@@ -1892,7 +1895,10 @@ export async function getAssessmentImportRows(batchId: number): Promise<{
     items: AssessmentImportRow[]
     total: number
     row_counts: AssessmentRowCounts | null
-  }>(`/assessment-imports/${batchId}/rows`)
+  }>(`/assessment-imports/${batchId}/rows?${new URLSearchParams({
+    limit: String(options.limit ?? 50),
+    offset: String(options.offset ?? 0)
+  })}`)
   return { items: data.items, total: data.total, rowCounts: data.row_counts }
 }
 

@@ -17,8 +17,8 @@
 | `..._re_running_after_a_downgrade_skips_instead_of_failing` | 【2/4】那条 `SKIP_TAKEN`：升级→降级→再升级 |
 
 **夹具形状**：`throwaway_database(with_schema=False)` 拿一个**空库**，自己
-`run_migrations(url, "0018_…")` 停在迁移前那一版，插一行旧规则，再 `run_migrations(url,
-"head")`。不能拿 `conftest.py` 的 `db_session`（那是已经 head 的库，0019 早就跑完了），
+`run_migrations(url, "0018_…")` 停在迁移前那一版，插一行旧规则，再只升到 0019。
+不能拿 `conftest.py` 的 `db_session`（那是已经 head 的库，0019 早就跑完了），
 也不能跑 `with_schema=True`（那会直接到 head）。
 """
 
@@ -147,7 +147,7 @@ def upgraded():
     with throwaway_database(with_schema=False) as url:
         run_migrations(url, BASE_REVISION)
         _add_scale_with_rule(url, scale_code="MHT", rule_version=OLD_RULE_VERSION)
-        run_migrations(url, "head")
+        run_migrations(url, NEW_REVISION)
         yield url
 
 
@@ -207,7 +207,7 @@ def test_the_version_arithmetic_matches_the_service(upgraded):
         run_migrations(url, BASE_REVISION)
         for index, version in enumerate(shapes):
             _add_scale_with_rule(url, scale_code=f"MHT{index}", rule_version=version)
-        run_migrations(url, "head")
+        run_migrations(url, NEW_REVISION)
 
         bumped = set(_rules(url)) - set(shapes)
         assert bumped == {_bump_version(version) for version in shapes}
@@ -232,7 +232,7 @@ def test_re_running_after_a_downgrade_skips_instead_of_failing():
         run_migrations(url, BASE_REVISION)
         _add_scale_with_rule(url, scale_code="MHT", rule_version=OLD_RULE_VERSION)
 
-        run_migrations(url, "head")
+        run_migrations(url, NEW_REVISION)
         assert set(_rules(url)) == {OLD_RULE_VERSION, "MHT-RULE-1.1.1"}
 
         # 这里**不能**写 `run_migrations(url, BASE_REVISION)`：`alembic upgrade <更老的
@@ -246,7 +246,7 @@ def test_re_running_after_a_downgrade_skips_instead_of_failing():
         assert downgraded["MHT-RULE-1.1.1"]["status"] == "RETIRED"
 
         # 这一句就是本用例的主题：它以前会是 IntegrityError。
-        run_migrations(url, "head")
+        run_migrations(url, NEW_REVISION)
 
         rules = _rules(url)
         # 一行没多、一行没少——降级**不删行**（§6：旧版本保留），再升级也不建新行。

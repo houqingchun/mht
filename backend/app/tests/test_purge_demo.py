@@ -34,11 +34,11 @@ from app.services.scale_rule_service import MHT_RULE_VERSION
 
 
 # 「另一个版本号」一律从 `MHT_RULE_VERSION` 派生，不写字面量。下面两条用例造的是
-# **已废止的历史版本**，而清理的判据是**当前**那一行——当前那一行会随算法变更 +1
-# （2026-09-21 总分口径改成「效度题也计入」时就是这么 +1 的）。写死 `MHT-RULE-1.1.1`
-# 这样的字面量会在下一次 +1 时撞上 `uq_scale_rule_version(scale_id, rule_version)`，
+# **已废止的历史版本**，而清理的判据是**当前**那一行——当前那一行会随算法变更 +1。
+# 写死版本字面量会在下一次 +1 时撞上 `uq_scale_rule_version(scale_id, rule_version)`，
 # 而报出来的是一句 IntegrityError，红在一个与「清理能不能收敛规则行」无关的地方。
-_OTHER_RULE_VERSIONS = [f"{MHT_RULE_VERSION.rpartition('.')[0]}.{tail}" for tail in ("2", "3")]
+_RULE_PREFIX, _, _RULE_PATCH = MHT_RULE_VERSION.rpartition(".")
+_OTHER_RULE_VERSIONS = [f"{_RULE_PREFIX}.{int(_RULE_PATCH) + offset}" for offset in (1, 2)]
 
 
 def _count(db, model) -> int:

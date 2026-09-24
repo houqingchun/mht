@@ -6,16 +6,12 @@ them must be pinned to a scale version, so a 2026 result stays interpretable
 under the rules in force when it was submitted.
 
 `DEFAULT_RULE_CONFIG` 里的分段值就是这些函数当年硬编码的那些，所以未配置任何规则的
-安装算出来的等级与从前一致；而最后一档的上界写的是**满分 100**，让这张表覆盖每一个
-可能出现的总分——超过所有分段的值本来就落到最后一档（`validity_band_fallback`），
-所以把 90 加宽到 100 **不改变任何一条判定**，它只让规则编辑界面上的这一段不再自相
-矛盾（那里显示「65-90」，而实际总分能到 100）。
+安装算出来的等级与发布规则一致。
 
-**总分现在数的是全部 100 题里答「是」的条数，效度题也在内。** 这条口径 2026-09-21
-按学校的口径改过一次：此前数的是 `content_questions`（90 道非效度题），同一个孩子
-的总分在两套口径下差 0–10 分。`rule_version` 是区分这两套算法的唯一依据，所以改算法
-的同时必须换版本号（CLAUDE.md §6），这就是 `0019_total_includes_validity` 那条迁移
-存在的理由。**维度分不受影响**：效度题不属于任何维度，仍然只数 `content_questions`。
+**总分只数 90 道非效度题里答「是」的条数，不包含 10 道效度题。**
+效度题只用于 `validity_score` / `validity_status`，不得影响总分和总分等级。
+`rule_version` 用来区分历史上的评分口径；改变算法时必须同时换版本号。
+维度分同样只数非效度题。
 """
 
 from dataclasses import dataclass, field
@@ -86,9 +82,7 @@ DEFAULT_RULE_CONFIG = ScaleRuleConfig(
     total_bands=(
         ScoreBand("GENERAL_RANGE", 0, 55),
         ScoreBand("NEEDS_ATTENTION", 56, 64),
-        # 上界是**满分**（总分含效度题后能到 100），不是「当年那 90 道题的满分」。
-        # 加宽它不改变判定：超出所有分段的值落到最后一档（见模块 docstring）。
-        ScoreBand("KEY_ATTENTION", 65, 100),
+        ScoreBand("KEY_ATTENTION", 65, 90),
     ),
     dimension_bands=(
         ScoreBand("LOW", 0, 3),
@@ -291,10 +285,7 @@ class ScaleEngine:
         }
         validity_score = sum(scores[question.question_no] for question in questions if question.is_validity_question)
         content_questions = [question for question in questions if not question.is_validity_question]
-        # **全部 100 题**，效度题也在总分里（2026-09-21 按学校口径改，见模块 docstring）。
-        # 数的是 `questions` 而不是 `answers`：两者由 validate_* 保证等长，但 `questions`
-        # 是这份量表自己的题号集合，用它在口径上不会随调用方多传一道题而漂。
-        total_score = sum(scores[question.question_no] for question in questions)
+        total_score = sum(scores[question.question_no] for question in content_questions)
 
         dimension_results = []
         dimension_codes = sorted({question.dimension_code for question in content_questions if question.dimension_code})

@@ -2,7 +2,7 @@
 -- 心晴：数据库**基础数据**脚本（只有管理员账号与量表，不含任何演示数据）
 -- ===========================================================================
 --
--- 版本：V1.1（1.1.4）
+-- 版本：V1.1（1.1.6）
 -- 生成：`make db-seed-sql`（`deploy/build_seed_sql.py`）。**不要手改这个文件**——
 --       改了下次重跑就没了，而且 `backend/app/tests/test_seed_sql.py` 会红。
 --
@@ -225,7 +225,7 @@ INSERT INTO scale_question (id, scale_id, question_no, question_text, dimension_
 -- ---------------------------------------------------------------------------
 -- scale_rule · 1 行 —— 评分规则：总分 / 维度分段与效度阈值都随这一行走（CLAUDE.md §6）
 -- ---------------------------------------------------------------------------
-INSERT INTO scale_rule (id, scale_id, rule_version, rule_type, config_json, status) VALUES (1, 1, 'MHT-RULE-1.1.1', 'MHT_SCORING', '{"no_value": "NO", "yes_value": "YES", "total_levels": [{"max": 55, "min": 0, "code": "GENERAL_RANGE"}, {"max": 64, "min": 56, "code": "NEEDS_ATTENTION"}, {"max": 100, "min": 65, "code": "KEY_ATTENTION"}], "key_questions": [85, 97], "question_count": 100, "interpretations": {"LOW": "该维度当前处于一般范围。", "HIGH": "该维度得分较高，建议由授权心理老师结合事实进一步了解。", "MEDIUM": "该维度提示可能存在需要进一步了解的倾向。"}, "dimension_levels": [{"max": 3, "min": 0, "code": "LOW"}, {"max": 7, "min": 4, "code": "MEDIUM"}, {"max": 15, "min": 8, "code": "HIGH"}], "validity_questions": [82, 84, 86, 88, 90, 92, 94, 96, 98, 100], "validity_retest_threshold": 7, "todo_business_confirmation": ["VALID 与 QUESTIONABLE 的效度阈值尚未冻结；当前仅实现 validity_score >= 7 为 RETEST_RECOMMENDED。"]}', 'ACTIVE');
+INSERT INTO scale_rule (id, scale_id, rule_version, rule_type, config_json, status) VALUES (1, 1, 'MHT-RULE-1.1.2', 'MHT_SCORING', '{"no_value": "NO", "yes_value": "YES", "total_levels": [{"max": 55, "min": 0, "code": "GENERAL_RANGE"}, {"max": 64, "min": 56, "code": "NEEDS_ATTENTION"}, {"max": 90, "min": 65, "code": "KEY_ATTENTION"}], "key_questions": [85, 97], "question_count": 100, "interpretations": {"LOW": "该维度当前处于一般范围。", "HIGH": "该维度得分较高，建议由授权心理老师结合事实进一步了解。", "MEDIUM": "该维度提示可能存在需要进一步了解的倾向。"}, "dimension_levels": [{"max": 3, "min": 0, "code": "LOW"}, {"max": 7, "min": 4, "code": "MEDIUM"}, {"max": 15, "min": 8, "code": "HIGH"}], "validity_questions": [82, 84, 86, 88, 90, 92, 94, 96, 98, 100], "validity_retest_threshold": 7, "todo_business_confirmation": ["VALID 与 QUESTIONABLE 的效度阈值尚未冻结；当前仅实现 validity_score >= 7 为 RETEST_RECOMMENDED。"]}', 'ACTIVE');
 
 
 -- ---------------------------------------------------------------------------

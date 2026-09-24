@@ -29,12 +29,11 @@ RULE_TYPE = "MHT_SCORING"
 
 #: 随这一版程序发布的 MHT 评分规则版本号。
 #:
-#: 形状与 `rule_version_for` 生成的一模一样（`<量器码>-RULE-<x.y.z>`），只是 2026-09-21
-#: 换过一次**算法**：`total_score` 从「90 道非效度题里答『是』的条数」改成「全部 100 题
-#: 里答『是』的条数」，效度题也计入（见 `app/scale_engine/engine.py` 的模块 docstring）。
-#: §6 要求 `rule_version` 能回答「这条结果当时按什么标准判定」，所以换算法必须换版本号。
+#: 总分口径是「90 道非效度题里答『是』的条数」。效度题只计入效度分。
+#: §6 要求 `rule_version` 能回答「这条结果当时按什么标准判定」，因此从含效度题的
+#: 1.1.1 口径改回来时，仍需要发布新规则版本。
 #:
-#: **它必须与 `alembic/versions/0019_total_includes_validity.py` 落到同一个号上。**
+#: **它必须与 `alembic/versions/0020_total_excludes_validity.py` 落到同一个号上。**
 #: 那条迁移服务的是**已有库**（把当时生效那一行 +1 版、旧的置 `RETIRED` 保留），这里
 #: 服务的是**全新装出来**的库（那条迁移在空表上跑，是 no-op，随后 `seed.py` 写这一行）。
 #: 两边分岔的后果是「全新装的库叫 1.1.0、升级上来的库叫 1.1.1」——同一个程序版本、
@@ -47,7 +46,7 @@ RULE_TYPE = "MHT_SCORING"
 #:
 #: 另外两处仍然走 `rule_version_for`（`update_rule` 建第一行、题库导入），那是**别的
 #: 量表版本**的规则，版本号本来就该跟着那个量表版本走，与这一条无关。
-MHT_RULE_VERSION = "MHT-RULE-1.1.1"
+MHT_RULE_VERSION = "MHT-RULE-1.1.2"
 
 
 def active_rule(db: Session, scale_id: int) -> ScaleRule | None:

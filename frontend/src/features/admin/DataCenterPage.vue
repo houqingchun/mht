@@ -97,6 +97,9 @@ const detailTotal = ref(0)
 const detailCounts = ref<AssessmentRowCounts | null>(null)
 const detailLoading = ref(false)
 const detailError = ref('')
+const detailPage = ref(1)
+const detailPageSize = ref(50)
+const detailPageCount = computed(() => Math.max(1, Math.ceil(detailTotal.value / detailPageSize.value)))
 
 /**
  * 逐行处置的**草稿**（§18.6）：只装「打开这一批时是什么样、操作员有没有改过」。
@@ -377,7 +380,7 @@ async function saveRowResolution(row: AssessmentImportRow) {
     if (draft.ageResolution) done.push(ageResolutionLabel(draft.ageResolution))
     if (draft.conflictResolution) done.push(conflictResolutionLabel(draft.conflictResolution))
     showToast('success', `第 ${row.row_no} 行已记下处置：${done.join('；')}`)
-    if (detailBatch.value) await openDetail(detailBatch.value)
+    if (detailBatch.value) await loadDetailPage(detailPage.value)
   } catch (err) {
     showToast('error', err instanceof Error ? err.message : '这一行的处置没有保存')
   } finally {
@@ -396,16 +399,28 @@ async function openDetail(batch: AssessmentImportBatch) {
   detailTotal.value = 0
   detailCounts.value = null
   detailError.value = ''
+  detailPage.value = 1
   // 逐行草稿跟着一起清（同一条理由：换一批时留着上一批的行内选择，
   // 界面上就会标题写着 B 的第 3 行、保存的却是 A 的第 3 行）
   rowDrafts.value = {}
   showAssessmentRows.value = true
+  await loadDetailPage(1)
+}
+
+/** 只替换当前页；切页时不关闭弹层、不丢掉批次摘要。 */
+async function loadDetailPage(page: number) {
+  if (!detailBatch.value) return
   detailLoading.value = true
+  detailError.value = ''
   try {
-    const result = await getAssessmentImportRows(batch.id)
+    const result = await getAssessmentImportRows(detailBatch.value.id, {
+      limit: detailPageSize.value,
+      offset: (page - 1) * detailPageSize.value
+    })
     detailRows.value = result.items
     detailTotal.value = result.total
     detailCounts.value = result.rowCounts
+    detailPage.value = Math.min(page, Math.max(1, Math.ceil(result.total / detailPageSize.value)))
     const drafts: Record<number, RowDraft> = {}
     for (const row of result.items) {
       drafts[row.id] = {
@@ -424,7 +439,7 @@ async function openDetail(batch: AssessmentImportBatch) {
 
 /** 明细那一条失败之后的「重试」：重开当前这一批（`detailBatch` 此刻就是它）。 */
 async function retryDetail() {
-  if (detailBatch.value) await openDetail(detailBatch.value)
+  await loadDetailPage(detailPage.value)
 }
 
 async function commitDraftNow() {
@@ -656,8 +671,11 @@ onMounted(async () => {
             >
               {{ committingAssessments ? '正在导入…' : '确认导入' }}
             </button>
-            <button v-if="assessmentRows.length" class="btn small" @click="openDetail(assessmentBatch)">
-              查看明细
+            <!-- 不以上传响应里的 `assessmentRows` 判断是否显示：那份数据可能被截断或
+                 读取失败，而弹层会按页重新请求整批明细。即使本页可见行为 0，也要让
+                 操作员看到「无记录 / 不在数据范围」的明确结果。 -->
+            <button class="btn small" @click="openDetail(assessmentBatch)">
+              查看全部明细
             </button>
             <button class="btn small" @click="forgetAssessmentBatch">换一份文件</button>
           </div>
@@ -969,8 +987,9 @@ onMounted(async () => {
           <table>
             <thead>
               <tr>
-                <th>行号</th><th>文件里写的</th><th>匹配结论</th><th>匹配学号</th>
-                <th>待确认</th><th>处置</th><th>处理结果</th><th>说明</th>
+                <th>行号</th><th>文件原始内容</th><th>标准化内容</th><th>匹配结论</th>
+                <th>匹配学生</th><th>匹配信息</th><th>待确认</th><th>处置</th>
+                <th>处理结果</th><th>结果信息</th><th>说明</th>
               </tr>
             </thead>
             <tbody>
@@ -989,8 +1008,13 @@ onMounted(async () => {
                     </span>
                   </div>
                   <div class="muted tiny">
-                    定位用：{{ row.normalized_grade_name || '—' }}
-                    {{ row.normalized_class_name || '—' }}
+                    年龄：{{ row.raw_age !== null ? `${row.raw_age}岁` : '—' }}
+                  </div>
+                </td>
+                <td>
+                  <div>{{ row.normalized_name || '—' }}</div>
+                  <div class="muted tiny">
+                    {{ row.normalized_grade_name || '—' }} {{ row.normalized_class_name || '—' }}
                   </div>
                 </td>
                 <!-- 走 `matchStatusLabel` / `matchStatusTone`：九个码出现在界面上就是漏了
@@ -1012,7 +1036,14 @@ onMounted(async () => {
                     </template>
                   </div>
                 </td>
-                <td>{{ row.matched_student_no || '—' }}</td>
+                <td>
+                  <div>{{ row.matched_name || '—' }}</div>
+                  <div class="muted tiny">学号：{{ row.matched_student_no || '—' }}</div>
+                </td>
+                <td>
+                  <div>置信度：{{ row.match_confidence ?? '—' }}</div>
+                  <div class="muted tiny">可见候选：{{ row.candidate_count }}</div>
+                </td>
                 <!-- 走 `importConflictLabel`，与 `match_status` 分开显示：药丸说结论，
                      这一格说结论是从哪来的（年龄差多少、上次是哪一场）。 -->
                 <td class="status-warn">
@@ -1126,21 +1157,52 @@ onMounted(async () => {
                     {{ importRowStatusLabel(row.processing_status) }}
                   </span>
                 </td>
+                <td>
+                  <div>会话ID：{{ row.session_id ?? '—' }}</div>
+                  <div class="muted tiny">用时：{{ row.duration_seconds !== null ? `${row.duration_seconds}秒` : '—' }}</div>
+                  <div v-if="row.age_before !== null || row.age_after !== null" class="muted tiny">
+                    年龄：{{ row.age_before ?? '—' }} → {{ row.age_after ?? '—' }}
+                  </div>
+                </td>
                 <td class="muted">{{ row.message || '—' }}</td>
               </tr>
             </tbody>
           </table>
         </div>
-        <!-- 截断要自己说出来（§10）：`/rows` 每次最多给 200 行，比出来的那个数
-             回答「还有多少没显示」。 -->
-        <p v-if="detailTotal > detailRows.length" class="muted tiny" style="margin-top:10px">
-          共 {{ detailTotal }} 行，当前显示前 {{ detailRows.length }} 行，另有
-          {{ detailTotal - detailRows.length }} 行未显示。
-        </p>
+        <div v-if="detailTotal" class="table-pager">
+          <span>
+            共 {{ detailTotal }} 条 · 第 {{ detailPage }} / {{ detailPageCount }} 页
+            · 当前显示第 {{ (detailPage - 1) * detailPageSize + 1 }}–{{
+              Math.min(detailPage * detailPageSize, detailTotal)
+            }} 条
+          </span>
+          <div class="pager-controls">
+            <select
+              v-model.number="detailPageSize"
+              class="select"
+              @change="loadDetailPage(1)"
+            >
+              <option :value="20">每页 20 条</option>
+              <option :value="50">每页 50 条</option>
+              <option :value="100">每页 100 条</option>
+              <option :value="200">每页 200 条</option>
+            </select>
+            <button class="btn small" :disabled="detailPage <= 1 || detailLoading" @click="loadDetailPage(detailPage - 1)">
+              上一页
+            </button>
+            <button
+              class="btn small"
+              :disabled="detailPage >= detailPageCount || detailLoading"
+              @click="loadDetailPage(detailPage + 1)"
+            >
+              下一页
+            </button>
+          </div>
+        </div>
         <!-- 两种原因分开说：这一批真的一行都没有，或者它的行都不在你的数据范围内
              （逐行明细按读者的范围过滤，而批次是共享的）。合成一句会让第二种情况
              看起来像第一种——而它们要采取的行动完全不同。 -->
-        <p v-else-if="!detailRows.length" class="muted tiny" style="margin-top:10px">
+        <p v-if="!detailRows.length" class="muted tiny" style="margin-top:10px">
           这一批没有逐行记录，或它的行都不在你的数据范围内。
         </p>
         <p class="muted tiny" style="margin-top:10px">

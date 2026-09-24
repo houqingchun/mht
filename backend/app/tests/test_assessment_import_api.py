@@ -2428,8 +2428,8 @@ def test_a_broken_total_score_is_a_row_error_not_a_cell_to_ignore(client, db_ses
     assert all(row["match_status"] == "INVALID_ROW" for row in rows.values())
     # 行负载以 `message` 为准：那三种坏法各说各的，**后面跟着的那一句是统一的**
     # （「这一行本身有问题，需要改文件后重传」，见 `_match_row` 的 errors 那一支）
-    assert rows[2]["message"].startswith("总分「优秀」不是 0–100 的整数；")
-    assert rows[3]["message"].startswith("总分 120 超出 0–100 的范围；")
+    assert rows[2]["message"].startswith("总分「优秀」不是 0–90 的整数；")
+    assert rows[3]["message"].startswith("总分 120 超出 0–90 的范围；")
     assert rows[4]["message"].startswith("缺少总分；")
     assert "这一行本身有问题" in rows[2]["message"]
 
@@ -2680,6 +2680,30 @@ def _detail_by_no(client, headers, batch_id: int) -> dict[int, dict]:
     response = client.get(f"/api/v1/assessment-imports/{batch_id}/rows", headers=headers)
     assert response.status_code == 200, response.text
     return {row["row_no"]: row for row in response.json()["data"]["items"]}
+
+
+def test_import_row_detail_supports_server_side_pagination(client, db_session):
+    """明细不再只有「前 200 条」：`total` 始终是全量，`limit/offset` 可遍历全部行。"""
+    headers = admin(client)
+    add_students(client, headers, [("S-PAGE-1", "甲同学", "男", 12), ("S-PAGE-2", "乙同学", "女", 13)])
+    grader = counselor(client)
+    batch = _preview_data(
+        client,
+        grader,
+        _csv([_row("甲同学", 1, 12, 1, 4), _row("乙同学", 2, 13, 1, 4)]),
+    )
+
+    first = client.get(
+        f"/api/v1/assessment-imports/{batch['id']}/rows?limit=1&offset=0", headers=grader
+    ).json()["data"]
+    second = client.get(
+        f"/api/v1/assessment-imports/{batch['id']}/rows?limit=1&offset=1", headers=grader
+    ).json()["data"]
+
+    assert first["total"] == second["total"] == 2
+    assert len(first["items"]) == len(second["items"]) == 1
+    assert first["items"][0]["row_no"] == 2
+    assert second["items"][0]["row_no"] == 3
 
 
 def _resolve(client, headers, row_id, **body):

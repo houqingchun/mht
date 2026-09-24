@@ -81,14 +81,8 @@ CONTENT_QUESTIONS = [no for no in range(1, 101) if no not in DEFAULT_RULE_CONFIG
 # `key_both` 那一档额外答「是」的那几道效度题（见 `_student_yes_set`）。取排序后的前 N 道，
 # N = 复测阈值 + 1 = 8，所以这一档的效度分是 8、越过阈值 7，判定为 `RETEST_RECOMMENDED`。
 #
-# 为什么只有 `key_both` 带效度题。总分数的是**全部 100 题**里答「是」的条数，效度题也在内
-# （2026-09-21 起，见 `scale_engine/engine.py` 的模块 docstring），所以往一个画像里加 8 道
-# 效度题等于给它的总分 +8。按这个口径把四档重算一遍，只有它的落点不动：
-#
-#   general     8-45   → 16-53   仍在 GENERAL_RANGE（0-55）
-#   attention  56-64   → 64-72   **跨进 KEY_ATTENTION（65-100）**，所以这一档不能碰
-#   key_one    63-71   → 71-79   仍在 KEY_ATTENTION
-#   key_both   66-76   → 74-84   仍在 KEY_ATTENTION
+# 只让 `key_both` 带效度题，是为了在演示库中保留少量「建议重测」样本。
+# 效度题不计入总分，因此这 8 道答案不会改变该画像的总分分档。
 #
 # 在 `key_one` 与 `key_both` 之间选后者，是因为它同时满足两件事：它是四档里**占比最小**
 # 的一档（`profiles` 里 12 分之 1，减掉 15% 未完成后约三四人），所以演示库里「建议重测」
