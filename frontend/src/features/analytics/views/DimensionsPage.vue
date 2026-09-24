@@ -1,14 +1,21 @@
 <script setup lang="ts">
 /** RPT-02 全校八维度分析 —— 独立页面。 */
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import FilterBar from '../components/FilterBar.vue'
 import ReportPageHeader from '../components/ReportPageHeader.vue'
 import KpiCard from '../components/KpiCard.vue'
 import HorizontalBars from '../components/HorizontalBars.vue'
 import PrivacyNote from '../components/PrivacyNote.vue'
 import ErrorState from '../../../components/ErrorState.vue'
-import { getAnalyticsReport, type AnalyticsReport } from '../../../services/api'
+import FormDialog, { type FormField } from '../../../components/FormDialog.vue'
+import {
+  downloadValidityRetestCsv,
+  getAnalyticsReport,
+  getMe,
+  type AnalyticsReport,
+} from '../../../services/api'
 import { dimensionLabel } from '../../../services/labels'
+import { showToast } from '../../../services/toast'
 
 const report = ref<AnalyticsReport | null>(null)
 const loading = ref(false)
@@ -26,15 +33,120 @@ const distData = computed(() => dims.value.map(d => ({
   low: d.distribution?.[0]?.count || 0, medium: d.distribution?.[1]?.count || 0, high: d.distribution?.[2]?.count || 0
 })))
 
+/**
+ * 已经**应用**的那一次筛选（2026-09-24）。
+ *
+ * 导出按钮必须拿它、而不是拿 `FilterBar` 里的输入框当前值：用户在筛选条上改了任务但
+ * 还没点「查询」，屏幕上那份报表仍是上一次的结果，此时导出的应当是**屏幕上这一份**。
+ * 少了它，KPI 上那个数与导出的行数就会各说各话（§11：指标卡上的数必须与它点进去的
+ * 那个列表同源）——而两个数各自都是对的，看不出来。
+ *
+ * 取的是 `loadReport` 实参的副本而不是从 `report` 反推：`analytics_report` 的响应里没有
+ * 「这次筛选了哪几个任务」这一项，屏幕上也补不出来。
+ *
+ * **只记 `task_ids`，不记效度口径**：那份名单的判据（`_is_validity_flagged`）与
+ * `analysis_mode` 无关——服务端两处都不看它，所以带着它只会在请求体里多一个不生效的
+ * 字段，而「传了不生效」与「不支持」是分不开的（`ExportRequest` 那条注释记着同一件事）。
+ */
+const appliedTaskIds = ref<number[]>([])
+
 async function loadReport(taskIds: number[], validity = 'ALL_CALCULATED') {
   loading.value = true
   error.value = ''
-  try { report.value = await getAnalyticsReport(taskIds, validity as any) }
+  try {
+    report.value = await getAnalyticsReport(taskIds, validity as any)
+    // 成功之后才记：失败时 `report` 是 null，整个报表块（含那枚按钮）本来就不出现，
+    // 记下来只会留下一次指向空报表的筛选。
+    appliedTaskIds.value = [...taskIds]
+  }
   catch (err) { report.value = null; error.value = err instanceof Error ? err.message : '报表加载失败' }
   finally { loading.value = false }
 }
 function onQuery(f: { taskIds: number[]; validity: string }) { if (f.taskIds.length) loadReport(f.taskIds, f.validity) }
-function reset() { report.value = null; error.value = ''; subTab.value = 'rate'; selectedDim.value = 0 }
+function reset() {
+  report.value = null; error.value = ''; subTab.value = 'rate'; selectedDim.value = 0
+  appliedTaskIds.value = []
+}
+
+/**
+ * 「效度建议复测」那一格背后是谁（2026-09-24）。
+ *
+ * `validity_flagged_count` 与导出走的是**同一个谓词**（`_is_validity_flagged`，服务端
+ * `analytics_service.py` 一处定义），而且`analysis_mode` 对它两边都不生效——所以
+ * 「上方写 3 人」与「文件里 3 行」是构造上相等的，不靠两处各自记得。
+ */
+const validityCount = computed(() => quality.value?.validity_flagged_count || 0)
+
+/**
+ * 谁能看到这枚导出按钮。
+ *
+ * 服务端三道门槛的最后一道是 `ensure_student_result_reader`（`STUDENT_PSYCH_DETAIL:
+ * {SCOPED}` 且 `ORG_ACCOUNT: {MANAGE, READ_BASIC}`），它把**德育领导与系统管理员**
+ * 都挡在外面——而这一页的 `meta.role` 同时含 counselor 与 leader，所以领导会看见一个
+ * 点下去必然 403 的按钮。
+ *
+ * 前端跟着分岔，**不是因为藏起来更安全**（§4：后端那三道门才是权威），而是因为一个
+ * **默认落地就是 403** 的按钮在领导那儿看起来就是坏了，而它其实是一个稳定事实
+ * （他的能力集是聚合与摘要，这份名单逐行印着学号与姓名）。
+ *
+ * **按 `role_code` 猜，是这个判据的已知代价**——与 `TasksPage.vue` 的 `canReadDetail`
+ * 逐字同源：`/auth/me` 不下发 capabilities，所以前端只能照角色分；学校把权限矩阵改过
+ * 之后两边会分岔，那一种不一致由服务端那句原文说清楚（它落在 toast 上），
+ * 不由前端假装判断得出来。
+ */
+const roleCode = ref('')
+const canExportRetest = computed(() => roleCode.value === 'counselor')
+
+onMounted(async () => {
+  // 拿不到就保持 ''——按钮整块不出现。这里刻意不报错、不弹 toast：这一页的主人是那份
+  // 报表，`/auth/me` 失败时下面那次查询也会各自报自己的错，不需要再多一条。
+  try { roleCode.value = (await getMe()).role_code } catch { roleCode.value = '' }
+})
+
+const exporting = ref(false)
+const showForm = ref(false)
+const formTitle = ref('')
+const formFields = ref<FormField[]>([])
+const formSubmitText = ref('提交')
+let formResolve: ((values: Record<string, string>) => void) | null = null
+
+function showFormDialog(title: string, fields: FormField[], submitText = '提交'): Promise<Record<string, string>> {
+  formTitle.value = title
+  formFields.value = fields
+  formSubmitText.value = submitText
+  showForm.value = true
+  return new Promise((resolve) => { formResolve = resolve })
+}
+function onFormSubmit(values: Record<string, string>) { if (formResolve) formResolve(values) }
+function onFormCancel() { if (formResolve) formResolve({}) }
+
+/** 导出「效度建议复测」那一格背后的学生名册。 */
+async function exportValidityRetest() {
+  if (!appliedTaskIds.value.length) return
+  const values = await showFormDialog(
+    '导出「效度建议复测」的学生名单',
+    [{
+      key: 'purpose', label: '导出用途', type: 'text', required: true, maxLength: 255,
+      placeholder: '如：交德育处安排复测',
+      // 复用名册导出那一句既有措辞（`TasksPage.vue` 的完成明细导出）：`purpose` 是
+      // 受控导出唯一的说明字段，而这句话解释了它为什么必填。
+      hint: '这一句会进审计，也是事后回答「这份文件为什么被导出去」的唯一依据。',
+    }],
+    '导出'
+  )
+  // 取消时 `onFormCancel` 回的是一个空对象。判 `purpose` 而不是判 `values`：
+  // 用户把用途留空点提交也会走到这里，两者该做同一件事——什么都不做。
+  if (!values.purpose) return
+  exporting.value = true
+  try {
+    const job = await downloadValidityRetestCsv(appliedTaskIds.value, '效度复测名单', values.purpose)
+    showToast('success', `已导出效度复测名单（作业 ${job.job_no}，共 ${job.row_count} 人），可在「导出中心」重下`)
+  } catch (err) {
+    // 服务端那句 403 的原文就落在这一句上，所以领导（或矩阵被改过的心
+    // 理老师）读到的是一句说得出原因的话，而不是「导出失败」。
+    showToast('error', err instanceof Error ? err.message : '导出失败')
+  } finally { exporting.value = false }
+}
 </script>
 
 <template>
@@ -48,8 +160,29 @@ function reset() { report.value = null; error.value = ''; subTab.value = 'rate';
       <KpiCard label="纳入分析人数" :value="quality?.n_evaluable?.toLocaleString('zh-CN') || '—'" hint="当前样本口径"/>
       <KpiCard label="测评覆盖率" :value="quality?.coverage_rate != null ? quality.coverage_rate.toFixed(1)+'%' : '—'" hint="分析人数 / 实际应测" tone="green"/>
       <KpiCard label="各维度高分人次" :value="dims.reduce((a,d)=>a+(d.high_score_count||0),0)" hint="同一学生可重复计入" tone="red" icon="alert"/>
-      <KpiCard label="效度建议复测" :value="quality?.validity_flagged_count || 0" hint="独立展示" tone="amber" icon="clipboard"/>
+      <KpiCard label="效度建议复测" :value="validityCount" hint="独立展示" tone="amber" icon="clipboard"/>
     </div>
+
+    <!-- 效度复测名单的导出入口（2026-09-24）。
+         放在 KPI 行下面紧挨着，是因为这一行就是它背后的那个数——「3 人」之后紧接着
+         一句「这 3 人是谁」。
+         两个方向都要说得出话：有人时按钮 + 名单里有什么；没人时不是一枚灰按钮，
+         而是一句关于数据的话（§27：灰掉的按钮必须说得出为什么）。 -->
+    <div v-if="canExportRetest" class="toolbar export-row">
+      <template v-if="validityCount > 0">
+        <button class="btn" :disabled="exporting" @click="exportValidityRetest">
+          {{ exporting ? '导出中…' : '导出效度复测名单' }}
+        </button>
+        <span class="minor">
+          名单按上方「效度建议复测」同一口径（当前查询的这些任务），含学号 / 姓名 / 年级 / 班级 / 性别 / 年龄 / 学籍状态与效度分。
+        </span>
+      </template>
+      <span v-else class="minor">当前查询的这些任务里没有需要复测的学生，无需导出名单。</span>
+    </div>
+
+    <FormDialog
+      :open="showForm" :title="formTitle" :fields="formFields" :submit-text="formSubmitText"
+      @submit="onFormSubmit" @cancel="onFormCancel" @update:open="showForm = $event"/>
 
     <div class="role-note"><b>样本说明</b><span class="minor">不同分析口径须由心理专业负责人确认。</span></div>
 
@@ -115,6 +248,9 @@ function reset() { report.value = null; error.value = ''; subTab.value = 'rate';
 .twocol > * { min-width: 0 }
 section.card { min-width: 0; padding: 18px; overflow: hidden }
 .role-note { display: flex; gap: 10px; align-items: flex-start; background: #f7fbff; border: 1px solid #d7e8fb; padding: 10px 14px; border-radius: 9px; margin: 0 0 16px }
+/* `.toolbar` 是全站那个 flex 行（styles.css），这里只补它与上下的间距——
+   KPI 行自带 16px 下边距，所以这一行只留下面那一段。 */
+.export-row { margin: 0 0 16px }
 .inner-tabs { display: flex; gap: 4px; margin-bottom: 14px; border-bottom: 1px solid #e8eef6 }
 .inner-tab { padding: 8px 14px; border: 0; background: none; color: #617994; font-weight: 600; cursor: pointer; border-bottom: 2px solid transparent }
 .inner-tab.active { border-bottom-color: #0876d9; color: #0876d9 }

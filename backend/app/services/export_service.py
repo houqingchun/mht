@@ -229,6 +229,11 @@ EXPORT_TYPE_NON_PARTICIPANTS = "NON_PARTICIPANTS"
 # §20#14 的「导出」那一半（2026-09-20 补）：那四类进不来的导入行（未匹配 / 任务外 /
 # 重复 / 冲突）可以被查询，也就可以被导出成一份复核清单。
 EXPORT_TYPE_UNMATCHED_IMPORT_ROWS = "UNMATCHED_IMPORT_ROWS"
+# 2026-09-24 补：效度建议复测的学生名册。这一份文件的用途与其余六份都不同——
+# 它是**一份派工单**（派人去找这些学生重测），所以它的列里既有身份（学号 / 姓名 /
+# 年级 / 班级）也有「为什么名单上有他」（那个效度分）。它**只能由心理老师导出**：
+# 服务层走 `ensure_student_result_reader`（§4 的双门槛），不是这里的一道开关。
+EXPORT_TYPE_VALIDITY_RETEST = "VALIDITY_RETEST"
 
 # `export_job.mask_level`。**与 `purpose` 分开存是有意的**：用途是自由文本，它担不起
 # 任何机器判据，而「这份文件是不是实名的」正是导出审计唯一要回答的问题（§8）。

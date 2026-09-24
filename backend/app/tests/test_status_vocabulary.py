@@ -66,6 +66,7 @@ EXPORT_TYPES = {
     "TASK_COMPLETION",
     "NON_PARTICIPANTS",
     "UNMATCHED_IMPORT_ROWS",
+    "VALIDITY_RETEST",
 }
 # Must match frontend/src/services/labels.ts MASK_LEVEL_LABELS（§16.3）。
 # 「这份文件是不是实名的」——导出审计唯一要回答的问题，所以它单独一列、单独进词表。

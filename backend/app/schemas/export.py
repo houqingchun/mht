@@ -12,6 +12,23 @@ class ExportRequest(BaseModel):
     purpose: str | None = Field(default=None, max_length=255)
 
 
+class ValidityRetestExportRequest(BaseModel):
+    """效度复测名单的导出请求（统计分析 → 全校八维度分析）。
+
+    比其他导出请求多一个 `task_ids`，而它是**必须带上的**：这一份名单就是「所选这些
+    测评任务里，哪些学生的结果提示需要复测」，而**报表本身是按一次筛选算出来的**。
+    少了它，同一屏上会同时存在两个口径——上方写着「效度建议复测 3 人」，导出的是
+    全校所有任务的 27 人，而两个数各自都是对的（§11 那条「指标卡上的数必须与它
+    点进去的那个列表同源」）。
+
+    上限 20 是照 `GET /analytics/report` 的既有约定（一次最多合并分析 20 个任务），
+    两处的判据必须一致：否则界面上能查、却导不出来。
+    """
+
+    purpose: str | None = Field(default=None, max_length=255)
+    task_ids: list[int] = Field(min_length=1, max_length=20)
+
+
 class RevokeExportRequest(BaseModel):
     """撤销一份导出作业时的可选说明。
 

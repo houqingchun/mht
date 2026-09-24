@@ -1,3 +1,6 @@
+import csv
+import io
+
 from datetime import UTC, datetime, timedelta
 
 from collections import defaultdict
@@ -24,6 +27,12 @@ from app.models.scale import AssessmentScale, ScaleQuestion, ScaleRule
 from app.scale_engine.engine import rule_config_from_json
 from app.security.data_scope import ensure_student_in_scope, student_scope_predicate
 from app.services.assessment_service import latest_session, latest_session_order
+from app.services.export_document import ExportDocument
+# 导出侧的中文一律走 `export_labels` 这份 `labels.ts` 的镜像（§3 第三面）：这一份 CSV 的
+# 性别 / 来源 / 学籍状态三列在服务端拼出来，界面上那三列是 `labels.ts` 出的中文，两处
+# 各写一份就会漂，而漂了没有任何东西看得见（`test_export_labels_match_frontend.py` 就是
+# 为此把那份 TypeScript 当数据源读进来逐字比对的）。
+from app.services import export_labels
 # 规则类型不在这里再写一份字面量：`MHT_SCORING` 的出处是 `scale_rule_service`，抄一遍
 # 就会有两份会各说各话的常量（§「同一处只许有一个定义」）。
 from app.services.scale_rule_service import RULE_TYPE
@@ -272,18 +281,47 @@ def _dimension_report(rows: list, item_counts: dict[str, int]) -> list[dict]:
     return items
 
 
-def analytics_report(
+def _is_validity_flagged(result: AssessmentResult) -> bool:
+    """这一条结果算不算「效度建议复测」。
+
+    判据只有这一处：报表的 KPI 计数（`analytics_report` 的 `validity_flagged`）与效度复测
+    名单导出（`validity_retest_students`）**都调它**。各写一份 `!= "VALID"` 的话，
+    「页面上写着 12 人、导出的文件里 13 行」这种不一致不会有任何东西看得见——两个数各自
+    都是对的，只是回答的不是同一个问题（§11）。
+
+    写 `!= "VALID"` 而不是 `== "RETEST_RECOMMENDED"`：`validity_status` 今天的取值域是
+    `{VALID, RETEST_RECOMMENDED}`（`scale_engine.validity_status` 只回这两个），但
+    `QUESTIONABLE` 是词汇表里**已经留好**的一档。按「不是 VALID」写，将来引擎真的产出
+    第三档时它自动落进这一边；按「等于 RETEST_RECOMMENDED」写则会静默漏掉——而那一档
+    在界面上看起来只会是「人数变少了」。
+    """
+    return result.validity_status != "VALID"
+
+
+def _report_scope(
     db: Session,
     user: UserAccount,
     task_id: int | None,
-    analysis_mode: str = "ALL_CALCULATED",
-    task_ids: list[int] | None = None,
-) -> dict:
-    """报表中心统一快照；多任务时按学生去重并保留最新一次计算结果。"""
-    ensure_leader_or_counselor(db, user)
-    if analysis_mode not in ANALYSIS_MODES:
-        raise AppError("VALIDATION_ERROR", "不支持的统计模式", 422)
+    task_ids: list[int] | None,
+) -> tuple[list[AssessmentTask], list[AssessmentTarget], list[tuple]]:
+    """报表中心与「效度复测名单」导出**共用**的那一段取数。
 
+    返回 `(tasks, targets, calculated)`：
+
+    - `tasks` 是按读者数据范围解析出来的任务，`tasks[0]` 是主任务（量表、总分分段区间、
+      任务名都取它）；
+    - `targets` 是**每名学生一条**的目标行快照，被真正入选的那一场刷新过；
+    - `calculated` 是每名学生**最近一场**「已计算且当前有效」的 `(result, session)`。
+
+    抽出来是因为效度复测名单（`validity_retest_students`）与报表必须从**同一个集合**
+    出发：页面上写着「效度建议复测 12 人」、导出的文件里 13 行，这种不一致不会有任何
+    东西看得见（§11：指标卡上的数必须与它点进去的那个列表同源）。各写一份取数语句就是
+    两个定义，而它们漂移了只会在某次对账时才暴露出来。
+
+    **这里不做权限判断**，与它抽出来之前一样：调用方各自负责
+    （`analytics_report` 调 `ensure_leader_or_counselor`，导出那一侧另有能力门槛）。
+    搬进来会让「谁读得到」这个问题有两个答案。
+    """
     task_stmt = (
         select(AssessmentTask)
         .join(AssessmentTarget, AssessmentTarget.task_id == AssessmentTask.id)
@@ -306,7 +344,6 @@ def analytics_report(
     if len(scale_ids) != 1:
         raise AppError("VALIDATION_ERROR", "不同量表的测评任务不能合并分析", 422)
     selected_task_ids = {task.id for task in tasks}
-    primary_task = tasks[0]
 
     target_rows = db.execute(
         select(AssessmentTarget, Student)
@@ -358,6 +395,23 @@ def analytics_report(
         if session_target is not None:
             target_by_student[session.student_id] = session_target
     targets = list(target_by_student.values())
+    return tasks, targets, calculated
+
+
+def analytics_report(
+    db: Session,
+    user: UserAccount,
+    task_id: int | None,
+    analysis_mode: str = "ALL_CALCULATED",
+    task_ids: list[int] | None = None,
+) -> dict:
+    """报表中心统一快照；多任务时按学生去重并保留最新一次计算结果。"""
+    ensure_leader_or_counselor(db, user)
+    if analysis_mode not in ANALYSIS_MODES:
+        raise AppError("VALIDATION_ERROR", "不支持的统计模式", 422)
+
+    tasks, targets, calculated = _report_scope(db, user, task_id, task_ids)
+    primary_task = tasks[0]
     included = [
         (result, session)
         for result, session in calculated
@@ -399,7 +453,7 @@ def analytics_report(
     target_count = len(targets)
     eligible_count = sum(t.participation_disposition == PARTICIPATION_REQUIRED for t in targets)
     completed_count = len(calculated)
-    validity_flagged = sum(result.validity_status != "VALID" for result, _ in calculated)
+    validity_flagged = sum(_is_validity_flagged(result) for result, _ in calculated)
     validity_unflagged = completed_count - validity_flagged
     sample_count = len(included_student_ids)
 
@@ -952,6 +1006,163 @@ def student_result_list(db: Session, user: UserAccount) -> list[dict]:
         }
         for student, grade, class_group, session, result, care_case in rows
     ]
+
+
+#: 效度复测名单的列，**一处定义**：`validity_retest_students` 的键与
+#: `validity_retest_csv` 的表头都由它派生，所以「页面上有这一列、文件里没有」这种不一致
+#: 不会发生（§11 那条「指标卡上的数必须与它点进去的那个列表同源」换到列上）。
+#: `export_service` 的 `field_policy` 也读它（从**产物**倒着写，见 §29）。
+VALIDITY_RETEST_COLUMNS: tuple[str, ...] = (
+    "学号",
+    "姓名",
+    "年级",
+    "班级",
+    "性别",
+    "年龄",
+    "学籍状态",
+    "测评任务",
+    "测评日期",
+    "来源",
+    "效度分",
+)
+
+
+def validity_retest_students(
+    db: Session,
+    user: UserAccount,
+    task_id: int | None = None,
+    task_ids: list[int] | None = None,
+) -> list[dict]:
+    """效度建议复测的学生名单——**页面上那个数、这个列表、导出的文件三处同源**。
+
+    与 `analytics_report` 的 `sample_quality.validity_flagged_count` 逐字同源的两点，
+    这也是这个函数存在的全部理由：
+
+    - **同一批场次**：都来自 `_report_scope` 的 `calculated`（每名学生取最近一场
+      `CALCULATED` 的场次），不在这里另写一遍「最近一场」的推导；
+    - **同一个判据**：都调 `_is_validity_flagged`。
+
+    否则「八维度分析上写着 12 人、导出的文件里 13 行」这种不一致不会有任何东西看得见
+    ——两个数各自都是对的，只是回答的不是同一个问题（§11）。
+
+    **不套 `analysis_mode`。** 这一列读的是 `calculated` 而不是 `included`：`included`
+    是「按所选统计模式纳入聚合的那些」，而效度提示与统计模式无关（§「效度单独提示，
+    不等于无效」）。`DimensionsPage.vue` 的 KPI 读的也是不带模式过滤的那一个数，
+    筛选条件不同的两张报表不能给出两个人数。
+
+    **学生信息取现名册，不取目标行快照。** 这一份文件的用途是「派人去找这名学生重测」，
+    要的是**今天**他在哪个班（§22 那条快照的读法是「发放那一刻学校看到的是谁」，那是
+    完成率报表要回答的问题，不是这个）。与 `student_result_list` 和
+    `dist/check_validity_score.sql` 同口径。
+
+    **年级 / 班级是外连接**（照那份 SQL 的先例，而不是 `student_result_list` 的内连接）：
+    名册上班级缺失的学生仍然要出现在名单里。内连接会把这种行**静默丢掉**，而名单少一个人
+    的代价比某一格是 `—` 大得多——这份文件的读者会照它去点人。
+
+    读**不写审计**：它读的是名单与等级，与 `student_result_list` 同一类。导出那一次
+    自己会写（§8 要求的是导出端点要求 `purpose` 并写审计），点进档案的那一次读也会写。
+    """
+    ensure_student_result_reader(db, user)
+
+    tasks, _targets, calculated = _report_scope(db, user, task_id, task_ids)
+    task_names = {task.id: task.name for task in tasks}
+    flagged = [(result, session) for result, session in calculated if _is_validity_flagged(result)]
+    if not flagged:
+        return []
+
+    # 学生一行一条：按 `student_id` 去重，取效度分**最高**的那一场——同一个人在两场里都
+    # 触发时，他要重测这件事只该在名单上出现一次（名单是用来点人的，重复行会让人以为有
+    # 两个学生）。**按 id 不按姓名**：同名的两名学生是两个人，按姓名字符串去重会把其中
+    # 一个从派工单上静默抹掉。`picked` 的键就是 `session.student_id`。
+    # 「一人一行」与 `dist/check_validity_score.sql` 第 2 段同一口径。
+    rows = db.execute(
+        select(Student, Grade, ClassGroup)
+        .outerjoin(Grade, Grade.id == Student.grade_id)
+        .outerjoin(ClassGroup, ClassGroup.id == Student.class_id)
+        .where(Student.id.in_({session.student_id for _, session in flagged}))
+    ).all()
+    student_rows = {student.id: (student, grade, class_group) for student, grade, class_group in rows}
+
+    picked: dict[int, tuple] = {}
+    for result, session in flagged:
+        current = picked.get(session.student_id)
+        if current is None or (result.validity_score or 0) > (current[0].validity_score or 0):
+            picked[session.student_id] = (result, session)
+
+    items: list[dict] = []
+    for student_id, (result, session) in picked.items():
+        student, grade, class_group = student_rows.get(student_id, (None, None, None))
+        if student is None:  # 理论上不可达（flagged 的 student_id 就来自目标行）；不猜数据
+            continue
+        items.append(
+            {
+                "student_no": student.student_no,
+                # 实名（`mask_level=IDENTIFIED`）：这一列在名册与关怀队列里叫
+                # `masked_name`，那是展示名、不是遮蔽手段（§1）。
+                "student_name": student.name,
+                "grade": grade.name if grade else None,
+                "class_name": class_group.name if class_group else None,
+                "gender": export_labels.gender_label(student.gender),
+                "age": student.age,
+                "student_status": export_labels.student_status_label(student.status),
+                "task_name": task_names.get(session.task_id) or export_labels.MISSING_LABEL,
+                # 与 `student_result_list` 同口径：导入的那一场写的是文件里的测评日期。
+                "tested_at": session.submitted_at.isoformat() if session.submitted_at else None,
+                "source": export_labels.source_label(session.source),
+                "validity_score": result.validity_score,
+            }
+        )
+    # 次序稳定：年级 → 班级 → 学号，与 `student_result_list` 的 `order_by` 同一套。
+    # 在内存里排而不是让 SQL 排，是因为行列已经在上面取过了。
+    items.sort(
+        key=lambda item: (
+            item["grade"] or "",
+            item["class_name"] or "",
+            item["student_no"] or "",
+        )
+    )
+    return items
+
+
+def validity_retest_csv(
+    db: Session,
+    user: UserAccount,
+    task_id: int | None = None,
+    task_ids: list[int] | None = None,
+) -> ExportDocument:
+    """效度复测名单 → `ExportDocument`（列、行数与 CSV 正文都从**同一批行**来）。
+
+    `row_count` **不数表头那一行**：它在界面上是「导出 N 行」，把表头算进去会每一份都多
+    一行（§29 那条约定）。
+
+    数值列（年龄 / 效度分）没有值时**留空**，不留 `—`：`—` 会让表格软件把整列当成文本
+    （§3 数值列那条约定，与 `level_label` 的「未测评」分属两套）。
+    """
+    items = validity_retest_students(db, user, task_id, task_ids)
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(VALIDITY_RETEST_COLUMNS)
+    for item in items:
+        writer.writerow(
+            [
+                item["student_no"],
+                item["student_name"],
+                item["grade"] or export_labels.MISSING_LABEL,
+                item["class_name"] or export_labels.MISSING_LABEL,
+                item["gender"],
+                item["age"] if item["age"] is not None else "",
+                item["student_status"],
+                item["task_name"],
+                item["tested_at"] or "",
+                item["source"],
+                item["validity_score"] if item["validity_score"] is not None else "",
+            ]
+        )
+    return ExportDocument(
+        csv_text="﻿" + output.getvalue(),
+        columns=VALIDITY_RETEST_COLUMNS,
+        row_count=len(items),
+    )
 
 
 def _average_or_none(average: float | None, size: int) -> float | None:

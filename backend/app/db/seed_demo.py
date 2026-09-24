@@ -78,6 +78,40 @@ SURVEYED_LAST_SEMESTER = ("初二", "初三")
 # 8 个维度各对应一段题号；见 scale_engine.dimension_for_question
 CONTENT_QUESTIONS = [no for no in range(1, 101) if no not in DEFAULT_RULE_CONFIG.validity_questions]
 
+# `key_both` 那一档额外答「是」的那几道效度题（见 `_student_yes_set`）。取排序后的前 N 道，
+# N = 复测阈值 + 1 = 8，所以这一档的效度分是 8、越过阈值 7，判定为 `RETEST_RECOMMENDED`。
+#
+# 为什么只有 `key_both` 带效度题。总分数的是**全部 100 题**里答「是」的条数，效度题也在内
+# （2026-09-21 起，见 `scale_engine/engine.py` 的模块 docstring），所以往一个画像里加 8 道
+# 效度题等于给它的总分 +8。按这个口径把四档重算一遍，只有它的落点不动：
+#
+#   general     8-45   → 16-53   仍在 GENERAL_RANGE（0-55）
+#   attention  56-64   → 64-72   **跨进 KEY_ATTENTION（65-100）**，所以这一档不能碰
+#   key_one    63-71   → 71-79   仍在 KEY_ATTENTION
+#   key_both   66-76   → 74-84   仍在 KEY_ATTENTION
+#
+# 在 `key_one` 与 `key_both` 之间选后者，是因为它同时满足两件事：它是四档里**占比最小**
+# 的一档（`profiles` 里 12 分之 1，减掉 15% 未完成后约三四人），所以演示库里「建议重测」
+# 是一种个别状态而不是普遍状态；而「两道重点题都命中 + 这份答卷本身建议重测」在语义上
+# 本来就是同一句话。
+#
+# 取「阈值 + 1」而不是阈值本身：7 分也跨得过判定（`validity_status` 用的是 `>=`），但那样
+# 这一档就卡在边界上——判定哪天被写成 `> 7`，它会静默退回「零个效度异常」，而屏幕上没有
+# 任何东西会变。多出来的那一分不是随手加的。
+#
+# **只改答案，不改题目标志。** 哪几道是效度题由规则配置与 `scale_question` 共同决定，
+# `engine.validate_questions()` 要求两边**完全相等**，动那一边会让每一场评分都抛
+# `SCALE_INVALID`。所以这里加的是「这几道答是」，不是「这几道是效度题」。
+#
+# 上学期那一批（`_last_semester_rows`，`source=IMPORTED`）只走 `general` 与 `attention`
+# 两个画像，所以这一段**不会渗进历史行**——这是有意的，那条链路上转的是外部平台的结果，
+# 演示数据不必替它编一段效度异常出来。
+FLAGGED_VALIDITY_QUESTIONS = frozenset(
+    sorted(DEFAULT_RULE_CONFIG.validity_questions)[
+        : DEFAULT_RULE_CONFIG.validity_retest_threshold + 1
+    ]
+)
+
 # 姓名池：足够生成一个年级规模的虚构学生
 SURNAMES = "赵钱孙李周吴郑王冯陈褚卫蒋沈韩杨朱秦尤许何吕施张孔曹严华金魏陶姜"
 GIVEN = ["子涵", "雨桐", "浩然", "欣怡", "梓萱", "俊杰", "思远", "佳怡", "宇轩", "诗涵",
@@ -138,6 +172,12 @@ def _student_yes_set(profile: str, rng: random.Random) -> set[int]:
 
     Key questions 85/97 are what open a care case, so only the `key` profiles
     include them — which is why only those students get a follow-up file.
+
+    `key_both` 另外带上一组效度题（`FLAGGED_VALIDITY_QUESTIONS`），让演示数据里
+    **第一次**出现效度分越阈的学生：源数据里此前没有任何一道效度题被答成「是」，
+    于是「建议重测」这个状态、统计页的效度提示、以及分析页的「效度未触发提示」
+    筛选口径在演示库上都是空的（一条恒绿的断言）。那一组为什么只挂在这一档上、
+    为什么是 8 道，写在那个常量的注释里。
     """
     if profile == "general":
         return set(rng.sample(CONTENT_QUESTIONS, rng.randint(8, 45)))
@@ -146,7 +186,11 @@ def _student_yes_set(profile: str, rng: random.Random) -> set[int]:
     if profile == "key_one":
         return set(CONTENT_QUESTIONS[: rng.randint(62, 70)]) | {85}
     # key_both
-    return set(CONTENT_QUESTIONS[: rng.randint(64, 74)]) | {85, 97}
+    return (
+        set(CONTENT_QUESTIONS[: rng.randint(64, 74)])
+        | {85, 97}
+        | FLAGGED_VALIDITY_QUESTIONS
+    )
 
 
 def _last_semester_rows(db: Session, students: list[Student], main_task: AssessmentTask) -> list[dict]:

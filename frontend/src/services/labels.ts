@@ -628,9 +628,11 @@ export const AUTH_SESSION_STATUS_LABELS: Record<string, string> = {
 /**
  * 导出作业的**类型** —— 后端 `export_service.EXPORT_TYPE_*`。
  *
- * 六种取值全部可达（五个入口加「重点学生」那一支的高度关注导出）。它与文件的
- * 列清单是两件事：同一份「关注档案摘要」按遮蔽等级不同列是一样的，而
- * 「任务完成统计」与「未参与名单」是同一场任务的两份不同文件。
+ * 七种取值全部可达，住在三个路由模块里：`audit.py` 三档（关注档案摘要 / 高度关注
+ * 摘要 / 个案档案）、`tasks.py` 三档（任务完成明细 / 未参与名单 / 未匹配行清单）、
+ * 以及 `analytics.py` 的效度复测名单（2026-09-24 加）。它与文件的列清单是两件事：
+ * 同一份「关注档案摘要」按遮蔽等级不同列是一样的，而「任务完成统计」与「未参与名单」
+ * 是同一场任务的两份不同文件。
  *
  * **没有 `*_ORDER`**：导出中心那一列不做排序（有用的是状态与时间，见下）。
  */
@@ -640,7 +642,8 @@ export const EXPORT_TYPE_LABELS: Record<string, string> = {
   SINGLE_CASE: '个案档案',
   TASK_COMPLETION: '任务完成明细',
   NON_PARTICIPANTS: '未参与名单',
-  UNMATCHED_IMPORT_ROWS: '未匹配行清单'
+  UNMATCHED_IMPORT_ROWS: '未匹配行清单',
+  VALIDITY_RETEST: '效度复测名单'
 }
 
 /**

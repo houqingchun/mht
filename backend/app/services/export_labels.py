@@ -11,7 +11,7 @@
 导出漏翻译了很久：界面上写着「重点关注」，同一份数据导出成 CSV 就是 `KEY_ATTENTION`，
 因为没有任何一条测试看得见文件里写了什么。
 
-八张表与八个函数都照着 `labels.ts` 的同名函数写，**包括缺值时的表现**：
+九张表与九个函数都照着 `labels.ts` 的同名函数写，**包括缺值时的表现**：
 性别缺失是 `—`、未测评为 `未测评`（`levelLabel` 的既有约定），不是空单元格。
 
 第五张表（`SOURCE_LABELS`，测评来源）是 2026-09-16 加「外部导入」时补的：受控导出取的是
@@ -34,6 +34,17 @@ from __future__ import annotations
 GENDER_LABELS: dict[str, str] = {
     "MALE": "男",
     "FEMALE": "女",
+}
+
+# 与 labels.ts 的 STUDENT_STATUS_LABELS 逐字一致（后端 Student.status）。
+#
+# 2026-09-24 随效度复测名单导出补：那一份文件的用途是「派人去找这名学生重测」，
+# 而一名已离校的学生不该被当成还能找到的人。**两档与 `labels.ts` 逐字同源**，
+# 不在导出函数里内联 `"在读" if status == "ACTIVE" else "已离校"`——那会是同一批中文的
+# 第三个定义（前两个是 labels.ts 与这个文件），而它漂了不会有任何东西看得见。
+STUDENT_STATUS_LABELS: dict[str, str] = {
+    "ACTIVE": "在读",
+    "INACTIVE": "已离校",
 }
 
 # 与 labels.ts 的 LEVEL_LABELS 逐字一致。
@@ -127,6 +138,10 @@ def label_of(mapping: dict[str, str], code: str | None, fallback: str = MISSING_
 
 def gender_label(code: str | None) -> str:
     return label_of(GENDER_LABELS, code)
+
+
+def student_status_label(code: str | None) -> str:
+    return label_of(STUDENT_STATUS_LABELS, code)
 
 
 def level_label(code: str | None) -> str:

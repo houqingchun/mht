@@ -535,6 +535,21 @@ function kpiCard(page: Page, label: string): Locator {
   });
 }
 
+/**
+ * 读回一个指标格里的**数**：`"2 人"` / `"2"` / `"1,234"` 都读成 2 / 2 / 1234。
+ *
+ * 两页把同一个数渲染成两种形状——`KpiCard` 只写值，而 `MetricStrip` 那一格是
+ * `value + ' 人'`——所以断言「两页相等」的比较对象必须先是数，不能是那两串文本
+ * （`"2 人" !== "2"`，那样比出来的是排版而不是数）。
+ *
+ * 一个数字都取不到时回 `NaN`：后面那两条断言会因此**红**，而不是拿 0 去比（`0 === 0`
+ * 是绿的，而屏幕上就是用户报的那个 bug）。这与 §测试注意里「先证明有东西可扫」同一条。
+ */
+async function numberIn(locator: Locator): Promise<number> {
+  const digits = (await locator.innerText()).replace(/[^\d]/g, '')
+  return digits ? Number(digits) : NaN
+}
+
 // ========== Analytics Report Center（五类报表共用任务选择器）==========
 
 test.describe('Analytics', () => {
@@ -696,6 +711,45 @@ test.describe('Analytics report functions', () => {
     await expect(page.getByText('不同维度满分不同')).toBeVisible();
     await page.getByRole('button', { name: '得分分布' }).click();
     await expect(page.locator('.dist-row')).toHaveCount(8);
+  });
+
+  // 用户 2026-09-24 报的：「全校八维度分析 → 效度建议复测 数字是对的，但全校预警总览 →
+  // 效度复测建议 是错误的」。那一格此前读 `signal_type_stats` 里的 `RETEST_RECOMMENDED`
+  // 分组，而**没有任何一条代码路径会写出这个 signal_type**——引擎只写
+  // `SCREENING_SIGNAL` / `MANUAL_REVIEW_REQUIRED`（都来自重点题 85 / 97），所以按那个分组
+  // 数出来恒为 0，而屏幕上它长得像一个正常的统计结果。
+  //
+  // 两页现在读同一份 `sample_quality.validity_flagged_count`，所以它们构造上不可能各说
+  // 各话。这条用例断的就是那句话的可执行形式：**同一场任务、两个页面上同一个数**。
+  //
+  // 它**不需要在任务选择器里手动挑任务**：两页共用一个 `FilterBar`，`defaultTask()` 按
+  // `completed_targets >= 5` 过滤 + `start_at` 降序挑出同一场（实测是「2026秋季MHT心理健康
+  // 筛查」，`validity_flagged_count = 2`），所以默认加载的那一帧就已经有东西可扫。
+  test('both report pages agree on the validity retest figure', async ({ page }) => {
+    await page.goto('/counselor/analytics/dimensions');
+    await expect(page.getByRole('heading', { name: '全校八维度分析' })).toBeVisible();
+    await expect(page.getByText('已自动加载最新可分析任务')).toBeVisible();
+    // 标签在两页上**语序不同**（这一页写「效度建议复测」，总览页写「效度复测建议」），
+    // 所以两处各按自己的原文取。这不是笔误：`kpiCard` 用的是 `^…$` 全等正则，把其中一处
+    // 改成另一处的语序会让它定位不到——而那正是「两个数说的是不是同一件事」要能看见的东西。
+    const dimensions = await numberIn(kpiCard(page, '效度建议复测').locator('.kpi-value'));
+
+    await page.goto('/counselor/analytics/overview');
+    await expect(page.getByRole('heading', { name: '全校预警总览' })).toBeVisible();
+    await expect(page.getByText('已自动加载最新可分析任务')).toBeVisible();
+    // 总览页那一格不在 `KpiCard` 里，在 `MetricStrip` 的 `.metric-mini` 里（值在 `<b>` 上）。
+    const overview = await numberIn(
+      page.locator('.metric-mini', {
+        has: page.locator('.metric-label', { hasText: /^效度复测建议$/ })
+      }).locator('b')
+    );
+
+    // **先证明有东西可扫，再断言相等**：少了这一句，一个把两页都渲染成 0 的实现照样满足
+    // 下面那条相等（`0 === 0`），而屏幕上就是用户报的那个 bug。这一句是那条判断的可执行形式
+    // ——它同时钉住「演示库的那场任务里真的有被标记的学生」这个前提（`seed_demo` 的
+    // `key_both` 那一档带 8 道效度题，越过阈值 7）。
+    expect(dimensions).toBeGreaterThan(0);
+    expect(overview).toBe(dimensions);
   });
 
   test('grade report changes dimension and renders the matching chart', async ({ page }) => {

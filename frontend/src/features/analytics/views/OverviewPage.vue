@@ -29,6 +29,21 @@ const target = computed(() => quality.value?.target_count || 0)
 const sampleCount = computed(() => quality.value?.n_evaluable || 0)
 const signals = computed(() => overview.value?.signal_student_count || 0)
 const pendingReview = computed(() => overview.value?.pending_review_work_items || 0)
+/**
+ * 效度复测建议的人数读 `sample_quality.validity_flagged_count`，**不读 `signal_type_stats`**。
+ *
+ * 这一格此前是 `signalCount('RETEST_RECOMMENDED')`，而在库里它恒为 0——`signal_type_stats`
+ * 是从 `risk_event` 行按 `signal_type` 分组数出来的，而引擎只会写两类风险事件
+ * （`SCREENING_SIGNAL` / `MANUAL_REVIEW_REQUIRED`，都来自重点题 85 / 97），
+ * **没有任何一条代码路径会写出 `RETEST_RECOMMENDED` 这个 signal_type**。所以这一格与
+ * 「全校八维度分析 → 效度建议复测」显示的是两个不同的东西：那边读的是
+ * `validity_flagged_count`（按人、取每人最近一场已计算结果），这边按一个恒空的分组取。
+ *
+ * 现在两页读**同一个字段**，所以它们构造上不可能各说各话（§11：指标卡上的数必须与它
+ * 点进去的那个列表同源）。**不要把它改回 `signalCount(...)`**：那样改回去不会报错，
+ * 只会让这一格重新变成 0，而屏幕上看起来像一个正常的统计结果。
+ */
+const validityFlagged = computed(() => quality.value?.validity_flagged_count || 0)
 
 /**
  * 筛查信号的计数**按编码取**，不按中文标签回头去找。
@@ -98,14 +113,16 @@ function reset() { report.value = null; error.value = ''; loading.value = false 
       <KpiCard label="存在筛查信号" :value="signals" :hint="'占可评价样本 '+(sampleCount ? (signals/sampleCount*100).toFixed(1)+'%' : '—')" tone="red" icon="alert"/>
     </div>
 
-    <!-- 前三格是**同一批码**的三类筛查信号（都数「人」，三类允许交叉），第四格是待办**项**数。
+    <!-- 前三格看起来是「同一批码的三类筛查信号」，**实际不是**：前两格来自 `risk_event`
+         的 `signal_type` 分组，第三格（效度复测建议）来自 `sample_quality.validity_flagged_count`
+         ——理由见 script 里 `validityFlagged` 那段注释。第四格是待办**项**数。
          单位不同的两件事在标签上就分开写（人 / 项）：`pending_review_work_items` 数的是
          `risk_event` 的行，而引擎对**每一道**命中的重点题各写一行，「一个人两道都中了」
          在它那里是 2（§11 那条「把条数读成人数」）。 -->
     <MetricStrip :items="[
       { label: signalTypeLabel('SCREENING_SIGNAL'), value: signalCount('SCREENING_SIGNAL')+' 人', hint: '允许与其他信号交叉' },
       { label: signalTypeLabel('MANUAL_REVIEW_REQUIRED'), value: signalCount('MANUAL_REVIEW_REQUIRED')+' 人', hint: '具体回答不在报表展示' },
-      { label: signalTypeLabel('RETEST_RECOMMENDED'), value: signalCount('RETEST_RECOMMENDED')+' 人', hint: '单独提示，不等于无效' },
+      { label: signalTypeLabel('RETEST_RECOMMENDED'), value: validityFlagged+' 人', hint: '单独提示，不等于无效' },
       { label: '待处理复核工作', value: pendingReview+' 项', hint: '仅心理老师授权处理' }
     ]"/>
 

@@ -1,6 +1,6 @@
 """导出用的中文映射必须与 `labels.ts` 逐字一致。
 
-`services/export_labels.py` 是 `frontend/src/services/labels.ts` 里八张表的一份镜像，
+`services/export_labels.py` 是 `frontend/src/services/labels.ts` 里九张表的一份镜像，
 存在的唯一理由是导出的 CSV 由后端生成，而后端读不到 .ts。镜像就会漂移，所以这里直接
 把那份 TypeScript **当作数据源读进来**比对，而不是在测试里再抄一遍中文——抄一遍的话，
 三处中文（labels.ts / export_labels.py / 这个测试）就有三种改错的方式，而测试只认自己
@@ -24,6 +24,7 @@ LABELS_TS = Path(__file__).resolve().parents[3] / "frontend" / "src" / "services
 # 后端这边加上 CASE_ 前缀，因为同一个模块里还要放任务目标的状态。
 MIRRORED_MAPS = [
     (export_labels.GENDER_LABELS, "GENDER_LABELS"),
+    (export_labels.STUDENT_STATUS_LABELS, "STUDENT_STATUS_LABELS"),
     (export_labels.LEVEL_LABELS, "LEVEL_LABELS"),
     (export_labels.CASE_STATUS_LABELS, "STATUS_LABELS"),
     (export_labels.TARGET_STATUS_LABELS, "TARGET_STATUS_LABELS"),

@@ -2184,6 +2184,26 @@ export async function downloadUnmatchedRowsCsv(
 }
 
 /**
+ * 效度复测名单（统计分析 → 全校八维度分析 → 效度建议复测）。
+ *
+ * 与其余六份导出的差别有两条，都会影响怎么调它：
+ *
+ * - **它必须带上 `taskIds`**，而且要与那一屏上正在看的筛选是同一批 id。不带的话导出的
+ *   是「全校所有任务」的名单，而屏幕上写着的是某一次筛选的结果——两个数各自都对，
+ *   这就是 §11 那条「指标卡上的数必须与它点进去的那个列表同源」。
+ * - 它是**一份派工单**（派人去找这些学生重测），所以列里是完整的身份信息（学号 / 姓名 /
+ *   年级 / 班级 / 性别 / 年龄 / 学籍状态）加「为什么名单上有他」（效度分）。服务端三道
+ *   门槛的第三道是 `ensure_student_result_reader`，德育领导与系统管理员都会拿到 403。
+ */
+export async function downloadValidityRetestCsv(
+  taskIds: number[],
+  stem: string,
+  purpose: string
+): Promise<ExportJob> {
+  return runExport('/analytics/validity-retest/export', stem, { purpose, task_ids: taskIds })
+}
+
+/**
  * 一场测评的参与口径六个数（§18.10）：目标 / 请假免测已排除 / 应测 / 已完成 / 完成率，
  * 外加 `unimported_records`（任务外、重复、未匹配、冲突的导入记录——它们**不进**
  * 完成率，因为那批行从来不在目标行里）。
