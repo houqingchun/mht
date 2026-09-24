@@ -1882,23 +1882,42 @@ export async function getAssessmentImportBatches(): Promise<AssessmentImportBatc
  * 返回的 `total` 是**可见**行数，`row_counts` 是**整批**的——两个数各有各的口径，
  * 界面上都写，不互相顶替。这个「不同源」是有意的：那三个数坐在提交按钮旁边，必须与
  * 提交时的整批判据一致。
+ *
+ * `matchGroup` / `keyword` 两个筛选条件**在服务端生效**，这不是实现细节而是必须的：
+ * 这个接口是服务端分页的（默认 50 行），筛在客户端只能筛出**当前这一页**里符合条件的
+ * 那几行，而屏幕上那个数会随翻页变化、操作员看不出来——「快速筛选出有问题的学生」
+ * 那件事正是筛全批，所以筛的动作必须发生在 `limit` / `offset` 之前。
+ *
+ * 两个都可省，**省掉时与加它们之前逐字相同**（不存在「未筛选」与「筛了个空」两种状态）。
+ * `matchGroup` 取 `MATCH_GROUP_LABELS` 的四个键（与 `batch_row_counts` 同一张表）；
+ * `keyword` 匹配**文件里那一行的原始值与行号**，由服务端定，前端不解析它。
  */
 export async function getAssessmentImportRows(
   batchId: number,
-  options: { limit?: number; offset?: number } = {}
+  options: {
+    limit?: number
+    offset?: number
+    matchGroup?: string | null
+    keyword?: string | null
+  } = {}
 ): Promise<{
   items: AssessmentImportRow[]
   total: number
   rowCounts: AssessmentRowCounts | null
 }> {
+  const params = new URLSearchParams({
+    limit: String(options.limit ?? 50),
+    offset: String(options.offset ?? 0)
+  })
+  // 空串与 null 都不往 URL 上塞：`match_group=` 到了服务端是一个空字符串，
+  // 而它会被当成一个**认不出的分组**回 422——「没筛」必须是不出现这个参数。
+  if (options.matchGroup) params.set('match_group', options.matchGroup)
+  if (options.keyword) params.set('keyword', options.keyword)
   const data = await apiRequest<{
     items: AssessmentImportRow[]
     total: number
     row_counts: AssessmentRowCounts | null
-  }>(`/assessment-imports/${batchId}/rows?${new URLSearchParams({
-    limit: String(options.limit ?? 50),
-    offset: String(options.offset ?? 0)
-  })}`)
+  }>(`/assessment-imports/${batchId}/rows?${params}`)
   return { items: data.items, total: data.total, rowCounts: data.row_counts }
 }
 

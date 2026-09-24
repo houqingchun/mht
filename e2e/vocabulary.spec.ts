@@ -898,6 +898,124 @@ test.describe('状态词汇：界面上不得出现后端编码', () => {
   });
 
   /**
+   * 导入明细的筛选项（V1.1.6）。
+   *
+   * 用户报的是「查看明细 / 查看全部明细 按扭展示的明细内容希望增加过滤条件，以便能快速
+   * 筛出有问题的学生」。两个筛选条件（匹配结论那几片、关键词框）**都在服务端生效**
+   * ——这一页是服务端分页的（默认 50 行），筛在客户端只能筛出当前那一页里符合条件的那几行，
+   * 而屏幕上那个「共 N 条」会随翻页变化、操作员看不出来。后端那一侧由
+   * `test_assessment_import_api.py` 的五条钉住，而它们看不见组件有没有把那两片渲染出来、
+   * 有没有把 `match_group` 传下去——这一条补的正是那一半。
+   *
+   * ★ 定位器**必须按中文片名**（`无法导入` / `可导入`），因为这是 §3 第二面在这张表上的
+   * **唯一**形态：`MATCH_GROUP_LABELS` 的键是小写的 `ready` / `error`，而
+   * `UNTRANSLATED_CODES` 那套 `SCREAMING_SNAKE` 机制（`leakedCodes`）**扫不到它们**
+   * ——把 `matchGroupLabel(key)` 换成裸 `key` 之后屏幕上出来的是 `ready · 0`，
+   * 而下面那句 `leakedCodes(...)` 照样是空的。所以「这个中文找不找得到」本身就是判据。
+   *
+   * **两片各断一件事，缺一句都不成立**：
+   *   * `无法导入` 断**有东西可筛**：这两行的结论是确定的（空姓名在第 2 步就返回
+   *     `INVALID_ROW`，还没走到查名册；另一个名字名册上必然没有），点过去仍然是这 2 行
+   *     ——「筛对了不会少」，同时片上那个中文说明词表接上了。
+   *   * `可导入` 断**真的在筛**：这一批一行可导入的都没有，点过去必须是 0 行。
+   *     少了这一句，一个「筛选完全没生效」的实现也能让上面那一条通过——筛不动时
+   *     当然一行不少，而那正是这个功能要防的事。
+   *
+   * e2e 里只有 `error` 那一片有行：`AGE_CONFLICT` / `CONFLICT` / `DUPLICATE` 的前提是
+   * 「匹配到了某个学生」，而演示名册的班级叫 `1班`、文件那一列按学校编号规则必须写
+   * `704`，匹配这一步永远走不到「找人」（§26 / §27 记着这条取舍）。所以「待确认」
+   * 与「其中：与在线答卷冲突」两片在这里都是 0 行，`conflict` 那一片干脆不渲染。
+   *
+   * 批次照上一条的规矩造：**只预览**（一行测评记录都不写），文件内容固定，于是重跑命中
+   * 服务端的复用规则（同操作者 + 同 `file_sha256` + 仍是 `PREVIEW` + 同 `task_id`），
+   * 批次表不越堆越长。
+   */
+  test('导入明细的筛选项按匹配结论过滤', async ({ page }) => {
+    // 与上一条同一份表头（一百个题号列一个都不能少，少了整份文件在列级就被挡下来）。
+    const header = [
+      '姓名', '性别', '年龄', '年级', '班级', '所用时间',
+      ...Array.from({ length: 100 }, (_, i) => `${i + 1}.题干`)
+    ].join(',');
+    const cell = (name: string) =>
+      [name, '1', '12', '1', '4', '3600秒', ...Array(100).fill('0')].join(',');
+    // 名字要能**按关键词找得到**（那一格搜的是文件里写了什么），所以第二个名字带一个
+    // 只属于它的词；第一个是空姓名，它在第 2 步就返回 `INVALID_ROW`。
+    const csv = `${header}\n${cell('')}\n${cell('e2e筛选无此人')}\n`;
+
+    const login = await page.request.post('/api/v1/auth/login', {
+      data: { account: '13800000001', password: '123456', role: 'counselor' },
+    });
+    const headers = { Authorization: `Bearer ${(await login.json()).data.access_token}` };
+    const preview = await page.request.post('/api/v1/assessment-imports/preview', {
+      headers,
+      multipart: {
+        file: {
+          name: 'e2e-vocabulary-filter.csv',
+          mimeType: 'text/csv',
+          buffer: Buffer.from(csv, 'utf-8'),
+        },
+        batch_name: 'e2e词表筛选',
+        tested_on: '2026-09-19',
+      },
+    });
+    expect(preview.ok(), '筛选那一批的预览没有成功，这一条失去了对象').toBeTruthy();
+
+    await loginAs(page, 'counselor');
+    await page.goto('/counselor/data');
+    await page.waitForLoadState('networkidle');
+
+    const row = page
+      .locator('.card')
+      .filter({ has: page.getByRole('heading', { name: '导入批次' }) })
+      .locator('tbody tr', { hasText: 'e2e词表筛选' })
+      .first();
+    await expect(row).toBeVisible();
+    await row.getByRole('button', { name: '查看明细' }).click();
+    const modal = page.locator('.modal-panel').first();
+
+    // 先证明有东西可扫：两行都在。下面每一条筛选断言都建立在这一句之上。
+    await expect(modal.locator('tbody tr')).toHaveCount(2);
+
+    const rows = modal.locator('tbody tr');
+    const keyword = modal.getByPlaceholder('搜索行号、姓名、学号、年级或班级');
+
+    // ① 关键词：按文件里的姓名筛，只剩那一行。这一句是那个搜索框**真的接上了服务端**
+    //    的唯一机器判据（防抖 + `@input` 那一段没有别的守卫看得见）。
+    await keyword.fill('e2e筛选无此人');
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first()).toContainText('e2e筛选无此人');
+
+    // 清掉关键词再往下走：下面两条断的是「片」的效果，留着关键词会让它们变成两个变量的和。
+    await keyword.fill('');
+    await expect(rows).toHaveCount(2);
+
+    // ② 「无法导入」那一片：这两行都属于它，所以点过去一行不少。
+    //    这一句同时是**词表**的判据——片名回退成 `error` 时这个定位器就找不到了。
+    await modal.getByRole('button', { name: '无法导入' }).click();
+    await expect(rows).toHaveCount(2);
+
+    // ③ 「可导入」那一片：一行都没有 → 空态是那一句**关于筛选**的话，而不是
+    //    「这一批没有逐行记录」（§14：空态是一句关于数据的话，两句混了就会误导）。
+    await modal.getByRole('button', { name: '可导入' }).click();
+    // ★ 次序不能换：`loadDetailPage` **取数之前先把 `detailRows` 清空**（§14「一次失败的
+    // 读取不许留下上一次的答案」），所以切片那一瞬间 `tbody tr` 本来就是 0——先断
+    // `toHaveCount(0)` 的话，一个**筛选完全没生效**的实现也会在那一段窗口里绿过去。
+    // 那一句空态排在 `detailLoading` 之后（加载中渲染的是骨架屏），所以「它出现了」= 这一次
+    // 读取已经结束、而结果是 0 行；把这一句放在前面，下面那句才是一句有内容的话。
+    await expect(modal.locator('p', { hasText: '没有符合当前筛选条件的行' })).toBeVisible();
+    await expect(rows).toHaveCount(0);
+
+    // ④ 那条出路真的能用。「清除筛选」这时有**两个**（工具栏一个、空态里一个，
+    //    后者正立在操作员困惑的那一处），所以取第一个；两个都清同一对条件。
+    await modal.getByRole('button', { name: '清除筛选' }).first().click();
+    await expect(rows).toHaveCount(2);
+
+    // 筛选项那一行不出裸编码——片名走的是 `matchGroupLabel`，兜底是 `—`，
+    // 所以这一句挡的是第三种情况：某一片被渲染成了别的什么码。
+    expect(await leakedCodes(modal), '导入明细的筛选项把后端编码原样显示了').toEqual([]);
+  });
+
+  /**
    * 汇总档（`EXTERNAL_SUMMARY`，V1.2 阶段 5 / §18.9）。
    *
    * 与上一条同一条规矩：**先通过接口把批次造出来再扫**，而且只「预览」——预览一行测评

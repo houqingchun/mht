@@ -12,18 +12,51 @@ const props = withDefaults(defineProps<{
    * dismissible gate is not a gate.
    */
   persistent?: boolean
+  /**
+   * 面板右上角多一枚「全屏 / 退出全屏」按钮，供内容很长的弹层铺满视口。
+   *
+   * **默认关**：全站其余十几个弹层一个字都不变，只有明确说要它的那一处才长出这颗
+   * 按钮（「新能力不许动既有行为」这一类改动的标准做法）。
+   */
+  expandable?: boolean
+  /**
+   * 受控的全屏状态，配 `update:expanded` 一起用（`expandable` 为假时它没有读者）。
+   *
+   * 做成受控的而不是内部 `ref`，是因为**打开它的那一页往往还要跟着变**：明细弹层
+   * 平时把表格压在 340px 里（那一页下面还有别的卡片），全屏时得把它放开——
+   * 那份尺寸住在页面上，页面不拿到这个状态就只能靠选择器去猜。
+   */
+  expanded?: boolean
 }>(), {
-  persistent: false
+  persistent: false,
+  expandable: false,
+  expanded: false
 })
 
 const emit = defineEmits<{
   (e: 'update:modelValue', value: boolean): void
   (e: 'close'): void
+  (e: 'update:expanded', value: boolean): void
 }>()
 
 const shell = ref<HTMLElement | null>(null)
 
 const sizeClass = computed(() => `modal-${props.size ?? 'md'}`)
+
+/**
+ * 铺满视口的那一档（`styles.css` 的 `.modal-fullscreen`）。
+ *
+ * 它与 `size` 是两件事：`size` 定「平时多宽」，这一条只在被点开之后才接管，
+ * 所以三个尺寸档一个都不用改。规则**排在 `.modal-lg` / `.modal-sm` 之后**（同特异性
+ * 靠源序取胜），否则一个 `size="lg"` 的全屏弹层宽度仍然是 940px。
+ */
+const fullscreenClass = computed(() =>
+  props.expandable && props.expanded ? 'modal-fullscreen' : ''
+)
+
+function toggleExpanded() {
+  emit('update:expanded', !props.expanded)
+}
 
 /**
  * 这个弹层在「打开中的弹层」那一叠里的位置——决定它压在谁上面。
@@ -153,7 +186,7 @@ onUnmounted(deactivate)
       >
         <section
           ref="shell"
-          :class="['modal-panel', sizeClass]"
+          :class="['modal-panel', sizeClass, fullscreenClass]"
           role="dialog"
           aria-modal="true"
           :aria-label="title"
@@ -162,7 +195,22 @@ onUnmounted(deactivate)
         >
           <header class="modal-header">
             <h2>{{ title }}</h2>
-            <button v-if="!persistent" class="modal-close" type="button" @click="onBackdropClick" aria-label="关闭">×</button>
+            <!-- 一枚按钮的容器在这里是必要的，不只是排版：`.modal-header` 是
+                 `justify-content: space-between` 的两端布局，直接多插一个兄弟节点会
+                 把标题挤到中间。包一层之后，**没有全屏按钮的那些弹层仍然只有两个子
+                 元素**（标题 + `.modal-head-actions` 里唯一那颗关闭按钮），
+                 渲染结果与从前逐像素相同。 -->
+            <div class="modal-head-actions">
+              <button
+                v-if="expandable"
+                class="modal-expand"
+                type="button"
+                :aria-pressed="expanded"
+                :title="expanded ? '退出全屏展示' : '全屏展示'"
+                @click="toggleExpanded"
+              >{{ expanded ? '退出全屏' : '全屏' }}</button>
+              <button v-if="!persistent" class="modal-close" type="button" @click="onBackdropClick" aria-label="关闭">×</button>
+            </div>
           </header>
           <div class="modal-body">
             <slot />

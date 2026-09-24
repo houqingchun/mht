@@ -2706,6 +2706,237 @@ def test_import_row_detail_supports_server_side_pagination(client, db_session):
     assert second["items"][0]["row_no"] == 3
 
 
+# --------------------------------------------------------------------------
+# 明细页的两个筛选条件（`match_group` / `keyword`）
+#
+# 它们**都在服务端生效**，因为这一页是服务端分页的：在客户端筛只能筛出「这一页
+# 条里符合条件的」，而操作员要回答的是「这份 400 行的文件里有问题的到底是谁」。
+# 下面几条用例盯的是——**筛选片上的数与点进去那张表同源**（§11），以及
+# **一片都筛不出来**与**筛出来是整批**不能长得一样。
+# --------------------------------------------------------------------------
+
+
+def _detail_query(client, headers, batch_id: int, **params) -> dict:
+    """明细接口带条件地取一次，返回整个 `data`（`items` 与 `total` 都在里面）。
+
+    与 `_detail_by_no` 分开：那个按行号索引行、伺候「读某一行的字段」，这个伺候
+    「筛出来的是哪几行」。两条用例问的不是同一件事，硬合成一个会让行号那层壳
+    在两处都显得多余。
+    """
+    response = client.get(
+        f"/api/v1/assessment-imports/{batch_id}/rows", headers=headers, params=params
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["data"]
+
+
+def _detail_row_nos(client, headers, batch_id: int, **params) -> list[int]:
+    return [row["row_no"] for row in _detail_query(client, headers, batch_id, **params)["items"]]
+
+
+def _four_group_batch(client, db_session):
+    """一批里同时造出**四个分组各一行**，返回 `(心理老师的 token, 上传那一次的载荷)`。
+
+    **造四档而不是一档，是这条用例能不能证伪的前提**：只造一档时「筛出来的是这一档」
+    与「筛出来的还是整批」在屏幕上长得一模一样——那一批里本来就只有它，`match_group`
+    就算是空操作也是绿的。「筛 ready 只回 1 行、整批有 4 行」才是一条有内容的断言。
+
+    四行的来路（`MATCH_GROUPS` 的四个键各一）：
+
+    * 甲同学：名册与文件逐字对得上 → `MATCHED`（可导入）；
+    * 乙同学：名册 13 岁、文件 15 岁 → `AGE_CONFLICT`（待确认，**不是**冲突那一档）；
+    * 丙同学：本场已有他自己答的在线答卷 → `CONFLICT`（与在线答卷冲突，同时属于待确认）；
+    * 丁同学：名册上根本没有这个名字 → `NOT_FOUND`（无法导入）。
+
+    学号刻意**不带数字**（`SFLTA` 而不是 `S-FLT-1`）：下面那条搜行号的用例要的是
+    「搜 3 只回第 3 行」，而一个学号里带 3 的学生会让 `Student.student_no` 那一条
+    判据顺带命中他——用例会红在一个与被测代码无关的地方。
+    """
+    headers = admin(client)
+    add_students(
+        client,
+        headers,
+        [
+            ("SFLTA", "甲同学", "男", 12),
+            ("SFLTB", "乙同学", "女", 13),
+            ("SFLTC", "丙同学", "男", 14),
+        ],
+    )
+    # 三个学生都要在目标名单里：不在名单里的名册学生会变成 `OUT_OF_SCOPE`（无法导入），
+    # 而这一批要的是「有问题的行与能导入的行并存」，不是四行都进不去。
+    task = _task_with_targets(db_session, ["SFLTA", "SFLTB", "SFLTC"])
+    # 丙同学自己在本场答过一份 → 文件里那一行是**来源冲突**。只造一场会话就够，
+    # 不需要真写 100 道答案再评分：匹配那一层问的是「这一场有没有他的系统内提交」，
+    # 不是「那份答卷算出来了没有」。
+    student = db_session.scalar(select(Student).where(Student.student_no == "SFLTC"))
+    scale = db_session.scalar(select(AssessmentScale).where(AssessmentScale.code == "MHT"))
+    make_sitting(
+        db_session,
+        student,
+        scale=scale,
+        task_id=task.id,
+        source="IN_SYSTEM",
+        submitted_at=now_utc_naive(),
+    )
+    db_session.commit()
+
+    grader = counselor(client)
+    data = _preview_data(
+        client,
+        grader,
+        _csv(
+            [
+                _row("甲同学", 2, 12, 1, 4),
+                _row("乙同学", 1, 15, 1, 4),
+                _row("丙同学", 2, 14, 1, 4),
+                _row("丁同学", 2, 12, 1, 4),
+            ]
+        ),
+        task_id=task.id,
+    )
+    # 先证明这一批真的是四档各一行——判据不成立时下面每条断言都会红在一个
+    # 与被测代码无关的地方，而那句话说不出来。
+    assert data["row_counts"] == {
+        "ready": 1,
+        "needing_resolution": 2,
+        "conflict": 1,
+        "error": 1,
+    }, data["rows"]
+    return grader, data
+
+
+def test_import_row_detail_filters_by_match_group(client, db_session):
+    """四档各筛一次，每一片的行数与 `row_counts` 里那一个数**逐字相同**。
+
+    这条钉的是 §11 那件事：筛选片上的数（`batch_row_counts`）与点进去那张表
+    （`list_import_rows`）**同源**。两处各写一遍判据时，「筛片上写着无法导入 1 条、
+    点进去 0 条」这种对话就会在某次改动之后出现——而两边看起来都对。
+
+    行号从 **2** 起：第 1 行被表头占掉（见 `test_import_row_detail_supports_...`）。
+    """
+    headers, data = _four_group_batch(client, db_session)
+    batch_id = data["id"]
+    counts = data["row_counts"]
+
+    whole = _detail_query(client, headers, batch_id)
+    assert whole["total"] == 4
+
+    assert _detail_row_nos(client, headers, batch_id, match_group="ready") == [2]
+    assert _detail_row_nos(client, headers, batch_id, match_group="needing_resolution") == [3, 4]
+    assert _detail_row_nos(client, headers, batch_id, match_group="conflict") == [4]
+    assert _detail_row_nos(client, headers, batch_id, match_group="error") == [5]
+
+    # 三片（可导入 / 待确认 / 无法导入）与筛片上的数一一对上。
+    # `conflict` 不在这一组里，因为它是**待确认那一档里的子集**，见下。
+    for group in ("ready", "needing_resolution", "error"):
+        assert _detail_query(client, headers, batch_id, match_group=group)["total"] == counts[group]
+
+    # **`conflict` 是 `needing_resolution` 的子集（放大镜），不是并列的第五档。**
+    # 界面用 `needing_resolution - conflict` 算「整批的覆盖/放弃管得着几行」
+    # （`assessmentBatchResolutionRows`），两处要是各算各的，那个差额会变成负数。
+    conflict_rows = set(_detail_row_nos(client, headers, batch_id, match_group="conflict"))
+    resolution_rows = set(
+        _detail_row_nos(client, headers, batch_id, match_group="needing_resolution")
+    )
+    assert conflict_rows <= resolution_rows
+    assert len(resolution_rows - conflict_rows) == counts["needing_resolution"] - counts["conflict"]
+    assert len(resolution_rows - conflict_rows) == 1, "整批选择管得着的只剩乙同学那一行"
+
+    # 三片**并集 == 整批**：漏掉哪一档，都会有行在任何一片里都找不到——
+    # 而操作员会以为「这份文件没有问题」。
+    union: set[int] = set()
+    for group in ("ready", "needing_resolution", "error"):
+        union |= set(_detail_row_nos(client, headers, batch_id, match_group=group))
+    assert union == {row["row_no"] for row in whole["items"]}
+
+
+def test_the_filter_and_the_page_share_one_total(client, db_session):
+    """筛完之后 `total` 说的是**筛选后**集合的大小，翻页因此不与它打架（§10）。
+
+    这一条正是「筛选必须做在服务端」那半句：客户端若在筛当前页，`total` 会是整批的 4、
+    `items` 只有 1 行——两个数说的不是一件事，而屏幕上会出现「共 4 条」配一行数据，
+    并且第 2 页翻出来的是整批的第 2 条而不是筛选结果的第 2 条。
+    """
+    headers, data = _four_group_batch(client, db_session)
+    batch_id = data["id"]
+
+    first = _detail_query(client, headers, batch_id, match_group="needing_resolution", limit=1)
+    assert first["total"] == 2, "筛选后的总数不受这一页取几条影响"
+    assert [row["row_no"] for row in first["items"]] == [3]
+
+    second = _detail_query(
+        client, headers, batch_id, match_group="needing_resolution", limit=1, offset=1
+    )
+    assert second["total"] == 2
+    assert [row["row_no"] for row in second["items"]] == [4]
+
+
+def test_an_unknown_match_group_is_a_422_not_a_silent_pass_through(client, db_session):
+    """认不出的分组当场 422，**不当成「不过滤」**。
+
+    静默返回整批是这里最坏的一种失败：调用方（或下一个人写的脚本）以为筛过了，
+    而结果是一整批行——与「这个分组下没有符合条件的行」在响应上长得一模一样。
+    """
+    headers, data = _four_group_batch(client, db_session)
+    response = client.get(
+        f"/api/v1/assessment-imports/{data['id']}/rows",
+        headers=headers,
+        params={"match_group": "NOT_A_GROUP"},
+    )
+    assert response.status_code == 422, response.text
+    message = response.json()["error"]["message"]
+    assert "NOT_A_GROUP" in message
+    # 四个可选值都要写在这一句里：操作员拿到的唯一线索就是它（§14：错误要说出出路）。
+    for group in ("ready", "needing_resolution", "conflict", "error"):
+        assert group in message
+
+
+def test_import_row_detail_searches_the_file_and_the_student_no(client, db_session):
+    """关键词命中**文件里那一行写了什么**，也命中**学号**（名册上那个值）。
+
+    学号那半是这条用例的重点：文件模板里**没有学号列**（六列：姓名 / 性别 / 年龄 /
+    年级 / 班级 / 所用时间），所以文件路径上 `raw_student_no` 恒 NULL——而明细表
+    「匹配学生」那一格印的正是名册上的学号（`matched_student_no`）。只搜 `raw_*`
+    的话，屏幕上明明写着「学号：SFLTB」却搜不出来。
+
+    行号那半同理：搜 `3` 必须命中第 3 行。`LIKE '%3%'` 会把 13、30、730 一起捞出来，
+    所以他输一个数字时想的几乎总是「第 3 行」——两条判据取并集，不互斥。
+    """
+    headers, data = _four_group_batch(client, db_session)
+    batch_id = data["id"]
+
+    # 学号：文件里没有这一列，只有名册上有（`SFLTC` 那一行是丙同学）
+    assert _detail_row_nos(client, headers, batch_id, keyword="SFLTC") == [4]
+    # 文件原始内容：姓名是操作员自己填进文件里的字
+    assert _detail_row_nos(client, headers, batch_id, keyword="乙同学") == [3]
+    # 行号按**精确值**命中（第 3 行就是乙同学那一行，见上面那条 fixture 的注释）
+    assert _detail_row_nos(client, headers, batch_id, keyword="3") == [3]
+    # 「同学」四行都含——子串匹配是成立的，否则上面两条可能只是碰巧
+    assert _detail_row_nos(client, headers, batch_id, keyword="同学") == [2, 3, 4, 5]
+    # 搜不到的词回空表，且 `total` 一起归零（两个数同源）
+    empty = _detail_query(client, headers, batch_id, keyword="这份文件里没有这个名字")
+    assert empty["items"] == [] and empty["total"] == 0
+
+
+def test_the_search_does_not_turn_a_decimal_lookalike_into_a_500(client, db_session):
+    """`²` 这类字符 `isdigit()` 为真而 `int()` 抛异常——搜它必须回空表，不是 500。
+
+    判据用 `isdecimal()` 而不是 `isdigit()` 就是为了这一条：一行用户输入能把明细页
+    变成 500，而这类上标字符在中文输入法下并不难打出来（`str.isdigit()` 对 `²` 回真，
+    `int("²")` 抛 `ValueError`）。
+    """
+    headers, data = _four_group_batch(client, db_session)
+    assert "²".isdigit() and not "²".isdecimal(), "前提：这个字符正是那条陷阱"
+
+    response = client.get(
+        f"/api/v1/assessment-imports/{data['id']}/rows",
+        headers=headers,
+        params={"keyword": "²"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["total"] == 0
+
+
 def _resolve(client, headers, row_id, **body):
     return client.patch(
         f"/api/v1/assessment-import-rows/{row_id}/resolve", headers=headers, json=body

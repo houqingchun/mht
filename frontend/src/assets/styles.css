@@ -1600,6 +1600,42 @@ dd {
   width: min(92vw, 380px);
 }
 
+/* 全屏展示（2026-09-24 加）。**必须排在三档尺寸之后**：它们是同特异性的单类选择器，
+   谁在后面谁说了算——`.modal-fullscreen` 写在 `.modal-lg` 前面的话，一个 `size="lg"`
+   的弹层点开「全屏」宽度仍然是 940px，而按钮的样子一切正常。
+   只给「内容比一屏还长」的弹层用（`Modal.vue` 的 `expandable`，默认关）。 */
+.modal-fullscreen {
+  width: 100vw;
+  max-width: none;
+  height: 100vh;
+  /* `.modal-panel` 上那条是 85vh——不覆盖的话全屏之后上下各留 7.5vh 的遮罩。 */
+  max-height: 100vh;
+  border-radius: 0;
+}
+
+/* 正文吃掉标题栏与页脚之外的全部高度。
+   `flex: 1` 管的是**内容比一屏短**的那一批：不给它，正文就只有内容那么高，
+   页脚会跟着往上飘、面板底部空出一块（面板本身是 100vh）。
+   `min-height: 0` 是 flex 子项的老规矩：不写它，子元素的下限由内容决定，
+   `flex: 1` 会在内容长的时候把标题栏与页脚顶出视口。 */
+.modal-fullscreen .modal-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 正文变成纵向 flex 之后，子项的 `flex-shrink` 就开始起作用了（默认是 1），
+   于是一份行数很多的明细会把表格**压扁**——它按自己的内容本该更高，却被压到
+   「其余固定项占剩下的那点空间」里去。这里把所有直接子项钉成不伸不缩，纵向的
+   伸展留给正文自己的 `overflow-y: auto`：表格保持内容高，整块正文滚动。
+   （2026-09-24 实测：720 高的视口下，摘要网格 + 页签 + 筛选条 + 分页 + 两段说明
+   就占掉约 426px，剩给表格的比表格内容还少——所以**没有**哪一项真的能「伸开」，
+   能做的只有别再把它压扁。见 `DataCenterPage.vue` 的 `detailTableStyle`。） */
+.modal-fullscreen .modal-body > * {
+  flex: 0 0 auto;
+}
+
 .modal-header {
   display: flex;
   justify-content: space-between;
@@ -1628,6 +1664,31 @@ dd {
 }
 
 .modal-close:hover {
+  background: #f0f3f6;
+}
+
+/* 标题栏右侧那一组按钮（全屏 + 关闭）。`.modal-header` 是两端布局，所以这里必须
+   是一个容器：两个按钮各自作为 `space-between` 的第二个子项时，标题会被挤到中间。 */
+.modal-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 高度与 `.modal-close` 一致（32px），两个按钮的基线才对得齐。字号比正文字小一档，
+   因为它是标题栏里的辅助动作，不是这一页的主按钮。 */
+.modal-expand {
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid #d7e0ea;
+  border-radius: 6px;
+  background: #fff;
+  font-size: 0.85rem;
+  color: #2a4a6d;
+  cursor: pointer;
+}
+
+.modal-expand:hover {
   background: #f0f3f6;
 }
 

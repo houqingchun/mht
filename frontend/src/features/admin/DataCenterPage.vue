@@ -7,7 +7,7 @@
   删的是副本，功能一直都在。
 -->
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import Modal from '../../components/Modal.vue'
 import SkeletonBlock from '../../components/SkeletonBlock.vue'
@@ -19,6 +19,7 @@ import { useSettings } from '../../composables/useSettings'
 import {
   AGE_RESOLUTION_LABELS,
   CONFLICT_RESOLUTION_LABELS,
+  MATCH_GROUP_LABELS,
   MATCH_STATUSES_NEEDING_RESOLUTION,
   ageResolutionLabel,
   assessmentResolutionLabel,
@@ -29,11 +30,13 @@ import {
   importModeLabel,
   importRowStatusLabel,
   importRowStatusTone,
+  matchGroupLabel,
   matchStatusLabel,
   matchStatusTone,
   outOfScopeReasonLabel,
   taskStatusLabel
 } from '../../services/labels'
+import { createLatestRequest } from '../../services/latest-request'
 import {
   getMe,
   getAuditLogs,
@@ -100,6 +103,119 @@ const detailError = ref('')
 const detailPage = ref(1)
 const detailPageSize = ref(50)
 const detailPageCount = computed(() => Math.max(1, Math.ceil(detailTotal.value / detailPageSize.value)))
+
+/**
+ * 这个弹层是不是全屏展示（`Modal` 的 `expandable` / `expanded`）。
+ *
+ * 明细是一张 11 列的表，平时被压在 340px 里（下面还有别的卡片，弹层再高就顶到视口外面），
+ * 一屏只看得到五六行——「内容比较多」说的就是这件事。全屏之后表格按剩余高度铺满，
+ * 一次能看几十行。
+ *
+ * **状态住在这一页而不是 `Modal` 里**：全屏这件事要改的不只是面板的尺寸，还有那张表
+ * 自己被写死的高度（见 `detailTableStyle`）。做成内部状态的 Modal，这一页就只能靠
+ * 选择器去猜自己是不是在全屏里，而那正是会随 CSS 改动静默失效的写法。
+ */
+const detailFullscreen = ref(false)
+
+/**
+ * 明细表外面那一层的行内样式。
+ *
+ * 平时那个 `340px` 从前是**行内**写在模板里的，必须挪到这里来：行内样式压过任何全局规则，
+ * 所以 `styles.css` 里给全屏写 `.modal-fullscreen .table-wrap { max-height: none }`
+ * **压不过它**——点了全屏而表格仍然只有 340px 高，一片空白留在下面。
+ *
+ * 全屏那一支**只做这一件事**（把上限松开），**不给 `flex`，也不给 `min-height`**。
+ * 这一条是量出来的，不是推出来的（1280×720 的视口、`.detail-grid` 那一批固定内容）：
+ *
+ * | | 表格高 | 解释 |
+ * |---|---|---|
+ * | 常规态 | 340 | 被这个 `max-height` 夹住（内容 346），表格内部滚 |
+ * | 全屏态 | 内容高（约 480，随行数长） | 上限松开之后它就摊开了，整块正文滚 |
+ *
+ * 先前这里写的是 `flex: '1 1 auto'` + `minHeight: '260px'`，说法是「表格是那条纵向
+ * flex 里唯一可伸缩的项，会吃掉剩余高度」。**实测两态只差 1px（260 / 261）**，因为
+ * 这个弹层里**除表格之外**的固定内容（摘要网格 192 + 页签 33 + 工具条 40 + 分页 59 +
+ * 两段说明）就占掉 426px，720 高的视口剩给表格的空间比表格内容还少——于是 `flex: 1`
+ * 永远伸展不了，`flex-shrink: 1` 反而把表格**往下压**，压到 `min-height` 恰好托住它。
+ * 换句话说那两行是空转的，而 `minHeight: 260` 还让「表格铺开了没有」这条断言变成恒真
+ * （下界就是它自己）。现在的形状是**表格按内容高、纵向滚动交给正文自己**
+ * （`.modal-body` 的 `overflow-y: auto`），与 `styles.css` 里 `.modal-fullscreen
+ * .modal-body > *` 那条规则一起构成全屏的全部效果。
+ */
+const detailTableStyle = computed(() => (
+  detailFullscreen.value
+    ? { marginTop: '14px', maxHeight: 'none' }
+    : { marginTop: '14px', maxHeight: '340px' }
+))
+
+/**
+ * 明细里那两个筛选条件，**都在服务端生效**。
+ *
+ * 这不是实现细节而是必须的（§10）：这一页是服务端分页的（默认 50 行），筛在客户端只能
+ * 筛出**当前这一页**里符合条件的那几行，而屏幕上那个「共 N 条」会随翻页变化、操作员看不出
+ * 来——“快速筛出有问题的学生”要筛的是**整批**，所以筛的动作必须发生在 `limit` 之前。
+ *
+ * `''` 是**唯一的「没筛」写法**：接口那边空串不上 URL（见 `getAssessmentImportRows`），
+ * 多留一种 `null` 只会多一处判错的地方。
+ */
+const detailMatchGroup = ref('')
+const detailKeyword = ref('')
+
+/** 关键词框的防抖（照 `AuditPage` 那条既有形状）：每敲一个字打一次接口，而一个搜索框上
+ *  打到第七个字母就是第七次请求——它们回答的是七个不同的问题，只有最后一个算数。 */
+let detailSearchTimer: ReturnType<typeof setTimeout> | null = null
+
+/**
+ * 竞态守卫（§14）。**按页构造**，不做成模块级/全局的——一个全局序号会把两个不相干的
+ * 页面串进同一条序列，那正是这里要防的东西。
+ *
+ * 这一页的重入是真实存在的：连着切两个筛选片、或者在防抖窗口里改了关键词又重打。
+ * 迟到的那个答案不能替后来者把行写上——**`catch` 与 `finally` 里也要判**，
+ * 否则它会把后来者的 `loading` 关掉。
+ */
+const latestDetail = createLatestRequest()
+
+/** 那一片「全部」不是 `MATCH_GROUP_LABELS` 里的键（表里四个都是分组码），它由空串表示。 */
+interface DetailGroupTab {
+  key: string
+  label: string
+  /** 整批的行数，**不套读者的数据范围**（与上方摘要三格同口径，见那一句口径说明）。 */
+  count: number | null
+}
+
+/**
+ * 明细页那几片筛选项。
+ *
+ * **键序取自 `MATCH_GROUP_LABELS`**——`labels.ts` 那张表的 docstring 里写着「键序 = 屏幕上
+ * 的片子次序」，在这里另写一份 `['ready', 'needing_resolution', …]` 就是第二个定义，
+ * 而加一个分组时表改了、这里没改，不会有任何东西报错。
+ *
+ * `conflict` 那一片**只在真有冲突行时才出现**：它是 `needing_resolution` 的放大镜
+ * （「其中：与在线答卷冲突」），一批里没有这类行时摆一片恒为 0 的按钮只会让人点了白点。
+ * 其余几片恒定渲染——「可导入 0 条」是一句真话（它说的是这一批全都进得去），
+ * 而一片会随数据出现或消失的按钮做不到这句话。
+ *
+ * 「待确认」那一片按 `needing_resolution` 筛，**不是** `needing_resolution - conflict`：
+ * 片上写着 3 条而点进去 0 条这种对话因此构造上不可能出现（§11）。冲突行单独一片是
+ * **放大镜**，点它看到的那些行仍然属于「待确认」那一堆。
+ */
+const detailGroupTabs = computed<DetailGroupTab[]>(() => {
+  const counts = detailCounts.value
+  const keys = Object.keys(MATCH_GROUP_LABELS) as (keyof AssessmentRowCounts)[]
+  return [
+    { key: '', label: '全部', count: null },
+    ...keys
+      .filter((key) => key !== 'conflict' || (counts?.conflict ?? 0) > 0)
+      .map((key) => ({
+        key: key as string,
+        label: matchGroupLabel(key),
+        count: counts ? counts[key] : null
+      }))
+  ]
+})
+
+/** 现在有没有筛。空态那一句要按它分岔（§14：空态是一句关于数据的话）。 */
+const detailFiltered = computed(() => Boolean(detailMatchGroup.value || detailKeyword.value.trim()))
 
 /**
  * 逐行处置的**草稿**（§18.6）：只装「打开这一批时是什么样、操作员有没有改过」。
@@ -400,23 +516,55 @@ async function openDetail(batch: AssessmentImportBatch) {
   detailCounts.value = null
   detailError.value = ''
   detailPage.value = 1
+  // 筛选条件跟着这一批一起复位（打开一批时先看它的全貌）：留着上一批那个「待确认」
+  // 会让弹层一开就少了一截行，而标题上写着的是另一批的名字。
+  if (detailSearchTimer) {
+    clearTimeout(detailSearchTimer)
+    detailSearchTimer = null
+  }
+  detailMatchGroup.value = ''
+  detailKeyword.value = ''
   // 逐行草稿跟着一起清（同一条理由：换一批时留着上一批的行内选择，
   // 界面上就会标题写着 B 的第 3 行、保存的却是 A 的第 3 行）
   rowDrafts.value = {}
+  // 全屏状态也逐次复位。（不在 `Modal` 的卸载路径上 emit 复位——卸载期 emit 是另一类
+  // 边界情况，而「下一次打开时是什么样」本来就该由打开这个动作决定。）
+  detailFullscreen.value = false
   showAssessmentRows.value = true
   await loadDetailPage(1)
 }
 
+/** 关掉明细弹层：顺手停掉那个还没到点的防抖，免得关掉之后又飞出一个请求。 */
+function closeAssessmentRows(open: boolean) {
+  if (!open && detailSearchTimer) {
+    clearTimeout(detailSearchTimer)
+    detailSearchTimer = null
+  }
+  showAssessmentRows.value = open
+}
+
 /** 只替换当前页；切页时不关闭弹层、不丢掉批次摘要。 */
 async function loadDetailPage(page: number) {
-  if (!detailBatch.value) return
+  const batch = detailBatch.value
+  if (!batch) return
+  const token = latestDetail.begin()
   detailLoading.value = true
   detailError.value = ''
+  // 取数之前先清空（§14）。**今天它不会让人看见一次闪烁**——骨架屏那一片排在表格之前，
+  // 加载中表格根本不在 DOM 里——留着它一半是给下一个改这块渲染的人挡一下（把骨架屏换成
+  // 一层覆盖时，不清空就会露出上一页/上一批的行），一半是让「失败时 `detailRows` 是空的」
+  // 这条性质成立：错误那一支出现时，手里那份数据已经不属于任何一个还在屏幕上的问题。
+  detailRows.value = []
+  rowDrafts.value = {}
   try {
-    const result = await getAssessmentImportRows(detailBatch.value.id, {
+    const keyword = detailKeyword.value.trim()
+    const result = await getAssessmentImportRows(batch.id, {
       limit: detailPageSize.value,
-      offset: (page - 1) * detailPageSize.value
+      offset: (page - 1) * detailPageSize.value,
+      matchGroup: detailMatchGroup.value || null,
+      keyword: keyword || null
     })
+    if (!latestDetail.isCurrent(token)) return
     detailRows.value = result.items
     detailTotal.value = result.total
     detailCounts.value = result.rowCounts
@@ -431,10 +579,43 @@ async function loadDetailPage(page: number) {
     }
     rowDrafts.value = drafts
   } catch (err) {
+    // 迟到的失败不能替后来者写错误（§14）：它回答的是上一个问题。
+    if (!latestDetail.isCurrent(token)) return
     detailError.value = err instanceof Error ? err.message : '明细加载失败'
   } finally {
-    detailLoading.value = false
+    if (latestDetail.isCurrent(token)) detailLoading.value = false
   }
+}
+
+/**
+ * 切筛选片。**先回到第 1 页再取数**：停在第 4 页上切一个只有一页的分组，看到的会是一张
+ * 空表格——而「这一组没有行」与「筛出来不够 4 页」在屏幕上长得一模一样（服务端把越界的
+ * 页码夹回来，夹回来的那一份要等下一次渲染才看得见）。
+ */
+function selectDetailGroup(key: string) {
+  if (detailMatchGroup.value === key) return
+  detailMatchGroup.value = key
+  void loadDetailPage(1)
+}
+
+/** 关键词框：防抖 300ms（照 `AuditPage` 那条既有形状）之后回到第 1 页取数。 */
+function onDetailKeywordInput() {
+  if (detailSearchTimer) clearTimeout(detailSearchTimer)
+  detailSearchTimer = setTimeout(() => {
+    detailSearchTimer = null
+    if (detailBatch.value) void loadDetailPage(1)
+  }, 300)
+}
+
+/** 空态那一句里那条出路：把两个筛选条件都清掉（清完仍是空的话，那就是这一批真没有）。 */
+function clearDetailFilters() {
+  if (detailSearchTimer) {
+    clearTimeout(detailSearchTimer)
+    detailSearchTimer = null
+  }
+  detailMatchGroup.value = ''
+  detailKeyword.value = ''
+  void loadDetailPage(1)
 }
 
 /** 明细那一条失败之后的「重试」：重开当前这一批（`detailBatch` 此刻就是它）。 */
@@ -532,6 +713,12 @@ onMounted(async () => {
   // `historyError`）。把另外两件并进 `load()` 的 try 里，会让一次任务接口的抖动
   // 把整页变成「加载失败」——而这一页上还有两个能用的导入。
   await Promise.all([load(), loadAssessmentTasks(), loadBatchHistory()])
+})
+
+onUnmounted(() => {
+  // 离开这一页时把那个还没到点的防抖停掉：它 300ms 后要发的那个请求，回答的是**上一页**
+  // 上打了一半的字。（弹层被关掉那条路走 `closeAssessmentRows`，同一个理由。）
+  if (detailSearchTimer) clearTimeout(detailSearchTimer)
 })
 </script>
 
@@ -674,6 +861,14 @@ onMounted(async () => {
             <!-- 不以上传响应里的 `assessmentRows` 判断是否显示：那份数据可能被截断或
                  读取失败，而弹层会按页重新请求整批明细。即使本页可见行为 0，也要让
                  操作员看到「无记录 / 不在数据范围」的明确结果。 -->
+            <!-- 这一颗叫「**查看全部明细**」，下面「导入批次」表格行里那一颗叫「查看明细」
+                 （`openDetail(batch)`）——两者调到同一个弹层，但这一颗看的是**刚上传的这批**，
+                 那一颗看的是历史里的某一批。**两个名字都要留着，而且卡片里那三处提示语必须
+                 跟着这一颗的名字写**（V1.1.6 把这里从「查看明细」改成「查看全部明细」时，
+                 三句提示语没跟着改，于是操作员照着一句「请点『查看明细』」在这张卡上找不到
+                 那颗按钮——同族教训见 CLAUDE.md 缺口 7：把「看不懂」换成了「搜不到」）。
+                 反过来也不能把这一颗改回旧名：`getByRole` 的 `name` 是**子串**匹配，而
+                 这个名字里插着「全部」两个字，所以两个名字互不匹配，谁写错谁点不到。 -->
             <button class="btn small" @click="openDetail(assessmentBatch)">
               查看全部明细
             </button>
@@ -700,7 +895,7 @@ onMounted(async () => {
             这些学生在这一场会被算成已完成（完成率按目标行算），成绩本身要等平台给出逐题数据。
           </div>
           <p v-if="assessmentNothingImportable" class="form-error" style="margin-top:6px">
-            这一批没有可导入的记录（可导入 0 条、待确认 0 条），请点「查看明细」看每一行为什么
+            这一批没有可导入的记录（可导入 0 条、待确认 0 条），请点「查看全部明细」看每一行为什么
             进不去，按提示补齐名册或任务目标后重新上传同一个文件。
           </p>
           <!-- 「处理结果」那一列在预览态下必然全是「待导入」——不说这一句，进不去的那些行
@@ -777,12 +972,12 @@ onMounted(async () => {
             <template v-if="assessmentBatchResolutionRows > 0">
               「本场已有系统内提交的答卷」那几条<b>不在这两个选项管得着的范围里</b>：这一批里
               有几名学生在系统内已经答过一次，以哪一份为准要一条一条选，一次点击不该把
-              学生本人答的卷子一起作废。请点「查看明细」，在那几行的「处置」里各选一种。
+              学生本人答的卷子一起作废。请点「查看全部明细」，在那几行的「处置」里各选一种。
             </template>
             <template v-else>
               这一批要确认的<b>全是「本场已有系统内提交的答卷」这一类</b>，所以上面没有
               覆盖 / 放弃可选：这一批里有几名学生在系统内已经答过一次，以哪一份为准要一条
-              一条选，一次点击不该把学生本人答的卷子一起作废。请点「查看明细」，在那几行的
+              一条选，一次点击不该把学生本人答的卷子一起作废。请点「查看全部明细」，在那几行的
               「处置」里各选一种。
             </template>
           </p>
@@ -933,11 +1128,17 @@ onMounted(async () => {
       </div>
     </div>
 
+    <!-- `expandable` 只开在这一个弹层上：明细是 11 列的长表，一屏只看得到五六行。
+         卡片上的「查看全部明细」与批次历史里的「查看明细」打开的是同一个弹层，
+         所以这一处一开，两个入口都有了。 -->
     <Modal
       :model-value="showAssessmentRows"
       :title="detailBatch ? `导入明细 · ${detailBatch.batch_no}` : '导入明细'"
       size="lg"
-      @update:model-value="showAssessmentRows = $event"
+      expandable
+      :expanded="detailFullscreen"
+      @update:expanded="detailFullscreen = $event"
+      @update:model-value="closeAssessmentRows"
     >
       <div v-if="detailBatch" class="detail-grid">
         <div class="detail-row"><span>批次名称</span><b>{{ detailBatch.batch_name }}</b></div>
@@ -980,10 +1181,38 @@ onMounted(async () => {
         </div>
       </div>
 
+      <!-- 筛选项排在加载/错误那一条链**之外**：读取失败时它得留在屏幕上——那正是操作员
+           想换个条件再试一次的时刻，而把它一起换成错误页就等于收走了这个出路。 -->
+      <div v-if="detailBatch" class="queue-tabs" style="margin-top:14px">
+        <button
+          v-for="tab in detailGroupTabs"
+          :key="tab.key"
+          :class="['queue-tab', { active: tab.key === detailMatchGroup }]"
+          @click="selectDetailGroup(tab.key)"
+        >
+          {{ tab.label }}<template v-if="tab.count !== null"> · {{ tab.count }}</template>
+        </button>
+      </div>
+      <div v-if="detailBatch" class="toolbar" style="margin-top:10px">
+        <div class="search-box">
+          <input
+            v-model="detailKeyword"
+            type="search"
+            placeholder="搜索行号、姓名、学号、年级或班级"
+            @input="onDetailKeywordInput"
+          />
+        </div>
+        <!-- 清筛选那枚按钮只在筛着的时候出现：它是一次「回到全部」的动作，而没筛的时候
+             它什么都不做（点了也不会有任何东西变）。 -->
+        <button v-if="detailFiltered" class="btn small" @click="clearDetailFilters">
+          清除筛选
+        </button>
+      </div>
+
       <SkeletonBlock v-if="detailLoading" variant="table" :rows="4" />
       <ErrorState v-else-if="detailError" :message="detailError" :on-retry="retryDetail" />
       <template v-else>
-        <div class="table-wrap" style="margin-top:14px;max-height:340px">
+        <div class="table-wrap" :style="detailTableStyle">
           <table>
             <thead>
               <tr>
@@ -1199,18 +1428,23 @@ onMounted(async () => {
             </button>
           </div>
         </div>
-        <!-- 两种原因分开说：这一批真的一行都没有，或者它的行都不在你的数据范围内
-             （逐行明细按读者的范围过滤，而批次是共享的）。合成一句会让第二种情况
-             看起来像第一种——而它们要采取的行动完全不同。 -->
+        <!-- 三种原因分开说：这一批真的一行都没有、它的行都不在你的数据范围内（逐行明细按
+             读者的范围过滤，而批次是共享的）、或者筛完之后剩不下哪一行。前两种没什么可做，
+             第三种是筛错了——而合成一句会让第三种看起来像第一种。 -->
         <p v-if="!detailRows.length" class="muted tiny" style="margin-top:10px">
-          这一批没有逐行记录，或它的行都不在你的数据范围内。
+          <template v-if="detailFiltered">
+            没有符合当前筛选条件的行。
+            <button class="btn small" @click="clearDetailFilters">清除筛选</button>
+          </template>
+          <template v-else>这一批没有逐行记录，或它的行都不在你的数据范围内。</template>
         </p>
         <p class="muted tiny" style="margin-top:10px">
           「待确认」的三种含义：「年龄与名册不符」是文件里的年龄与名册上那个数对不上；
           「本月已导过一次」是库里已经有一次同口径的外部导入，选「覆盖」会用这份文件里的结果
           替换它；「本场已有答卷」是<b>这名学生本人在系统里答过这一场</b>，那一条要单独回答
-          「以哪一份为准」（见下面那一格，整批的「覆盖」对它们无效）。上方那三个数数的是
-          <b>整批</b>，而这几十行按你的数据范围过滤，所以两边可能不等。
+          「以哪一份为准」（见下面那一格，整批的「覆盖」对它们无效）。上方那三个数与筛选项上
+          那几个数数的是<b>整批</b>，而下面这几十行还要再按你选的条件与你的数据范围过滤，
+          所以两边可能不等——一个数比看得见的行多，是正常的。
         </p>
         <!-- 「处置」那一列的两副面孔各写一句：预览态下它能做的事与不能做的事都要说清，
              尤其是**保存 ≠ 导入**——不说这一句，操作员会以为点了「保存这一行」这条记录
@@ -1232,7 +1466,7 @@ onMounted(async () => {
         </p>
       </template>
       <template #footer>
-        <button class="btn primary" @click="showAssessmentRows = false">关闭</button>
+        <button class="btn primary" @click="closeAssessmentRows(false)">关闭</button>
       </template>
     </Modal>
 

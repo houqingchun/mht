@@ -2378,6 +2378,170 @@ test.describe('布局完整性', () => {
     );
   });
 
+  /**
+   * 「导入明细」弹层的全屏展示（2026-09-24 加，用户报的「内容比较多，请弹出窗口时，
+   * 可选全屏展示，以便展示全部内容」）。
+   *
+   * **为什么这条必须断计算值而不是文案**：这个功能在文本断言下是全绿的——按钮写着
+   * 「全屏」、`aria-pressed` 也是对的，而面板宽度仍然是 940px，因为
+   * `.modal-fullscreen` 与 `.modal-lg` 是**同特异性**的单类选择器，**谁写在后面谁说了算**
+   * （`styles.css:1603` 那一长段就是为这条写的）。同理，表格那 `340px` 从前是**行内**
+   * 样式，压过任何全局规则——点了全屏而表格仍只有 340px 高，屏幕上留着大片空白，
+   * 而按钮的样子一切正常。所以这里量的是 `getBoundingClientRect` 与 `maxHeight`。
+   *
+   * **两条尺寸判据缺一不可**：只断「面板铺满了视口」的话，一个没有把 `max-height`
+   * 从 85vh 覆盖掉的实现照样过——它的高度是 612px（720 的 85%），而宽度确实是 1280px。
+   * 高度那一条同时钉住 `height: 100vh` 与 `max-height: 100vh` 两个声明。
+   *
+   * **「里面也铺开了」那一条量的是表格高度，而判据是「越过常规态那条 340 的上限」，
+   * 不是「不低于某个下界」。** 第一版写的就是下界（`>= 260`），而它配着一个
+   * `min-height: 260px`——下界就是它自己，于是那条断言**近乎恒真**：实测把
+   * `detailTableStyle` 里的 `flex: 1 1 auto` 摘掉，表格 261px、原态 260px，**测试全绿**。
+   * （1px 之差是 `flex-shrink: 1` 把内容压到 `min-height` 造成的舍入。）
+   *
+   * 那两行 `flex: 1 1 auto` + `minHeight: 260px` 是这一版**删掉**的，因为它在这个弹层里
+   * 从来没伸展过：除表格之外的固定内容（摘要网格 192 + 页签 33 + 筛选条 40 + 分页 59 +
+   * 两段说明）在 720 高的视口下就占掉约 426px，剩给表格的比表格内容还少——`flex: 1`
+   * 伸展不了，`flex-shrink: 1` 反而把表格往下压，恰好被 `min-height` 托住。
+   * 全屏的真实收益是**宽度 940 → 1280、纵向 612 → 720（1280×720 视口下实测），
+   * 以及表格不再被 340 夹住**，纵向滚动交给正文自己
+   * （`styles.css` 的 `.modal-fullscreen .modal-body > *`）。
+   * 详见 `DataCenterPage.vue` 的 `detailTableStyle` 与那两条 CSS 的注释。
+   *
+   * 定位器用 `.modal-expand` 这个类名，**不用 `getByRole` 的名字**：`name` 是**子串**
+   * 匹配，而「退出全屏」里就含着「全屏」——同一个 locator 在两种状态下都能命中，
+   * 状态判据于是恒真。状态单独用 `aria-pressed` 或 `toHaveClass` 判。
+   *
+   * 数据自己用接口造（`seed_demo` 不种导入批次），文件内容固定 → 同指纹 + 同操作者 +
+   * 仍是 `PREVIEW` + 同 `task_id`，`_reusable_batch` 会复用同一批，批次表不随时间增长
+   * （与 `vocabulary.spec.ts` 那条同一条路子）。**这一批必须够高**，而行数是量出来的：
+   * 两行内容 346（越过 340 只剩 6px，任何一处行高一变就翻）、**四行只有 323**（比 340 还矮，
+   * 于是常规态根本没被夹住、上面那条断言自己就红了——它拦下的正是「靠内容本来就矮来假装
+   * 被夹住」的那种绿），十二行两种状态都有余量（实测常规态 340、全屏 1271）。
+   * 定位那一行用响应里的 `batch_no`，不按批次名——批次名换了内容就会另建一批，
+   * 而旧的那一批连名字一起留在共享的开发库里，按名字取到的可能是它。
+   *
+   * 变异验证（五条，每条都 `cp -p` 落盘备份、改完逐字节 `cmp` 还原——本机没有别的办法
+   * 证明复原，§18）：①`Modal.vue` 的 `fullscreenClass` 恒 `''` → 红在 `toHaveClass(
+   * /modal-fullscreen/)`（收到 `"modal-panel modal-lg"`）；②`detailTableStyle` 全屏那一支的
+   * `maxHeight: 'none'` 改回 `'340px'` → 红在 `tableMaxHeight === 'none'`；③全屏那一支的
+   * **等价形态**（`maxHeight: 'none'` 配一个行内 `height: '340px'`）→ 红在 `tableHeight > 340`
+   * （收到 340）——这一条专门证明**第三条断言有独立于第二条的牙**（②只会先撞上第二条）；
+   * ④`styles.css` 的 `.modal-fullscreen` 整块挪到 `.modal-lg` **之前** → 红在宽度那条
+   * （`Expected 1280 / Received 940`），证明宽度判据独立于类名判据有牙；
+   * ⑤`styles.css` 的 `.modal-fullscreen .modal-body > *` 从 `flex: 0 0 auto` 改回
+   * `flex: 0 1 auto` → 红在同一条 `tableHeight > 340`，而表格被压到 **34px**——那一段
+   * 「压扁」的注释由此实测坐实（也说明那一条 `flex: 0 0 auto` 不是装饰）。
+   */
+  test('导入明细弹层可以铺满视口展示', async ({ page }) => {
+    const header = ['姓名', '性别', '年龄', '年级', '班级', '所用时间',
+      ...Array.from({ length: 100 }, (_, i) => `${i + 1}.题干`)].join(',');
+    const cell = (name: string) =>
+      [name, '1', '12', '1', '4', '3600秒', ...Array(100).fill('0')].join(',');
+    // 十二行：第一行缺姓名（`INVALID_ROW`），后十一行查无此人（`NOT_FOUND`）。
+    // **行数是判据的一部分**：两处尺寸断言一正一反（常规态恰被夹在 340、全屏越过 340），
+    // 而这两条只在「内容真的比 340 高」时才有意义。实测过的两种不够高：
+    // 两行时内容 346（越过 340 只有 6px，别的改动一动就翻），四行时内容 **323**
+    // ——只有 323 的话常规态根本没被夹住，那一条自己就红了（这是它对的地方：
+    // 它拦下的正是「靠内容本来就矮来假装夹住」的那种绿）。十二行在两种宽度下都远超 340。
+    const names = Array.from({ length: 11 }, (_, i) => `e2e全屏查无此人${i + 1}`);
+    const csv = `${header}\n${cell('')}\n${names.map((n) => cell(n)).join('\n')}\n`;
+
+    const login = await page.request.post('/api/v1/auth/login', {
+      data: { account: '13800000001', password: '123456', role: 'counselor' },
+    });
+    const headers = { Authorization: `Bearer ${(await login.json()).data.access_token}` };
+    const preview = await page.request.post('/api/v1/assessment-imports/preview', {
+      headers,
+      multipart: {
+        file: {
+          name: 'e2e-fullscreen-assessment.csv',
+          mimeType: 'text/csv',
+          buffer: Buffer.from(csv, 'utf-8'),
+        },
+        batch_name: 'e2e全屏明细',
+        tested_on: '2026-09-19',
+      },
+    });
+    expect(preview.ok(), 'MHT 导入预览没有成功，这一条失去了对象').toBeTruthy();
+
+    // 批次号**从响应里读**：它按天编号，写死会在某一天红在一个与功能无关的地方；
+    // 而按批次名取 `.first()` 也不行——这一批换了内容就是新指纹、会另建一批（同名），
+    // 上一版那一批连名字一起留在共享的开发库里，取到哪一批取决于列表次序。
+    const batchNo = (await preview.json()).data.batch_no as string;
+    expect(batchNo, '预览没有回批次号，这一条失去了定位那一行的手段').toMatch(/^BATCH-/);
+
+    await loginAs(page, 'counselor');
+    await page.goto('/counselor/data');
+    await page.waitForLoadState('networkidle');
+
+    const batches = page.locator('.card').filter({ has: page.getByRole('heading', { name: '导入批次' }) });
+    const row = batches.locator('tbody tr', { hasText: batchNo });
+    // 先证明这一批在历史里（顺序反过来的话，一个空表格也能让下面那条通过）。
+    await expect(row).toHaveCount(1);
+    await row.getByRole('button', { name: '查看明细' }).click();
+
+    const panel = page.locator('.modal-panel').first();
+    // 先证明有东西可量：十二行明细真的渲染出来了（扫一个空表格的尺寸也是「绿」的）。
+    await expect(panel.locator('tbody tr')).toHaveCount(12);
+
+    const expand = panel.locator('.modal-expand');
+    const viewport = page.viewportSize()!;
+
+    const measure = () => page.evaluate(() => {
+      const el = document.querySelector('.modal-panel') as HTMLElement;
+      const box = el.getBoundingClientRect();
+      const wrap = el.querySelector('.table-wrap') as HTMLElement;
+      return {
+        x: Math.round(box.x),
+        y: Math.round(box.y),
+        width: Math.round(box.width),
+        height: Math.round(box.height),
+        fullscreen: el.classList.contains('modal-fullscreen'),
+        tableMaxHeight: getComputedStyle(wrap).maxHeight,
+        tableHeight: Math.round(wrap.getBoundingClientRect().height),
+      };
+    });
+
+    // 常规态：面板是那一档 lg（940px）+ 85vh，表格被页面压在 340px 里，而四行内容比它高。
+    const normal = await measure();
+    expect(normal.fullscreen, '常规态就挂着全屏类名，下面的尺寸断言证明不了任何事').toBe(false);
+    expect(normal.width, '常规态的面板不该铺满视口').toBeLessThan(viewport.width);
+    expect(normal.tableMaxHeight, '常规态表格的高度上限该是那一页写的那一档').toBe('340px');
+    // 常规态是**被夹住**的。不断这一条的话，下面那句「全屏之后越过 340」就没有对照——
+    // 一个两边都没夹住的实现（内容本来就高）也能让它通过。
+    expect(normal.tableHeight, '常规态表格没有被 340 夹住，下面那条对照就没有意义').toBe(340);
+
+    await expand.click();
+
+    await expect(panel).toHaveClass(/modal-fullscreen/);
+    await expect(expand).toHaveAttribute('aria-pressed', 'true');
+
+    const full = await measure();
+    expect(full.width, '全屏之后面板没有铺满视口宽度').toBe(viewport.width);
+    expect(full.height, '全屏之后面板没有铺满视口高度（85vh 那条没被覆盖）').toBe(viewport.height);
+    // 一个居中的 1280×720 面板也会满足上面两条——这两条钉住它真的在左上角。
+    expect(full.x).toBe(0);
+    expect(full.y).toBe(0);
+    expect(full.tableMaxHeight, '表格仍然被行内那个 340px 压着').toBe('none');
+    // 这条才是「里面的内容也铺开了」：表格长过了常规态那条硬上限。**不能写成
+    // `>= 某个下界`**——下界那种写法在 `min-height` 面前是恒真的（第一版就是这么写的，
+    // 摘掉 `flex` 也照样绿，见上面那段注释）。
+    expect(full.tableHeight, '全屏之后表格没有越过常规态那条上限')
+      .toBeGreaterThan(340);
+
+    // 再点一次逐项复原：这个按钮是两个方向共用的那一个。
+    await expand.click();
+
+    await expect(panel).not.toHaveClass(/modal-fullscreen/);
+    await expect(expand).toHaveAttribute('aria-pressed', 'false');
+
+    const restored = await measure();
+    expect(restored.width).toBe(normal.width);
+    expect(restored.tableMaxHeight).toBe('340px');
+    expect(restored.tableHeight, '退出全屏之后表格该回到被夹住的那一档').toBe(340);
+  });
+
   test('sidebar is a fixed vertical rail on desktop', async ({ page }) => {
     await loginAs(page, 'counselor');
     const sidebar = page.locator('.sidebar');
@@ -2451,7 +2615,13 @@ test.describe('MHT测评记录导入', () => {
     // 个码各归哪一档由后端测试钉住），界面上照这两档各报一个数。
     await expect(card.getByText('无法导入 2')).toBeVisible();
 
-    await card.getByRole('button', { name: '查看明细' }).click();
+    // 这一颗按钮叫「**查看全部明细**」，不是下面「导入批次」表格行里那颗「查看明细」：
+    // 两者都调到同一个弹层（`openDetail`），但这一颗看的是**刚上传的这批**，那一颗看的是
+    // 历史里的某一批。名字是 V1.1.6 那次分页改动（`bab7582`）分开的——而当时这一行定位器
+    // 没跟着改，于是这条用例在点它的时候超时（点不到，错误里只有一句 timeout，看不出
+    // 是名字变了）。`getByRole` 的 `name` 是**子串**匹配，而这个名字里插着「全部」两个字，
+    // 所以两个名字互不匹配：写错哪一个都点不到，这一点本身也是它守得住的原因。
+    await card.getByRole('button', { name: '查看全部明细' }).click();
     // 逐行明细里那一格是服务端拼好的**一句** `message`（`_row_message`），不是一串
     // `errors`：它在界面上是一个单元格，读起来是一句「这一行为什么进不去」的话。
     await expect(page.getByText('缺少姓名')).toBeVisible();

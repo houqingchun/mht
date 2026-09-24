@@ -362,6 +362,38 @@ export const UNMATCHED_REASON_LABELS: Record<string, string> = {
 }
 
 /**
+ * 逐行明细页的**筛选项** —— 后端 `MATCH_GROUPS` 的四个键。
+ *
+ * 这一张是「九个匹配结论」的**第四种分组**（前三种：能不能进 / 要不要拍板 /
+ * 是不是这场任务缺的人），而它与 `batch_row_counts` 返回的四个数**是同一张表**：
+ * 筛选片上写着「待确认 3 条」、点进去也必须正好是那 3 条（§11：指标卡上的数必须与
+ * 它点进去的那个列表同源）。所以这四个键**不在视图里另写一份**——后端改一处分组，
+ * 这里跟着改；两边各写一份，某天挪动一档只会改到其中一个，而屏幕上那个数与点进去
+ * 的结果就对不上了，两边看起来都对。
+ *
+ * **`conflict` 是 `needing_resolution` 的子集，不是并列的第五档**（后端
+ * `MATCH_GROUPS` 那段记着同一条）。中文里的「其中：」就是这件事本身——它不是修辞，
+ * 是这张表里唯一一处**必须**保留的前缀：去掉它，第五片看起来就像第四个互斥的档，
+ * 而操作员会以为「待确认」里不含冲突那些行，于是逐行处置完之后仍在「待确认」里看到
+ * 他们，以为哪里没生效。
+ *
+ * 键序 = 屏幕上的片子次序（可导入 → 待确认 → 与在线答卷冲突 → 无法导入）＝ 后端
+ * `MATCH_GROUPS` 的定义次序。没有 `*_ORDER`：那几片是按钮不是表头，没有可排序的列
+ * （§3 第四面）。
+ *
+ * `PENDING` 那一档**不在这里**，与 `MATCH_STATUSES_NEEDING_RESOLUTION` 刻意不含它
+ * 同源：批量插入后立刻逐行匹配，正常情况下没有一行停在它上面，而它既不是「能进」
+ * 也不是任何一档错误——它落在四个分组之外（真到那一天，它既不在筛出来的任何一片里，
+ * 也仍然算在整批行数里，这正是诚实的表现）。
+ */
+export const MATCH_GROUP_LABELS: Record<string, string> = {
+  ready: '可导入',
+  needing_resolution: '待确认',
+  conflict: '其中：与在线答卷冲突',
+  error: '无法导入'
+}
+
+/**
  * 导入批次的**处置方式** —— 后端 `assessment_import_batch.resolution`。
  *
  * 取值是**小写的 `overwrite` / `skip`**（请求体里就是这两个字，`commit_batch` 原样
@@ -1076,6 +1108,19 @@ export function unmatchedReasonLabel(code: string | null | undefined) {
 export function unmatchedReasonTone(code: string | null | undefined): Tone {
   if (code === 'MATCHED') return 'gray'
   return matchStatusTone(code)
+}
+
+/**
+ * 逐行明细页那几个**筛选项**的中文（见 `MATCH_GROUP_LABELS`）。
+ *
+ * **没有对应的 `matchGroupTone`**，这是有意的：那几片筛选项是 `.queue-tab`（药丸形
+ * 的按钮，选中态由 `.active` 表示），颜色由「选没选中」决定，不由分组决定——与
+ * `CasesPage` 的 `QUEUE_TABS` 逐字同形。给它们按分组上色会造出第二套「选中」的表达，
+ * 而读者分不清「这个片是红的」说的是「这一堆有问题」还是「它现在被选中了」。
+ * 明细表里每一行的**匹配结论**那一格照旧走 `matchStatusLabel` / `matchStatusTone`。
+ */
+export function matchGroupLabel(code: string | null | undefined) {
+  return labelOf(MATCH_GROUP_LABELS, code)
 }
 
 /**

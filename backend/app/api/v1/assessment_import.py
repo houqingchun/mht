@@ -230,14 +230,32 @@ def assessment_import_batch_rows(
     db: Annotated[Session, Depends(get_db)],
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
+    match_group: Annotated[str | None, Query()] = None,
+    keyword: Annotated[str | None, Query(max_length=64)] = None,
 ):
     """某一批的逐行明细：文件里那一行长什么样、匹配到了谁、为什么没匹配上。
 
     **这一层按读者的数据范围过滤**（见 `list_import_rows`）：批次是共享的，而它
     逐行给出姓名与学号。服务端按 `limit/offset` 分页，避免大批次一次传输全部明细。
+
+    `match_group` 与 `keyword` 是这一页的筛选条件，**都在服务端生效**——分页是
+    服务端的，在客户端筛只能筛当前那一页（见 `list_import_rows`）。两者都可省：
+    省掉就是「不过滤」，与这个参数加进来之前的行为逐字相同。
+
+    `keyword` 这里只去空白、把空串归成 `None`；**不在这里判它认不认得**——
+    它是自由文本，没有认不得不认得这一说。`match_group` 是枚举，认不出的由
+    服务层回 422（在那边判，是因为那张表也住在那边）。
     """
     batch = load_batch(db, batch_id)
-    result = list_import_rows(db, batch, actor=current_user, limit=limit, offset=offset)
+    result = list_import_rows(
+        db,
+        batch,
+        actor=current_user,
+        match_group=match_group,
+        keyword=(keyword or "").strip() or None,
+        limit=limit,
+        offset=offset,
+    )
     return ok(
         {
             "items": import_rows_payload(db, result["items"]),

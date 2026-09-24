@@ -9,6 +9,12 @@ the frontend expected FOLLOWING_UP while the backend emitted FOLLOWING.
 from datetime import date, timedelta
 
 from app.models.common import now_local_naive
+from app.services.assessment_import_service import (
+    MATCH_GROUPS,
+    MATCH_PENDING,
+    MATCH_STATUSES_IMPORTABLE,
+    MATCH_STATUSES_UNIMPORTABLE,
+)
 from app.tests.conftest import auth_headers
 from app.tests.test_assessment_api import create_student_session, save_answers
 
@@ -99,6 +105,14 @@ DIMENSION_CODES = {
     "PHOBIC_TENDENCY",
     "IMPULSIVE_TENDENCY",
 }
+# Must match frontend/src/services/labels.ts MATCH_GROUP_LABELS（V1.1.6 导入明细的筛选项）。
+# 这四个键有**两个身份**：它们是明细接口 `match_group` 接受的取值，也是 `row_counts`
+# 返回的那四个键——而 `batch_row_counts` 是从 `MATCH_GROUPS` 推导出来的，所以「筛选项」
+# 与「计数」这两个形状上不可能不一致。
+#
+# `conflict` 那一片的**中文**带着「其中：」前缀（它不是并列的第五档，是 `needing_resolution`
+# 的放大镜），而键名本身没有前缀——前缀归 labels.ts，键归这里。
+MATCH_GROUPS_MIRROR = {"ready", "needing_resolution", "conflict", "error"}
 
 
 def open_case(client):
@@ -545,3 +559,47 @@ def test_roster_gender_uses_the_documented_vocabulary(client):
     assert "FEMALE" in emitted, "中文写法没有归一化成编码"
     unknown = emitted - GENDERS
     assert not unknown, f"后端返回了前端无法映射的性别编码: {unknown}"
+
+
+def test_import_match_groups_use_the_documented_vocabulary():
+    """明细页那四片筛选项：键名对得上 labels.ts，且它们盖住了每一个匹配结论。
+
+    两半各断一件事，而**各自都有一处别的守卫看不见的地方**：
+
+    1. **键名**。这里的 `MATCH_GROUPS_MIRROR` 是**镜像**，定义域在服务层的
+       `MATCH_GROUPS`（用例读它，不在这里重抄一遍——重抄的话服务层改名时两边仍然
+       「和这里写的一样」）。改一个键名会连带 `test_assessment_import_api.py` 里那些
+       `row_counts == {...}` 的字面断言一起红，但**那些红的是服务端那一侧**：
+       `labels.ts` 的 `MATCH_GROUP_LABELS` 有没有跟上，它们一个字都说不了。而漏了
+       词条的后果在屏幕上是「少了一个字」——`matchGroupLabel` 回退成 `'—'`，
+       四个筛选片上写着「— / — / — / —」，没有任何东西红。所以这一半是**人工同步点**：
+       它逼着人回来补 `labels.ts`，它**不是**自动比对 `labels.ts`（与 §32 记着的
+       `EXPORT_TYPE_LABELS` 同一档）。
+    2. **覆盖面**。前三片互不重叠、并集恰好是「除 `PENDING` 之外的全部码」，
+       而 `conflict` 是 `needing_resolution` 的**真子集**（放大镜，不是第五片）。
+       这一半比它看起来重要：`batch_row_counts` 是从 `MATCH_GROUPS` **推导**出来的，
+       所以哪一天有人加一个新的 `match_status` 而忘了归组，四个数相加会**小于**整批
+       行数——而那个不一致是构造上自洽的：四个数各自都对，屏幕上一切正常，只是有一行
+       谁也筛不出来（§11 那条「指标卡上的数必须与它点进去的列表同源」的另一面）。
+
+    `PENDING` 落在四片之外是**有意的**：它不是一个匹配结论，是「批量插入之后还没走
+    匹配」；正常流程里没有一行停在它上面（匹配紧接着插入），所以它不该有筛选片。
+    """
+    assert set(MATCH_GROUPS) == MATCH_GROUPS_MIRROR, (
+        "筛选项的键改名了：labels.ts 的 MATCH_GROUP_LABELS 要跟着改，"
+        "否则四个片上的中文会静默回退成 '—'"
+    )
+
+    slices = {name: set(statuses) for name, statuses in MATCH_GROUPS.items()}
+    flat = [slices["ready"], slices["needing_resolution"], slices["error"]]
+    classified = set().union(*flat)
+    assert sum(len(one) for one in flat) == len(classified), f"两个筛选项盖住了同一档: {classified}"
+    assert classified == MATCH_STATUSES_IMPORTABLE | MATCH_STATUSES_UNIMPORTABLE, (
+        f"有匹配结论不属于任何一片，界面上筛不出它: "
+        f"{(MATCH_STATUSES_IMPORTABLE | MATCH_STATUSES_UNIMPORTABLE) - classified}"
+    )
+    assert MATCH_PENDING not in classified, "`PENDING` 是一行的临时状态，不该有筛选片"
+
+    assert slices["conflict"] < slices["needing_resolution"], (
+        "「其中：与在线答卷冲突」那一片必须是待确认的真子集——它是放大镜，不是第五档"
+    )

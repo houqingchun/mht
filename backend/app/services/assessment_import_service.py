@@ -320,6 +320,24 @@ MATCH_STATUSES_UNIMPORTABLE = {
     MATCH_AMBIGUOUS,
 }
 
+# 上面那三张集合的**第四次**分组：明细页的筛选项。键与 `batch_row_counts` 返回的四个键
+# **逐字相同**，这不是巧合——筛选片上的数与筛出来的行必须是同一份名单（§11：指标卡上的数
+# 必须与它点进去的那个列表同源）。两处各写一份字面量时，某天挪动一档只会改到其中一个，
+# 屏幕上那个数与点进去的结果就对不上了，而两边看起来都对。
+#
+# 所以 `batch_row_counts` 也从这张表**推导**出来，而不是各数一遍。
+#
+# **`conflict` 是 `needing_resolution` 的子集**（与 `batch_row_counts` 里同一条）：
+# 它不是一个并列的第五档，界面上那一片写的是「其中：与在线答卷冲突」。前三片
+# （`ready` / `needing_resolution` / `error`）互不重叠、加起来恰好是整批的行数，
+# 第四片是其中一片的放大镜。
+MATCH_GROUPS: dict[str, tuple[str, ...]] = {
+    "ready": (MATCH_MATCHED,),
+    "needing_resolution": tuple(sorted(MATCH_STATUSES_NEEDING_RESOLUTION)),
+    "conflict": (MATCH_CONFLICT,),
+    "error": tuple(sorted(MATCH_STATUSES_UNIMPORTABLE)),
+}
+
 BATCH_STATUS_PREVIEW = "PREVIEW"
 BATCH_STATUS_COMMITTED = "COMMITTED"
 
@@ -1182,24 +1200,25 @@ def batch_row_counts(db: Session, batch: AssessmentImportBatch) -> dict[str, int
 
     代价是「共 N 行」与列表里的行数可能不等，所以界面把两个数分开写、各自标明口径
     （§9：范围数字要写明口径）——批次那一行说「本批 N 行」，列表下面说「你可见 M 行」。
+
+    **四个键同时是逐行明细页那几片筛选项的取值**（`MATCH_GROUPS` 那张表）：这一页的
+    筛选片读 `match_group`，而 `list_import_rows` 按同一张表筛。片上写着「待确认 3 条」
+    而点进去 0 条这种对话因此构造上不可能出现（§11）。
     """
     counts = dict(db.execute(
         select(AssessmentImportRow.match_status, func.count())
         .where(AssessmentImportRow.batch_id == batch.id)
         .group_by(AssessmentImportRow.match_status)
     ).all())
+    # 四个数**从 `MATCH_GROUPS` 推导**，不在这里各写一遍判据：明细页的筛选片读的是
+    # 同一张表，所以「片上的数」与「筛出来的行」构造上不可能对不上（§11）。
+    #
+    # `NOT_FOUND` / `OUT_OF_SCOPE` 在 `error` 那一组里，所以「进不去」与
+    # `batch.error_rows` 是同一个集合——预览时写下的那个数与这一页此刻现算的数用的是
+    # 同一份名单。
     return {
-        "ready": counts.get(MATCH_MATCHED, 0),
-        "needing_resolution": sum(
-            counts.get(status, 0) for status in MATCH_STATUSES_NEEDING_RESOLUTION
-        ),
-        # `needing_resolution` 里归**逐行**处置的那一部分（上面 docstring 那张表）。
-        # 它必须是那个和的一个子项，不能另数一遍——两处口径分开数时，某天加一档
-        # 「也要逐行处置」的匹配结论，只会改到其中一个。
-        "conflict": counts.get(MATCH_CONFLICT, 0),
-        # `NOT_FOUND` / `OUT_OF_SCOPE` 也在这里，所以「进不去」与 `batch.error_rows`
-        # 是同一个集合——预览时写下的那个数与这一页此刻现算的数用的是同一份名单。
-        "error": sum(counts.get(status, 0) for status in MATCH_STATUSES_UNIMPORTABLE),
+        group: sum(counts.get(status, 0) for status in statuses)
+        for group, statuses in MATCH_GROUPS.items()
     }
 
 
@@ -2951,11 +2970,56 @@ def list_import_batches(
     return {"items": items, "total": total or 0}
 
 
+def _row_keyword_condition(keyword: str):
+    """一行命中关键词的判据（明细页那个搜索框）。
+
+    主体搜的是**文件里那一行写了什么**（`raw_*` / `normalized_*`）——操作员手上拿的
+    是那份文件，他照文件里的字来找。两处例外，各有各的理由：
+
+    * **学号也搜名册上那个值**（`Student.student_no`）：明细表那一格印的就是
+      `matched_student_no`（见 `_row_payload`），而**文件模板里根本没有学号列**
+      （六列：姓名 / 性别 / 年龄 / 年级 / 班级 / 所用时间），所以文件路径上
+      `raw_student_no` 恒 NULL（`_match_row` 那一路只填 `raw_name` 那几列）——
+      只搜 `raw_student_no` 的话，屏幕上明明写着「学号：S001」却搜不出来。
+      `raw_student_no` 一并留着，它不是死代码：`start_historical_import`（按名册
+      建批那条路）会把它填上，那一条的明细页上它在「文件原始内容」里有值。
+    * **行号按精确值命中**：一个 400 行的批次里搜「7」时，`LIKE '%7%'` 会把
+      7、17、70、107 全捞出来，而操作员输一个数字时想的几乎总是「第 7 行」。
+      两者取并集，不互斥。
+
+    **前提：这条判据只能用在带 `with_row_student` 的查询上**（`Student` 在连接里）。
+    少了那个外连接时 SQLAlchemy 会把 `Student` 当成一个**独立的 FROM 元素**加进去，
+    于是查询变成逐行 × 名册里每一个人的笛卡尔积——行数被乘出来、明细整片重复，
+    而报出来的只是一条 SAWarning（同 `list_import_rows` 那段 docstring）。
+
+    **不转义 `%` 与 `_`**：与 `api/v1/audit.py` 的 `q` 同一套写法，全站就这一种。
+    为一个搜索框单独造一套转义规则，会让「这两个框为什么不一样」成为下一个问题。
+
+    用 `isdecimal()` 而不是 `isdigit()`：后者对 `²` 也返回真，而 `int("²")` 抛
+    `ValueError`——一行用户输入能把明细页变成 500，正是那种「只在有人手滑时出现」
+    的缺陷。
+    """
+    like = f"%{keyword}%"
+    conditions = [
+        Student.student_no.like(like),
+        AssessmentImportRow.raw_student_no.like(like),
+        AssessmentImportRow.raw_name.like(like),
+        AssessmentImportRow.normalized_name.like(like),
+        AssessmentImportRow.raw_grade_name.like(like),
+        AssessmentImportRow.raw_class_name.like(like),
+    ]
+    if keyword.isdecimal():
+        conditions.append(AssessmentImportRow.row_no == int(keyword))
+    return or_(*conditions)
+
+
 def list_import_rows(
     db: Session,
     batch: AssessmentImportBatch,
     *,
     actor: UserAccount,
+    match_group: str | None = None,
+    keyword: str | None = None,
     limit: int = 200,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -2994,6 +3058,23 @@ def list_import_rows(
     `candidate_student_ids` 那段与 `0017_json_null_normalize`），而这一支的读者是
     「出错的那几行」，一旦它恒假，明细整片消失、同一屏上 `row_counts` 却说「有问题
     N 行」。判据只挂在 `student_id` 这个真正的标量列上，就没有这一层。
+
+    **两个可选的筛选条件做在服务端，不是在客户端筛当前页**（2026-09-24 加）。
+    这一页是服务端分页的（默认 50 条一页），客户端过滤只能筛出「这一页 50 条里符合
+    条件的」，而操作员要回答的是「这份 400 行的文件里有问题的到底是谁」——在客户端
+    筛，那个数会随着他点第几页而变，而他不会知道这件事。
+
+    `match_group` 取 `MATCH_GROUPS` 的四个键（可导入 / 待确认 / 与在线答卷冲突 /
+    无法导入），与 `batch_row_counts` 返回的四个数**同一张表**：筛选片上写着
+    「待确认 3 条」而点进去 0 条这种对话因此构造上不可能出现（§11）。认不出的分组
+    当场 422 而不是当成「不过滤」——静默地返回整批会让调用方以为筛过了。
+
+    `keyword` 交给 `_row_keyword_condition`：搜的是**文件里那一行写了什么**（`raw_*` /
+    `normalized_*`），外加学号（名册上那个值——文件模板里没有学号列）与行号的精确命中。
+
+    `total` 与 `items` 共用同一个 `where`，所以这两条筛选**自动同时收窄两个数**
+    （§10 那条「截断要自己说出来」靠的正是它们同源：筛完之后 `total` 说的是筛选后
+    集合的大小，翻页因此始终一致）。
     """
     predicate = student_scope_predicate(db, actor)
     where = [
@@ -3001,6 +3082,18 @@ def list_import_rows(
         or_(and_(AssessmentImportRow.student_id.isnot(None), predicate),
             AssessmentImportRow.student_id.is_(None)),
     ]
+    if match_group is not None:
+        statuses = MATCH_GROUPS.get(match_group)
+        if statuses is None:
+            raise AppError(
+                "VALIDATION_ERROR",
+                f"筛选条件不认得：{match_group}。"
+                f"可选值：{' / '.join(MATCH_GROUPS)}",
+                422,
+            )
+        where.append(AssessmentImportRow.match_status.in_(statuses))
+    if keyword:
+        where.append(_row_keyword_condition(keyword))
     total = db.scalar(
         with_row_student(select(func.count()).select_from(AssessmentImportRow)).where(*where)
     )
