@@ -1094,7 +1094,7 @@ UPDATE dimension_result AS dr JOIN assessment_session AS ses ON ses.id = dr.sess
 
 UPDATE risk_event AS re JOIN assessment_session AS ses ON ses.id = re.session_id JOIN xlp_rule_exclude_validity AS b ON b.scale_id = ses.scale_id SET re.rule_version = b.new_version;
 
-UPDATE assessment_external_result AS er SET er.total_score = GREATEST(0, er.total_score - er.validity_score),     er.rule_version = 'MHT-RULE-1.1.2' WHERE er.source_type = 'EXTERNAL_SUMMARY'   AND er.total_score IS NOT NULL AND er.validity_score IS NOT NULL;
+UPDATE assessment_external_result AS er JOIN assessment_scale AS s ON s.code = er.scale_code JOIN xlp_rule_exclude_validity AS b ON b.scale_id = s.id SET er.total_score = GREATEST(0, er.total_score - er.validity_score),     er.rule_version = b.new_version WHERE er.source_type = 'EXTERNAL_SUMMARY'   AND er.total_score IS NOT NULL AND er.validity_score IS NOT NULL;
 
 DROP TEMPORARY TABLE xlp_rule_exclude_validity;
 
