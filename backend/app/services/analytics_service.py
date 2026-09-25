@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 from collections import defaultdict
 
-from sqlalchemy import case, func, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
@@ -18,6 +18,7 @@ from app.models.assessment import (
     DimensionResult,
     RiskEvent,
     effective_session_predicate,
+    active_task_predicate,
     PARTICIPATION_REQUIRED,
 )
 from app.models.care import FollowUpRecord, RetestPlan, StudentCareCase
@@ -124,7 +125,16 @@ def latest_result_subquery(db: Session, user: UserAccount):
             .label("rank"),
         )
         .join(Student, Student.id == AssessmentSession.student_id)
-        .where(student_scope_predicate(db, user), effective_session_predicate())
+        .outerjoin(AssessmentTask, AssessmentTask.id == AssessmentSession.task_id)
+        .where(
+            student_scope_predicate(db, user),
+            effective_session_predicate(),
+            # 作废那一场不参与排名（§4.14）：学校作废它正是因为「这一场不算」，
+            # 而「他现在是什么状态」若取到那一场，同一名学生在别处（个案详情、
+            # 关注率、导出）会得到另一个等级。外连接在这里，所以「没有任务」那一支
+            # 必须留着——`NULL != 'VOIDED'` 是 NULL 而不是真。
+            or_(AssessmentSession.task_id.is_(None), active_task_predicate()),
+        )
         .subquery()
     )
     return (
@@ -326,7 +336,7 @@ def _report_scope(
         select(AssessmentTask)
         .join(AssessmentTarget, AssessmentTarget.task_id == AssessmentTask.id)
         .join(Student, Student.id == AssessmentTarget.student_id)
-        .where(student_scope_predicate(db, user))
+        .where(student_scope_predicate(db, user), active_task_predicate())
         .distinct()
         .order_by(AssessmentTask.created_at.desc(), AssessmentTask.id.desc())
     )
@@ -579,11 +589,16 @@ def analytics_overview(db: Session, user: UserAccount) -> dict:
     # SCHOOL — it just was not implemented. The UI labels state which is which,
     # because a scoped number wearing a school-wide label is a lie.
     scope = student_scope_predicate(db, user)
+    # 作废的任务不计入完成率（§4.12）。这两条都是**内连接**，判据摆在 WHERE 里就对。
+    # 少了它，一场作废的普查会永远留在分子与分母上：学校作废它正是因为「这一场不算」，
+    # 而报表照旧把它算进去，屏幕上只是一个偏低的完成率。
+    live_task = active_task_predicate()
     total_targets = (
         db.scalar(
             select(func.count(AssessmentTarget.id))
             .join(Student, Student.id == AssessmentTarget.student_id)
-            .where(scope)
+            .join(AssessmentTask, AssessmentTask.id == AssessmentTarget.task_id)
+            .where(scope, live_task)
         )
         or 0
     )
@@ -591,7 +606,8 @@ def analytics_overview(db: Session, user: UserAccount) -> dict:
         db.scalar(
             select(func.count(AssessmentTarget.id))
             .join(Student, Student.id == AssessmentTarget.student_id)
-            .where(AssessmentTarget.status == "COMPLETED", scope)
+            .join(AssessmentTask, AssessmentTask.id == AssessmentTarget.task_id)
+            .where(AssessmentTarget.status == "COMPLETED", scope, live_task)
         )
         or 0
     )
@@ -690,6 +706,27 @@ def _cohort_fields(counts: dict | None) -> dict:
     }
 
 
+def _live_target_on_clause():
+    """外连接 `assessment_target` 时的 ON 子句：只认**没被作废**那些任务的目标行（§4.12）。
+
+    年级 / 班级这两张表把目标行**外连接**进来——「这个年级有没有人属于我的范围」
+    不该因为一场任务作废而变成 0 行。所以作废的判据进 ON 子句，**不能写进 WHERE**：
+    写进 WHERE 会把外连接悄悄变成内连接，把「没有目标行」的学生整片丢掉，而屏幕上
+    只是少了几行，看不出是排版问题。
+
+    用 `task_id IN (SELECT …)` 而不是再外连接一张 `assessment_task`：后者会让作废那
+    一场的目标行**仍然留在结果里**（`count(AssessmentTarget.id)` 照样数得到它），要
+    把下面那两列都改成 `count(AssessmentTask.id)` 才有效——而那两个表达式正是这两列
+    的全部内容，改它们比改这里危险。
+    """
+    return and_(
+        AssessmentTarget.student_id == Student.id,
+        AssessmentTarget.task_id.in_(
+            select(AssessmentTask.id).where(active_task_predicate())
+        ),
+    )
+
+
 def analytics_by_grade(db: Session, user: UserAccount) -> list[dict]:
     """Per-grade rows, scoped.
 
@@ -712,7 +749,9 @@ def analytics_by_grade(db: Session, user: UserAccount) -> list[dict]:
             func.sum(case((AssessmentTarget.status == "COMPLETED", 1), else_=0)),
         )
         .join(Student, Student.grade_id == Grade.id)
-        .outerjoin(AssessmentTarget, AssessmentTarget.student_id == Student.id)
+        # 已作废任务的目标行不算（§4.12）。判据在 ON 子句里，**不是** WHERE——
+        # 这一条是外连接，「这个年级有学生但没有人被发过任务」要出 0 行而不是整行消失。
+        .outerjoin(AssessmentTarget, _live_target_on_clause())
         .where(student_scope_predicate(db, user))
         .group_by(Grade.id, Grade.name)
         .order_by(Grade.sort_order, Grade.id)
@@ -743,7 +782,8 @@ def analytics_by_class(db: Session, user: UserAccount) -> list[dict]:
         )
         .join(Grade, Grade.id == ClassGroup.grade_id)
         .join(Student, Student.class_id == ClassGroup.id)
-        .outerjoin(AssessmentTarget, AssessmentTarget.student_id == Student.id)
+        # 同 `analytics_by_grade`：作废的判据进 ON 子句，写进 WHERE 会把外连接变成内连接。
+        .outerjoin(AssessmentTarget, _live_target_on_clause())
         .where(student_scope_predicate(db, user))
         .group_by(ClassGroup.id, Grade.name, ClassGroup.name)
         .order_by(Grade.sort_order, ClassGroup.id)
@@ -945,9 +985,14 @@ def student_result_list(db: Session, user: UserAccount) -> list[dict]:
 
     latest_session_id = (
         select(AssessmentSession.id)
+        .outerjoin(AssessmentTask, AssessmentTask.id == AssessmentSession.task_id)
         .where(
             AssessmentSession.student_id == Student.id,
             effective_session_predicate(),
+            # 任务被作废时那一场不算「他最近的一次」（§4.14 的防御性约束之一）。
+            # 这里的连接是**外连接**（任务外的会话没有 task_id），所以「没有任务」那一支
+            # 必须留着：`NULL != 'VOIDED'` 在 SQL 里是 NULL 而不是真。
+            or_(AssessmentSession.task_id.is_(None), active_task_predicate()),
         )
         .correlate(Student)
         .order_by(*latest_session_order())
@@ -1386,9 +1431,14 @@ def leader_progress(db: Session, user: UserAccount) -> list[dict]:
                 .label("rn"),
             )
             .join(AssessmentResult, AssessmentResult.session_id == AssessmentSession.id)
+            .outerjoin(AssessmentTask, AssessmentTask.id == AssessmentSession.task_id)
             .where(
                 AssessmentSession.student_id.in_(student_ids),
                 effective_session_predicate(),
+                # 任务被作废时那一场不算「他最近的一次」（§4.14 的防御性约束之一）。
+                # 这里的连接是**外连接**（任务外的会话没有 task_id），所以「没有任务」那一支
+                # 必须留着：`NULL != 'VOIDED'` 在 SQL 里是 NULL 而不是真。
+                or_(AssessmentSession.task_id.is_(None), active_task_predicate()),
             )
             .subquery()
         )

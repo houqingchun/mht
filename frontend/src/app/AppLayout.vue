@@ -28,16 +28,18 @@ const navConfig: Record<string, { name: string; avatar: string; nav: NavItem[] }
     avatar: '心',
     nav: [
       { key: 'counselor/workbench', label: '工作台', icon: '⌂', path: '/counselor/workbench' },
-      { key: 'cases', label: '重点学生', icon: '⚑', path: '/counselor/cases' },
+      // 「重点学生」→「重点关注学生」（V2.0.0 §9 P1-04）。词条换了，路径与 key 没动——
+      // 那是路由标识与深链，改它等于把已经发出去的收藏链接一起作废。
+      { key: 'cases', label: '重点关注学生', icon: '⚑', path: '/counselor/cases' },
       { key: 'tasks', label: '测评任务', icon: '▣', path: '/counselor/tasks' },
       { key: 'dataCenter', label: '数据中心', icon: '⇅', path: '/counselor/data' },
       { key: 'exports', label: '导出中心', icon: '↧', path: '/counselor/exports' },
       { key: 'analytics', label: '统计分析', icon: '▥', path: '/counselor/analytics', children: [
-        { key: 'analytics/overview', label: '全校预警总览', icon: '▥', path: '/counselor/analytics/overview' },
-        { key: 'analytics/dimensions', label: '全校八维度分析', icon: '▤', path: '/counselor/analytics/dimensions' },
+        { key: 'analytics/overview', label: '筛查关注概览', icon: '▥', path: '/counselor/analytics/overview' },
+        { key: 'analytics/dimensions', label: '八维度分析', icon: '▤', path: '/counselor/analytics/dimensions' },
         { key: 'analytics/grades', label: '年级维度对比', icon: '▦', path: '/counselor/analytics/grades' },
         { key: 'analytics/classes', label: '班级维度画像', icon: '▧', path: '/counselor/analytics/classes' },
-        { key: 'analytics/report', label: '专业解读与导出', icon: '▣', path: '/counselor/analytics/report' }
+        { key: 'analytics/report', label: '专业分析报告', icon: '▣', path: '/counselor/analytics/report' }
       ]},
       { key: 'audit', label: '审计日志', icon: '◷', path: '/counselor/audit' }
     ]
@@ -49,11 +51,15 @@ const navConfig: Record<string, { name: string; avatar: string; nav: NavItem[] }
       { key: 'leader/overview', label: '领导总览', icon: '◎', path: '/leader/overview' },
       { key: 'progress', label: '重点进展', icon: '↻', path: '/leader/progress' },
       { key: 'analytics', label: '学校统计', icon: '▥', path: '/leader/analytics', children: [
-        { key: 'analytics/overview', label: '全校预警总览', icon: '▥', path: '/leader/analytics/overview' },
-        { key: 'analytics/dimensions', label: '全校八维度分析', icon: '▤', path: '/leader/analytics/dimensions' },
+        // 德育领导这两条与心理老师那两条**同名**（V2.0.0 §5.4 的建议 + §9 P1-04）：
+        // 两个角色共用同一个组件，所以「全校」这个前缀此前是同一套组件里的两处硬编码
+        // 标题。范围由页头那枚「当前数据范围」徽标表达（`ReportPageHeader.vue`），
+        // 而徽标对德育领导读出来就是「全校」——**范围和它是谁的，各说各的**。
+        { key: 'analytics/overview', label: '筛查关注概览', icon: '▥', path: '/leader/analytics/overview' },
+        { key: 'analytics/dimensions', label: '八维度分析', icon: '▤', path: '/leader/analytics/dimensions' },
         { key: 'analytics/grades', label: '年级维度对比', icon: '▦', path: '/leader/analytics/grades' },
         { key: 'analytics/classes', label: '班级维度画像', icon: '▧', path: '/leader/analytics/classes' },
-        { key: 'analytics/report', label: '专业解读与导出', icon: '▣', path: '/leader/analytics/report' }
+        { key: 'analytics/report', label: '学校心理工作分析摘要', icon: '▣', path: '/leader/analytics/report' }
       ]},
       { key: 'tasks', label: '测评任务', icon: '▣', path: '/leader/tasks' },
       { key: 'audit', label: '审计日志', icon: '◷', path: '/leader/audit' }

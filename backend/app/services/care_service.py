@@ -7,8 +7,10 @@ from app.models.assessment import (
     AssessmentResult,
     AssessmentSession,
     AssessmentTarget,
+    AssessmentTask,
     DimensionResult,
     RiskEvent,
+    active_task_predicate,
 )
 from app.models.audit import AuditLog
 from app.models.care import (
@@ -157,15 +159,22 @@ def counselor_workbench(db: Session, user: UserAccount) -> dict:
     # 分母同时跟着用户的数据范围。这与上面那句是两件事：前者定「算哪些人」，
     # 后者定「哪些人算」——把它们一起换掉才是对的。德育领导的 SCHOOL 范围
     # 让同一个函数仍然给出全校数字，所以领导页与工作台的口径不会打架。
+    #
+    # 作废的任务不进分子也不进分母（§4.12 / §4.13）：学校作废一场普查正是因为
+    # 「这一场不算」，而这块卡片照旧把它算进去的话，工作台上的完成率会比同一屏
+    # 右侧的「关注档案」队列少一截说服力——两个数各自看着都正常。
+    # 判据走模型层的 `active_task_predicate()`，与 `analytics_overview` 同一处定义。
     completed = db.scalar(
         select(func.count(AssessmentTarget.id))
+        .join(AssessmentTask, AssessmentTask.id == AssessmentTarget.task_id)
         .join(Student, Student.id == AssessmentTarget.student_id)
-        .where(AssessmentTarget.status == "COMPLETED", scope)
+        .where(AssessmentTarget.status == "COMPLETED", active_task_predicate(), scope)
     )
     targets = db.scalar(
         select(func.count(AssessmentTarget.id))
+        .join(AssessmentTask, AssessmentTask.id == AssessmentTarget.task_id)
         .join(Student, Student.id == AssessmentTarget.student_id)
-        .where(scope)
+        .where(active_task_predicate(), scope)
     )
     completion_rate = round((completed or 0) / targets * 100) if targets else 0
     return {
@@ -380,6 +389,25 @@ def student_assessment_records(db: Session, student: Student) -> dict:
         .where(AssessmentSession.student_id == student_id)
         .order_by(*session_history_order())
     ).all()
+    # 每一场所属的筛查任务是否已作废（§4.15 / §4.6）。**这一项只用来打标签，不用来
+    # 过滤**——上面那一段注释说的是「降级不算抹掉」，作废同理：那一场仍然是他真实考过
+    # 的一次，答案、用时、那天的分都还在，趋势图不能少一个点。缺的是读者的知情权：
+    # 一个已经作废的任务下那一场分，不该被当成「他现在怎么样」的依据。
+    #
+    # 判据与后端其余各处共用 `active_task_predicate()`——「已作废」只有一个定义，
+    # 这里取它的否命题（`status == 'VOIDED'`），不另写一套字面量比较。
+    # 按需查而不是逐场查：一张表上几十场测评，N+1 会比上面那三条查询加起来还贵。
+    voided_task_ids = set()
+    task_ids = {past_session.task_id for past_session in history_sessions if past_session.task_id is not None}
+    if task_ids:
+        voided_task_ids = set(
+            db.scalars(
+                select(AssessmentTask.id).where(
+                    AssessmentTask.id.in_(task_ids),
+                    ~active_task_predicate(),
+                )
+            )
+        )
     # 三条查询取完整条序列：此前是「每场一次 AssessmentResult」的 N+1，逐维度的历史分
     # 还要再乘一场。归组在 Python 里做，查询数与会话数无关。
     session_ids = [past_session.id for past_session in history_sessions]
@@ -414,6 +442,13 @@ def student_assessment_records(db: Session, student: Student) -> dict:
                 # 而「用时 5340 秒」在两种来源下是两件事——导入的那一场没有本系统的
                 # 作答过程，用时是那个平台自己报的数。
                 "source": past_session.source,
+                # 这一场所属的筛查任务是否已作废（§4.15）。**这是一个标签，不是一道过滤**
+                # ——上面 `history_sessions` 那一段写着「降级不算抹掉」，作废同理：这一场
+                # 仍然是他真实考过的一次，趋势图不少这个点。它只回答一件事：这一格分，
+                # 能不能被当成「他现在怎么样」的依据。答案是「已作废，不参与当前判断」。
+                #
+                # 任务之外的那一场（`task_id` 为空）恒为 False：没有任务可作废。
+                "task_voided": past_session.task_id in voided_task_ids,
                 # 每场自己的八维度分。趋势图要按维度看变化，而各维度题数不同（10 或 15），
                 # 所以必须带上 `max_score`，前端才能归一化后比较——只给原始分会让 15 题的
                 # 身体症状凭空压过 10 题的孤独倾向。
@@ -685,7 +720,10 @@ def create_manual_review(db: Session, user: UserAccount, case_id: int, payload: 
     _ensure_open(care_case)
     risk_event = db.get(RiskEvent, payload.risk_event_id)
     if not risk_event or risk_event.student_id != care_case.student_id:
-        raise AppError("SCOPE_FORBIDDEN", "风险事件不属于该关注档案", 403)
+        # 文案用「筛查信号」（V2.0.0 §9 P1-04）：`risk_event` 是**表名**，不是给学生或
+        # 老师看的词。同一件事在 `labels.ts` 的 `riskEventStatusLabel` 那一族里也一直
+        # 叫「筛查信号」，而这句话是直接弹到用户面前的那一种（§9 的「提示语」）。
+        raise AppError("SCOPE_FORBIDDEN", "筛查信号不属于该关注档案", 403)
     review = ManualReview(
         risk_event_id=risk_event.id,
         reviewer_id=user.id,

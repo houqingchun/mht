@@ -815,7 +815,7 @@ onUnmounted(() => {
                那是 2026-09-16 的旧口径，2026-09-17 已被用户撤回：导入的记录与学生在
                系统内作答走同一个判定函数，命中重点题 85/97 一样开出待办与档案。
                页面文案没跟着改，就成了一句对着用户说的假话。 -->
-          <span class="muted tiny">判定口径与系统内作答一致：命中重点题（85/97）会开出风险提示与关怀档案</span>
+          <span class="muted tiny">判定口径与系统内作答一致：命中重点题（85/97）会开出筛查信号与关怀档案</span>
           <div class="actions" style="justify-content:center;margin-top:14px">
             <button class="btn" @click="downloadAssessmentImportTemplate">下载模板</button>
             <label class="btn primary" style="cursor:pointer">

@@ -27,6 +27,18 @@ const props = withDefaults(defineProps<{
   title: string
   fields: FormField[]
   submitText?: string
+  /**
+   * 标题下面的一段说明。给「这个动作的**影响**」用的，而且只在调用方算得出来时才传。
+   *
+   * 它与 `FormField.hint` 分工不同：`hint` 说的是「这一格填进去会发生什么」，跟着某一个
+   * 控件走；这一段说的是「按下这个提交按钮会发生什么」，与任何一格无关——而有些弹窗
+   * **一格都没有**（比如「这场任务还没产生正式测评事实，直接物理删除」，不需要填任何东西），
+   * 那时没有控件可以挂 hint，而它恰恰是最需要先说清后果的那一个。
+   *
+   * §4.7 的删除影响预览（目标学生数 / 答卷数 / 结果数 / 导入批次数 / 筛查信号数 /
+   * 人工关怀数）走的就是这一格。
+   */
+  description?: string
 }>(), {
   submitText: '提交'
 })
@@ -76,6 +88,10 @@ function onCancel() {
 <template>
   <Modal :model-value="open" :title="title" @update:model-value="emit('update:open', $event)">
     <form class="form-dialog-form" @submit.prevent="onSubmit">
+      <!-- 影响预览排在**控件之前**：它是「按下提交会发生什么」，读者要在动手之前读到它。
+           放在按钮旁边就变成事后说明——而这一步的后果（几十份答卷不再参与当前统计）
+           是不可撤的。 -->
+      <p v-if="description" class="form-dialog-description">{{ description }}</p>
       <!-- 提示语在 `<label>` **外面**（在外层这个 div 里）。放进 label 的话它会成为控件
            可访问名的一部分——读屏软件把「这一格填进去会发生什么」当成字段名念出来，
            而字段名要回答的是「这里填什么」。错误提示一直在这个位置，hint 走同一处。 -->

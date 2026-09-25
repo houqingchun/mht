@@ -17,11 +17,11 @@ import {
   SOURCE_ORDER,
   sourceLabel,
   statusLabel,
-  statusTone,
-  userScopeLabel
+  statusTone
 } from '../../services/labels'
 import {
   getMe,
+  getDataScopeSummary,
   getCareCases,
   getStudentResults,
   exportCareCases,
@@ -30,7 +30,7 @@ import {
   getAssignableOwners,
   type AssignableOwner,
   type CareCaseItem,
-  type CurrentUser,
+  type DataScopeSummary,
   type StudentResultItem
 } from '../../services/api'
 
@@ -101,7 +101,7 @@ const filtered = computed(() => {
 // ---------------------------------------------------------------------------
 
 const TOP_TABS = [
-  { key: 'cases', label: '重点学生' },
+  { key: 'cases', label: '重点关注学生' },
   { key: 'students', label: '全部学生' }
 ]
 
@@ -144,15 +144,19 @@ const assessedOnly = ref(false)
  * 「范围数字必须在 UI 上写明口径，否则它冒充全校数字，比不给数字更糟」
  * 说的是同一件事，只是这次冒充全校的不是数字，是列表标题。
  *
- * `scopes` 一直在 `/auth/me` 的响应里，只是此前没有类型所以没人读（见 `api.ts`）。
- * 多行范围是并集（`or_`），所以并列出来；取不到就什么也不说，不猜一个「全校」。
+ * **这一行读服务端算好的那一句，不在这里自己拼**（§5.3：前端不得从零散字段自行推断
+ * 范围）。它此前读的是 `/auth/me` 的 `scopes[]`，再由本页把 `scope_type` 映射成中文——
+ * 那是全站第二套范围口径，而它与服务端那套**不等价**：`student_scope_predicate` 把多行
+ * 范围按 `or_` 合并（并集），而这里只把去重后的类型名并列出来。一个同时持有
+ * `GRADE(初二)` 与 `CLASS(初一1班)` 的老师，两处都会说「初二、初一1班」——但服务端那一套
+ * 还会把 `SCHOOL` 行短路成「全校」，而这里会把它与别的行并列成「全校、初二」。
+ * 一句话说不清的范围比没有范围更糟，因为它会被照着安排工作。
+ *
+ * 取不到时**整句不出现**（`v-if`），不猜一个「全校」——与服务端 `NONE` 那句
+ * 「未配置数据范围」是两个不同的状态，前者是「问不到」，后者是「问到了，确实没有」。
  */
-const me = ref<CurrentUser | null>(null)
-const scopeText = computed(() => {
-  const types = [...new Set((me.value?.scopes ?? []).map(s => s.scope_type))]
-  if (!types.length) return ''
-  return types.map(userScopeLabel).join('、')
-})
+const scopeSummary = ref<DataScopeSummary | null>(null)
+const scopeText = computed(() => scopeSummary.value?.displayText ?? '')
 
 /** 年级/班级的选项从**已加载的行**里派生——名册是这一页的数据源，不必再问一次接口。 */
 const gradeOptions = computed(() => [...new Set(studentRows.value.map(r => r.grade))])
@@ -328,8 +332,13 @@ async function load() {
       await router.push('/login')
       return
     }
-    // 留着给「全部学生」那一页写范围口径用（见 `scopeText`）。
-    me.value = currentUser
+    // 页头那行范围口径（见 `scopeText`）。**单独 try**：这一句话读不到不该把整张
+    // 重点学生列表一起拦下——它是口径说明，不是这一页的数据。
+    try {
+      scopeSummary.value = await getDataScopeSummary()
+    } catch {
+      scopeSummary.value = null
+    }
     cases.value = await getCareCases()
     try {
       owners.value = await getAssignableOwners()
@@ -500,7 +509,7 @@ onMounted(load)
     <div class="page-head">
       <div>
         <div class="eyebrow">学生关注中心</div>
-        <h1>{{ activeTab === 'students' ? '全部学生测评结果' : '重点学生与长期跟踪' }}</h1>
+        <h1>{{ activeTab === 'students' ? '全部学生测评结果' : '重点关注学生与长期跟踪' }}</h1>
         <!-- 口径写在页面上，不写读者就会把它当成别的东西：这一个列出**整个名册**，
              每人一行、取最近一场；未测评的行也在（§9 的同一条道理）。 -->
         <p v-if="activeTab === 'students'" class="page-desc">

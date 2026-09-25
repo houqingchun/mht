@@ -37,6 +37,7 @@ from app.models.importing import (
 )
 from app.models.organization import ClassGroup, Grade, School, Student
 from app.models.permission import RolePermission
+from app.models.reporting import ProfessionalReport, ProfessionalReportVersion
 from app.models.scale import AssessmentScale, ScaleQuestion, ScaleRule
 from app.models.setting import SystemSetting
 
@@ -64,6 +65,8 @@ __all__ = [
     "RetestPlan",
     "RiskEvent",
     "RolePermission",
+    "ProfessionalReport",
+    "ProfessionalReportVersion",
     "ScaleQuestion",
     "ScaleRule",
     "School",

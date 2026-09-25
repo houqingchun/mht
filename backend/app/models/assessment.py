@@ -52,6 +52,11 @@ class AssessmentTask(TimestampMixin, Base):
     source: Mapped[str] = mapped_column(
         String(16), nullable=False, default="IN_SYSTEM", server_default="IN_SYSTEM"
     )
+    voided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    voided_by: Mapped[int | None] = mapped_column(
+        ForeignKey("user_account.id", name="assessment_task_fk_voided_by"), nullable=True
+    )
+    void_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
 
 class AssessmentTarget(Base):
@@ -369,6 +374,34 @@ def expected_participation_predicate():
     )
 
 
+def active_task_predicate():
+    """「这场任务还算不算数」的唯一定义：作废的那些不算。
+
+    作废（`VOID`）是 §4.1 给任务治理定的两条路里温和的那一条——任务行、目标行、
+    会话、答卷、结果**一条都不删**，只是这一场从此不参与任何「当前状态」的统计
+    （§4.12）。硬删（`HARD_DELETE`）才是真的删行，而它要求那一场**一条答卷都没有**。
+
+    它住在模型层而不是某一个 service，理由与 `effective_session_predicate` /
+    `expected_participation_predicate` 逐字相同：`analytics_service`、`care_service`
+    与 `task_service` 都要用它，而这三处互相 import 的方向是反的，各写一份必然漂，
+    漂了不会有任何东西报错。
+
+    **用它的地方要看清是内连接还是外连接。** 三处消费它：
+
+    - `analytics_overview` / `counselor_workbench` 是内连接，摆在 `WHERE` 里；
+    - `analytics_by_grade` / `analytics_by_class` 把 `assessment_target`
+      **外连接**进来（「这个年级有没有人属于我的范围」这件事不该因为一场任务作废而
+      变成 0 行），所以它必须进 `outerjoin` 的 **ON 子句**——写进 `WHERE` 会把外连接
+      悄悄变成内连接，把「没有目标行的学生」整片丢掉，而屏幕上只是少了几行。
+
+    它与 `AssessmentTask.status` 那一列**不是**同一回事：那一列由写入方写（`DRAFT` /
+    `PAUSED` / `CLOSED` 是人写的），`VOIDED` 也是人写的、且是**终态**。
+    `effective_task_status`（§12）推的是「这一场现在走到哪一步了」，与「还算不算数」
+    是两个问题——一场已结束的普查仍然算数，它的完成率是该进报表的。
+    """
+    return AssessmentTask.status != "VOIDED"
+
+
 class AssessmentTaskScope(Base):
     """任务设计时选的**范围**（与发放之后的 `assessment_target` 快照是两件事）。
 
@@ -517,3 +550,8 @@ class RiskEvent(Base):
     rule_version: Mapped[str] = mapped_column(
         String(64), nullable=False, default="LEGACY_UNKNOWN", server_default="LEGACY_UNKNOWN"
     )
+    voided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    voided_by: Mapped[int | None] = mapped_column(
+        ForeignKey("user_account.id", name="risk_event_fk_voided_by"), nullable=True
+    )
+    void_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)

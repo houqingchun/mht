@@ -2,6 +2,13 @@
 
 心晴 · 中学生心理测评与关怀平台。本文件记录项目的**不可破坏约定**与已知缺口，改动代码前请先读。
 
+# 上下文纪律
+- 禁止 cat 整个文件；必须用 rg/sed/head/tail 分块读。
+- 单次工具输出不超过 200 行 / 8000 字符。
+- 不要读 node_modules、dist、build、.git、logs、*.lock、*.min.js、二进制、数据库 dump。
+- 大文件交给 subagent 读，只返回摘要。
+- 每完成一步更新 PROGRESS.md。
+- 上下文快满时，先写 PROGRESS.md，再 /clear。
 
 ## 产品边界（最重要）
 

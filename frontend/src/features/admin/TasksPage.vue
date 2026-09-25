@@ -37,6 +37,8 @@ import {
   getAssessmentTasks,
   createAssessmentTask,
   updateAssessmentTask,
+  getTaskDeleteCheck,
+  deleteAssessmentTask,
   getTaskCompletion,
   getTaskTargets,
   getUnmatchedImportRows,
@@ -49,6 +51,7 @@ import {
   type AssessmentTaskItem,
   type AssessmentImportRow,
   type TaskCompletionItem,
+  type TaskDeleteCheck,
   type TaskParticipation,
   type TaskTargetItem,
   type SupplementPreview
@@ -66,6 +69,39 @@ const columns: Column[] = [
 ]
 
 const tasks = ref<AssessmentTaskItem[]>([])
+/**
+ * §4.11：任务列表默认**不显示已作废**，筛选项是 `全部 / 进行中 / 已结束 / 已作废`，
+ * 只有显式选「已作废」时那些行才出现。
+ *
+ * 默认从 `CURRENT` 改成 `ALL`，是因为**四个取值此前与两端的口径都对不上**（2026-09-25
+ * 之前只有 `CURRENT` / `VOIDED` 两个 `<option>`）：`CURRENT` 这一支发出的请求与服务端
+ * 那句「不含 VOIDED」的默认完全一样，两块字却对不上——用户看到「当前任务」会以为还有
+ * 「历史任务」可看，而那个下拉里只有「已作废」能回答一半；而 `ALL` 那一支**从未存在过**
+ * （作废过的任务确实能靠「已作废」筛出来，但「全部还在用的那些」一直拿不到）。
+ * 现在四个值都直通服务端，`ALL` 与作废无关：它说的是「全部还在用的任务」。
+ *
+ * `ACTIVE` / `CLOSED` 在服务端按**推出来的**状态筛（`effective_task_status`），
+ * 不按 `assessment_task.status` 那一列的原文——那一列是写入时定死的字面量，
+ * 理由见 CLAUDE.md §12。
+ */
+const taskStatusFilter = ref('ALL')
+
+/**
+ * 空表那一句话**跟着筛选走**（CLAUDE.md §14：空态是一句关于数据的话）。
+ *
+ * `DataTable` 的 `empty-text` 此前写死「暂无测评任务」——它的意思是「这个系统里还没有
+ * 任务」，而用户此刻看到的往往是**筛选之后**的空结果。一个筛到「已作废」的人看到
+ * 「暂无测评任务」，会去问「是不是任务被清掉了」；而事实是这一档里确实没有。
+ * 两句话回答的是两个问题，所以它由筛选值算出来，不写死。
+ */
+const emptyText = computed(() => {
+  const labels: Record<string, string> = {
+    ACTIVE: '没有进行中的测评任务',
+    CLOSED: '没有已结束的测评任务',
+    VOIDED: '没有已作废的测评任务'
+  }
+  return labels[taskStatusFilter.value] ?? '暂无测评任务'
+})
 const loading = ref(true)
 const error = ref('')
 const canWrite = ref(false)
@@ -100,6 +136,8 @@ const showForm = ref(false)
 const formTitle = ref('')
 const formFields = ref<FormField[]>([])
 const formSubmitText = ref('提交')
+/** 标题下面那段影响说明；空串时 `FormDialog` 整段不渲染。 */
+const formDescription = ref('')
 let formResolve: ((values: Record<string, string>) => void) | null = null
 
 const showDetail = ref(false)
@@ -133,10 +171,21 @@ const participationError = ref('')
 /** 连续点开两场任务的明细时，两个请求会同时在路上（见 `services/latest-request.ts`）。 */
 const latest = createLatestRequest()
 
-function showFormDialog(title: string, fields: FormField[], submitText = '提交'): Promise<Record<string, string>> {
+/**
+ * `description` 是标题下面那段说明（§4.7 的删除影响预览走它）。它有默认值，所以
+ * 本文件里「编辑任务」那一类的调用点一个字都不用改——`FormDialog` 那边同样是可选
+ * prop，不传就整段不渲染。
+ */
+function showFormDialog(
+  title: string,
+  fields: FormField[],
+  submitText = '提交',
+  description = ''
+): Promise<Record<string, string>> {
   formTitle.value = title
   formFields.value = fields
   formSubmitText.value = submitText
+  formDescription.value = description
   showForm.value = true
   return new Promise((resolve) => { formResolve = resolve })
 }
@@ -179,7 +228,10 @@ async function load() {
     // 判据；这一行只是把角色码留在手边，喂那条 computed——`me` 是局部的，此前除了
     // 那两个 `=== 'counselor'` 之外没人留过它。
     roleCode.value = me.role_code
-    tasks.value = await getAssessmentTasks()
+    // 四个取值直通服务端（`api.ts` 的 `getAssessmentTasks` 把 `?status=` 原样带上）。
+    // 从前这里写的是「是 VOIDED 就发 VOIDED、否则什么都不发」——于是拿不到「已结束」
+    // 那一档，而服务端当时也没有这个分支（2026-09-25 一并补上）。
+    tasks.value = await getAssessmentTasks(taskStatusFilter.value)
   } catch (err) {
     error.value = err instanceof Error ? err.message : '加载失败'
   } finally {
@@ -230,6 +282,77 @@ async function editTask(task: AssessmentTaskItem) {
     await load()
   } catch (err) {
     showToast('error', err instanceof Error ? err.message : '更新任务失败')
+  }
+}
+
+/**
+ * §4.7 / §11.1 的**删除影响预览**：把 `/delete-check` 那几组计数拼成一段人读得懂的话。
+ *
+ * 这些数此前一直**算了却没渲染**——`getTaskDeleteCheck` 的返回值只被用来判
+ * `check.canHardDelete`（决定弹窗标题与按钮文字），其余十来个字段一个都没上屏。
+ * 于是用户按下「确认作废」之前，屏幕上没有一句话告诉他这一步会波及多少份答卷、
+ * 多少条筛查信号、多少条人工关怀记录——而这一步是不可撤的（§4.6 / §4.8）。
+ *
+ * 两条路各说各的话，因为它们的**后果不一样**：
+ *
+ * - `HARD_DELETE`（这场任务还没产生正式测评事实）：整场删掉、不可恢复。目标行
+ *   也跟着删（`canHardDelete` 的判据里没有 `targetCount`），所以那一个数也要说。
+ * - `VOID`：**一行都不删**。说的是哪些行从此不再参与当前统计——这正是用户要判断的
+ *   那件事，而不是「删了几行」。
+ *
+ * 用换行分句（样式里 `white-space: pre-line`）：一行一条计数，读者才能对着它数；
+ * 压成一整段会读不出「哪几个数一起构成这次删除」。
+ */
+function deleteImpactText(check: TaskDeleteCheck): string {
+  const lines: string[] = []
+  if (check.canHardDelete) {
+    lines.push('这场任务还没有产生正式测评事实，可以整体删除，删除后不可恢复。')
+    if (check.targetCount > 0) lines.push(`· 将一并删除 ${check.targetCount} 名学生的参与记录`)
+  } else {
+    lines.push('作废不删除任何记录：答卷、结果、关怀档案原样保留，只是不再参与当前统计。')
+    const parts: string[] = []
+    if (check.targetCount > 0) parts.push(`${check.targetCount} 名目标学生不再计入完成率`)
+    if (check.sessionCount > 0) parts.push(`${check.sessionCount} 份答卷`)
+    if (check.resultCount > 0) parts.push(`${check.resultCount} 条评分结果`)
+    if (check.importBatchCount > 0) parts.push(`${check.importBatchCount} 个导入批次`)
+    if (parts.length) lines.push(`· 影响：${parts.join('、')}不再参与当前统计`)
+    // 筛查信号分两行：待处理的会被级联作废，已复核的**不动**（§4.5：不得自动回滚人工记录）。
+    // 合成一句「N 条筛查信号」会把这两件后果不同的事读成一件。
+    if (check.pendingRiskEventCount > 0) {
+      lines.push(`· 其中 ${check.pendingRiskEventCount} 条待处理筛查信号将作废并注明原因`)
+    }
+    if (check.riskEventCount > check.pendingRiskEventCount) {
+      lines.push(`· 另有 ${check.riskEventCount - check.pendingRiskEventCount} 条已复核的筛查信号保持原样（人工结论不被回滚）`)
+    }
+    if (check.careCaseCount > 0) {
+      lines.push(`· 关联 ${check.careCaseCount} 份关怀档案，档案与人工记录不会删除，也不会被修改`)
+    }
+  }
+  // 服务端在算不出影响面时会带一句 `warning`；它说的是「这几个数为什么可能是 0」，
+  // 属于前提说明，排在最后。
+  if (check.warning) lines.push(check.warning)
+  return lines.join('\n')
+}
+
+async function removeTask(task: AssessmentTaskItem) {
+  try {
+    const check = await getTaskDeleteCheck(task.id)
+    const fields: FormField[] = check.canHardDelete ? [] : [{
+      key: 'reason', label: '作废原因', type: 'textarea', required: true, maxLength: 500,
+      placeholder: '如：导入文件错误，重新导入后不再使用'
+    }]
+    const values = await showFormDialog(
+      check.canHardDelete ? `删除任务「${task.name}」` : `作废任务「${task.name}」`,
+      fields,
+      check.canHardDelete ? '确认删除' : '确认作废',
+      deleteImpactText(check)
+    )
+    if (!check.canHardDelete && !values.reason) return
+    await deleteAssessmentTask(task.id, values.reason)
+    showToast('success', check.canHardDelete ? '任务已删除' : '任务已作废，历史记录已保留且不再参与当前统计')
+    await load()
+  } catch (err) {
+    showToast('error', err instanceof Error ? err.message : '删除任务失败')
   }
 }
 
@@ -750,8 +873,19 @@ onMounted(load)
         <h1>测评任务</h1>
         <p class="page-desc">创建、发布、暂停和跟踪任务完成情况。</p>
       </div>
-      <div class="actions" v-if="canWrite">
-        <button class="btn primary" @click="newTask">新建任务</button>
+      <div class="actions">
+        <!-- 筛选器**不在 `v-if="canWrite"` 里**（2026-09-25 移出来）：它是读，不是写。
+             它此前与「新建任务」共用一个 `v-if`，于是德育领导这一页**一个筛选器都没有**
+             ——而他的能力集里任务阅读权是有的，看不到已结束/已作废的那些行只能算遗憾，
+             看不到**筛选器**则是「这一页少了一块」。§4.11 要求的是列表有这个筛选，
+             没有一处说它归写者。 -->
+        <select v-model="taskStatusFilter" class="select" @change="load">
+          <option value="ALL">全部</option>
+          <option value="ACTIVE">进行中</option>
+          <option value="CLOSED">已结束</option>
+          <option value="VOIDED">已作废</option>
+        </select>
+        <button v-if="canWrite" class="btn primary" @click="newTask">新建任务</button>
       </div>
     </div>
 
@@ -765,7 +899,7 @@ onMounted(load)
           :rows="tasks"
           row-key="id"
           :page-size="10"
-          empty-text="暂无测评任务"
+          :empty-text="emptyText"
         >
           <template #name="{ row }">
             <strong>{{ row.name }}</strong>
@@ -792,6 +926,7 @@ onMounted(load)
           <template #actions="{ row }">
             <button class="btn small" @click="taskDetail(row)">查看明细</button>
             <button v-if="canWrite" class="btn small" style="margin-left:6px" @click="editTask(row)">编辑</button>
+            <button v-if="canWrite && row.status !== 'VOIDED'" class="btn small danger" style="margin-left:6px" @click="removeTask(row)">删除任务</button>
           </template>
         </DataTable>
       </div>
@@ -802,6 +937,7 @@ onMounted(load)
       :title="formTitle"
       :fields="formFields"
       :submit-text="formSubmitText"
+      :description="formDescription"
       @submit="onFormSubmit"
       @cancel="onFormCancel"
       @update:open="showForm = $event"

@@ -4,7 +4,7 @@ import io
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -13,6 +13,8 @@ from app.models.account import UserAccount, UserScope
 from app.models.assessment import (
     AssessmentResult,
     AssessmentSession,
+    AssessmentTask,
+    active_task_predicate,
     effective_session_predicate,
 )
 from app.models.care import StudentCareCase
@@ -89,9 +91,14 @@ def export_care_cases_csv(
     # 相关子查询保持逐学生的形式，不在 Python 里循环（`latest_session()` 会变成 N+1）。
     latest_session_id = (
         select(AssessmentSession.id)
+        .outerjoin(AssessmentTask, AssessmentTask.id == AssessmentSession.task_id)
         .where(
             AssessmentSession.student_id == Student.id,
             effective_session_predicate(),
+            # 任务被作废时那一场不算「他最近的一次」（§4.14 的防御性约束之一）。
+            # 这里的连接是**外连接**（任务外的会话没有 task_id），所以「没有任务」那一支
+            # 必须留着：`NULL != 'VOIDED'` 在 SQL 里是 NULL 而不是真。
+            or_(AssessmentSession.task_id.is_(None), active_task_predicate()),
         )
         .correlate(Student)
         .order_by(*latest_session_order())
@@ -234,6 +241,10 @@ EXPORT_TYPE_UNMATCHED_IMPORT_ROWS = "UNMATCHED_IMPORT_ROWS"
 # 年级 / 班级）也有「为什么名单上有他」（那个效度分）。它**只能由心理老师导出**：
 # 服务层走 `ensure_student_result_reader`（§4 的双门槛），不是这里的一道开关。
 EXPORT_TYPE_VALIDITY_RETEST = "VALIDITY_RETEST"
+# V2.0.0 §8.2 补：专业分析报告的导出（`reporting_service.report_document`）。
+# 它此前在 `api/v1/reporting.py` 里是**一个裸字符串**，而下面那张镜像守卫扫的是
+# `EXPORT_TYPE_*` **前缀**——字面量对它不可见，所以漏码是静默的（§3 那一族的第六处）。
+EXPORT_TYPE_PROFESSIONAL_REPORT = "PROFESSIONAL_REPORT"
 
 # `export_job.mask_level`。**与 `purpose` 分开存是有意的**：用途是自由文本，它担不起
 # 任何机器判据，而「这份文件是不是实名的」正是导出审计唯一要回答的问题（§8）。

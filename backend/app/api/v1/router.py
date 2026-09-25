@@ -13,6 +13,7 @@ from app.api.v1.settings import public_router as public_settings_router, router 
 from app.api.v1.student_roster import router as student_roster_router
 from app.api.v1.students import router as students_router
 from app.api.v1.tasks import router as tasks_router
+from app.api.v1.reporting import router as reporting_router
 
 api_router = APIRouter()
 api_router.include_router(health_router)
@@ -31,3 +32,4 @@ api_router.include_router(public_settings_router)
 api_router.include_router(audit_router)
 api_router.include_router(exports_router)
 api_router.include_router(tasks_router)
+api_router.include_router(reporting_router)

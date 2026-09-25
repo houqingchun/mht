@@ -29,6 +29,8 @@ import ClassComparisonPanel from '../../components/ClassComparisonPanel.vue'
 import {
   LEVEL_ORDER,
   SOURCE_ORDER,
+  VOIDED_SITTING_LABEL,
+  VOIDED_TASK_SOURCE_NOTE,
   ageLabel,
   calculationStatusLabel,
   calculationStatusTone,
@@ -127,6 +129,17 @@ const historyRows = computed(() =>
     seq: index + 1
   }))
 )
+
+/**
+ * 这几场里有几场所属的筛查任务已经作废（V2.0.0 §4.15 / §4.6）。
+ *
+ * **它数的是行，不是过滤**——作废的那几场照旧留在表里：那是他真实考过的一次，答案、
+ * 用时、当天的分都在，抹掉它就是在抹掉一段发生过的事实（CLAUDE.md §27 那条，同
+ * `care_service` 的历次趋势刻意不加 `effective_session_predicate()` 是同一个道理）。
+ * 这个数只用来决定**要不要把那句话说出来**：没有作废场次时不能凭空出现一段
+ * 「已作废」的说明，那是关于数据的一句错话（§14）。
+ */
+const voidedCount = computed(() => historyRows.value.filter((row) => row.task_voided).length)
 
 /**
  * 列定义。「来源」与「等级」是**枚举列，必须显式声明 `order`**（§3 第四面）：
@@ -268,6 +281,20 @@ async function loadAnswers() {
 
         <div class="card pad" style="margin-top:17px">
           <h2>历次测评</h2>
+          <!-- 作废那一档的说明（V2.0.0 §4.15 / §4.6）。**它只在真的有作废场次时出现**
+               ——没有的话这段话说的是「这几场已作废」，而这几场并不存在（§14：空态是一句
+               关于数据的话，不能凭空出现）。
+
+               两句话各有出处，都不是这里现编的：第一句是规范 §4.6 点名的提示语
+               （`VOIDED_TASK_SOURCE_NOTE`），第二句是 §4.15 那句「明确标识」的原文
+               （`VOIDED_SITTING_LABEL`）。它们住在 `labels.ts`，视图里不另抄一份。 -->
+          <div v-if="voidedCount > 0" class="notice" style="margin-top:12px">
+            这张表里有 <b>{{ voidedCount }}</b> 场所属的筛查任务已作废（表里标着「{{
+              VOIDED_TASK_SOURCE_NOTE
+            }}」）。它们仍然列在这里——那几场是他真实考过的，答案、用时、当天的分都还在
+            ——但这几场<b>{{ VOIDED_SITTING_LABEL }}</b>：不要把上面的分数当成他现在
+            怎么样的依据，也不要据此比较变化。
+          </div>
           <!-- 默认按日期**最近的在前**：这是一张记录表，「他最近考成什么样」是它第一件
                要回答的事，与上面那张「最近一次」卡片同一个取向。趋势图仍然是老的在前
                ——它的横轴有日期刻度，读者照着读。 -->
@@ -282,8 +309,15 @@ async function loadAnswers() {
             <template #submitted_at="{ row }">
               {{ row.submitted_at?.slice(0, 10) || '—' }}
             </template>
+            <!-- 「来源」这一格顺带承担**已作废**的标识（V2.0.0 §4.6）。不另开一列：
+                 作废是少数行的属性，单开一列会让绝大多数行都空着，而「来源」正是
+                 「这一场是哪来的、还算不算数」这一格要回答的事。灰药丸而不是红/琥珀：
+                 它不是待办，也不是风险，是一条已经了结的既成事实。 -->
             <template #source="{ row }">
               <span class="pill">{{ sourceLabel(row.source) }}</span>
+              <span v-if="row.task_voided" class="pill gray" style="margin-left:6px">{{
+                VOIDED_TASK_SOURCE_NOTE
+              }}</span>
             </template>
             <template #total_level="{ row }">
               <span :class="['pill', levelTone(row.total_level)]">{{ levelLabel(row.total_level) }}</span>

@@ -21,6 +21,10 @@ class UpdateAssessmentTaskRequest(BaseModel):
     end_at: str | None = None
 
 
+class DeleteAssessmentTaskRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
+
+
 class SupplementTargetsRequest(BaseModel):
     """补发目标学生：先看后补，同一个请求体两种用法（§8.1 / §16.2）。
 

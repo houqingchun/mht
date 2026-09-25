@@ -104,6 +104,34 @@ export async function getMe(): Promise<CurrentUser> {
   return apiRequest<CurrentUser>('/auth/me')
 }
 
+export interface DataScopeSummary { scopeType: string; displayText: string; schoolWide: boolean }
+export async function getDataScopeSummary(): Promise<DataScopeSummary> {
+  return apiRequest<DataScopeSummary>('/auth/me/data-scope-summary')
+}
+
+export interface ProfessionalReport {
+  id: number; report_no: string; title: string; status: 'DRAFT'|'PUBLISHED'|'ARCHIVED'; current_version: number
+  statistics_snapshot: AnalyticsReport
+  content?: { version_no:number; overall_summary:string; dimension_interpretation:string; sample_validity_note:string; support_plan:string }
+  versions?: Array<{version_no:number; created_at:string; created_by:number}>
+}
+export async function listProfessionalReports(): Promise<ProfessionalReport[]> { return (await apiRequest<{items:ProfessionalReport[]}>('/professional-reports')).items }
+/** 单份报告（含 `versions` 版本列表）。`versions` 只有 `listProfessionalReports` 不给——列表页不需要它。 */
+export async function getProfessionalReport(id:number): Promise<ProfessionalReport> { return apiRequest(`/professional-reports/${id}`) }
+export async function createProfessionalReport(payload: unknown): Promise<ProfessionalReport> { return apiRequest('/professional-reports', {method:'POST', body:JSON.stringify(payload)}) }
+export async function saveProfessionalReport(id:number, payload:unknown): Promise<ProfessionalReport> { return apiRequest(`/professional-reports/${id}/draft`, {method:'PUT', body:JSON.stringify(payload)}) }
+/** 已发布报告不可原地覆盖（§7.4），进一步编辑必须走这一条：服务端建新 `version_no`，旧版本永久保留。 */
+export async function newReportVersion(id:number): Promise<ProfessionalReport> { return apiRequest(`/professional-reports/${id}/new-version`, {method:'POST'}) }
+export async function publishProfessionalReport(id:number): Promise<ProfessionalReport> { return apiRequest(`/professional-reports/${id}/publish`, {method:'POST'}) }
+/**
+ * §8.4 / §7.3：`versionNo` 决定导出**哪一版**——不传时服务端取 `current_version`。
+ * 传了就必须是这份报告真实存在的那一版，否则服务端 404（`reporting_service._version`）。
+ */
+export async function exportProfessionalReport(id:number, purpose:string, versionNo?:number): Promise<ExportJob> {
+  const job = await createExportJob(`/professional-reports/${id}/export-jobs`, versionNo ? {purpose, version_no: versionNo} : {purpose})
+  await downloadExportJob(job.id, `${job.job_no}_专业报告.csv`); return job
+}
+
 /**
  * Rotate the signed-in user's own password. Also clears `must_change_password`,
  * which is what releases the forced-rotation gate in AppLayout.
@@ -386,6 +414,14 @@ export interface AssessmentHistoryEntry {
    * 两件事——导入的那一场没有本系统的作答过程，用时是那个平台自己报的数。
    */
   source: string | null
+  /**
+   * 这一场所属的筛查任务**是否已作废**（V2.0.0 §4.15）。
+   *
+   * **它是一个标签，不是一道过滤**：已作废那一场仍然在 `history` 里（那一场答案、用时、
+   * 当天的分都还在，趋势图不少这个点），这一列只回答「能不能拿它当现在的依据」。
+   * 任务之外的那一场（`task_id` 为空）恒为 `false`——没有任务可作废。
+   */
+  task_voided: boolean
   /**
    * 这一场自己的八维度分。`max_score` 是画图用的分母：各维度题数不等（10 或 15），
    * 不归一化会让 15 题的身体症状在图上凭空压过 10 题的孤独倾向。
@@ -945,9 +981,26 @@ export interface TaskCompletionItem {
   disposition_reason: string | null
 }
 
-export async function getAssessmentTasks(): Promise<AssessmentTaskItem[]> {
-  const data = await apiRequest<{ items: AssessmentTaskItem[] }>('/assessment-tasks')
+export async function getAssessmentTasks(status?: string): Promise<AssessmentTaskItem[]> {
+  const query = status ? `?status=${encodeURIComponent(status)}` : ''
+  const data = await apiRequest<{ items: AssessmentTaskItem[] }>(`/assessment-tasks${query}`)
   return data.items
+}
+
+export interface TaskDeleteCheck {
+  taskId: number; taskNo: string; taskName: string; source: string; status: string
+  deleteMode: 'HARD_DELETE' | 'VOID'; canHardDelete: boolean
+  targetCount: number; sessionCount: number; resultCount: number; importBatchCount: number
+  committedImportBatchCount: number; riskEventCount: number; pendingRiskEventCount: number
+  manualReviewCount: number; careCaseCount: number; warning: string
+}
+
+export function getTaskDeleteCheck(taskId: number): Promise<TaskDeleteCheck> {
+  return apiRequest<TaskDeleteCheck>(`/assessment-tasks/${taskId}/delete-check`)
+}
+
+export function deleteAssessmentTask(taskId: number, reason?: string): Promise<{ taskId: number; mode: string; status: string }> {
+  return apiRequest(`/assessment-tasks/${taskId}`, { method: 'DELETE', body: JSON.stringify({ reason }) })
 }
 
 export async function createAssessmentTask(payload: {

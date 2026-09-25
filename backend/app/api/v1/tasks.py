@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Body, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_role
@@ -12,6 +12,7 @@ from app.models.assessment import AssessmentTarget, AssessmentTask
 from app.models.enums import RoleCode
 from app.schemas.assessment import (
     CreateAssessmentTaskRequest,
+    DeleteAssessmentTaskRequest,
     MarkParticipationRequest,
     SupplementTargetsRequest,
     UpdateAssessmentTaskRequest,
@@ -45,6 +46,7 @@ from app.services.export_service import (
 )
 from app.services.task_service import (
     create_school_assessment_task,
+    delete_or_void_task,
     list_assessment_tasks,
     list_task_targets,
     mark_target_participation,
@@ -52,6 +54,7 @@ from app.services.task_service import (
     supplement_targets,
     task_completion,
     task_completion_csv,
+    task_delete_check,
     task_participation_counts,
     update_assessment_task,
 )
@@ -98,8 +101,51 @@ DetailExporter = Annotated[
 def tasks(
     current_user: Annotated[UserAccount, Depends(require_role(*TASK_READERS))],
     db: Annotated[Session, Depends(get_db)],
+    status: Annotated[str | None, Query()] = None,
 ):
-    return ok({"items": list_assessment_tasks(db, current_user)})
+    return ok({"items": list_assessment_tasks(db, current_user, status_filter=status)})
+
+
+@router.get("/assessment-tasks/{task_id}/delete-check")
+def delete_check(
+    task_id: int,
+    current_user: Annotated[UserAccount, Depends(require_role(RoleCode.COUNSELOR))],
+    db: Annotated[Session, Depends(get_db)],
+):
+    return ok(task_delete_check(db, current_user, task_id))
+
+
+@router.delete("/assessment-tasks/{task_id}")
+def delete_task(
+    task_id: int,
+    request: Request,
+    current_user: Annotated[UserAccount, Depends(require_role(RoleCode.COUNSELOR))],
+    db: Annotated[Session, Depends(get_db)],
+    payload: DeleteAssessmentTaskRequest = Body(default=DeleteAssessmentTaskRequest()),
+):
+    result = delete_or_void_task(db, current_user, task_id, reason=payload.reason)
+    # §4.10 点名的字段一个都不能少，而**任务名与来源此前一个都没有**：`detail` 里只有
+    # `任务={taskNo}`（那是编号），于是「被删掉的这场叫什么、是在线测评还是外部导入的」
+    # 在轨迹上答不出来——而这两样恰恰是事后核账时最先被问的（编号记不住，名字记得住；
+    # 外部导入的那一场还牵扯 §4.16 那条「批次与行不得物理删除」）。
+    #
+    # 审计行没有这两列，只有 `detail` 这一段自由文本（与全库一致），所以补在这里。
+    # `人工关怀是否已产生` 也从两个计数改成一句是/否再说数：判据是「有没有」，
+    # 而 `人工复核=0，关怀档案=0` 要读两遍才能得出「没产生过」。
+    write_audit(
+        db, action="删除测评任务" if result["mode"] == "HARD_DELETE" else "作废测评任务",
+        resource_type="ASSESSMENT_TASK", resource_id=str(task_id), actor=current_user,
+        request=request, detail=(
+            f"任务={result['taskNo']}（{result['taskName']}），来源={result['source']}，"
+            f"模式={result['mode']}，原因={payload.reason or '未产生正式事实'}，"
+            f"目标={result['targetCount']}，会话={result['sessionCount']}，结果={result['resultCount']}，"
+            f"导入批次={result['importBatchCount']}，筛查信号={result['riskEventCount']}，"
+            f"人工关怀={'已产生' if (result['manualReviewCount'] or result['careCaseCount']) else '未产生'}"
+            f"（人工复核={result['manualReviewCount']}，关怀档案={result['careCaseCount']}）"
+        ),
+    )
+    db.commit()
+    return ok({"taskId": task_id, "mode": result["mode"], "status": result["status"]})
 
 
 @router.post("/assessment-tasks")

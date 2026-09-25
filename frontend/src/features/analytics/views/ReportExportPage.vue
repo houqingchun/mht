@@ -6,17 +6,17 @@ import ReportPageHeader from '../components/ReportPageHeader.vue'
 import KpiCard from '../components/KpiCard.vue'
 import PrivacyNote from '../components/PrivacyNote.vue'
 import ErrorState from '../../../components/ErrorState.vue'
-import { getAnalyticsReport, type AnalyticsReport } from '../../../services/api'
-import { dimensionLabel } from '../../../services/labels'
+import { createProfessionalReport, exportProfessionalReport, getAnalyticsReport, publishProfessionalReport, saveProfessionalReport, type AnalyticsReport } from '../../../services/api'
 
 const report = ref<AnalyticsReport | null>(null)
 const loading = ref(false)
 const error = ref('')
 const sub = ref('interpretation')
-const exportFormat = ref('pdf')
 const status = ref('')
 const lastExportAt = ref('')
 const draft = ref(['', '', '', ''])
+const selectedTaskIds = ref<number[]>([])
+const reportId = ref<number | null>(null)
 const fields = ['整体情况说明', '重点维度解释', '样本覆盖及效度说明', '后续教育支持计划']
 
 async function loadReport(taskIds: number[]) {
@@ -26,38 +26,32 @@ async function loadReport(taskIds: number[]) {
   catch (err) { report.value = null; error.value = err instanceof Error ? err.message : '报表加载失败' }
   finally { loading.value = false }
 }
-function onQuery(f: { taskIds: number[] }) { if (f.taskIds.length) loadReport(f.taskIds) }
+function onQuery(f: { taskIds: number[] }) { selectedTaskIds.value = f.taskIds; reportId.value = null; draft.value = ['', '', '', '']; if (f.taskIds.length) loadReport(f.taskIds) }
 function reset() { report.value = null; error.value = ''; status.value = ''; lastExportAt.value = ''; sub.value = 'interpretation' }
 
-function save() {
-  try { localStorage.setItem('qingxin-report-draft', JSON.stringify(draft.value)); status.value = '已保存（浏览器本地草稿）' }
-  catch { status.value = '保存失败' }
+function content() { return { overall_summary:draft.value[0], dimension_interpretation:draft.value[1], sample_validity_note:draft.value[2], support_plan:draft.value[3] } }
+async function save() {
+  try {
+    const saved = reportId.value
+      ? await saveProfessionalReport(reportId.value, content())
+      : await createProfessionalReport({title: report.value?.task?.name + ' 专业分析报告', task_ids:selectedTaskIds.value, analysis_mode:'ALL_CALCULATED', ...content()})
+    reportId.value = saved.id; status.value = `草稿已保存至服务器（${saved.report_no}）`
+  } catch (e) { status.value = e instanceof Error ? e.message : '保存失败' }
 }
-try { const s = JSON.parse(localStorage.getItem('qingxin-report-draft') || '[]'); if (Array.isArray(s) && s.length === 4) draft.value = s } catch {}
-
-function cleanText(s: string) {
-  return String(s || '').replace(/[&<>"']/g, (c: string) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c] || c))
+async function publishReport() {
+  if (!reportId.value) await save()
+  if (!reportId.value) return
+  try { await publishProfessionalReport(reportId.value); status.value = '报告已发布，当前版本已锁定' } catch(e) { status.value=e instanceof Error?e.message:'发布失败' }
 }
-function exportReport() {
-  const now = new Date().toLocaleString('zh-CN', { hour12: false })
-  lastExportAt.value = now
-  if (exportFormat.value === 'pdf') { status.value = '已打开打印设置'; window.print(); return }
-  const dims = report.value?.dimensions?.map(d =>
-    `<tr><td>${cleanText(dimensionLabel(d.dimension_code))}</td><td>${d.high_score_count ?? '—'}</td><td>${d.high_score_rate !== null ? d.high_score_rate.toFixed(1)+'%' : '—'}</td></tr>`
-  ).join('') || ''
-  const paragraphs = draft.value.map((v, i) => `<h2>${fields[i]}</h2><p>${cleanText(v || '（未填写）')}</p>`).join('')
-  const taskName = report.value?.task?.name || '未选择任务'
-  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>心晴·心理测评聚合统计报告</title><style>body{font-family:system-ui,'Microsoft YaHei';padding:40px;max-width:980px;margin:auto;color:#163047}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ddd;padding:10px;text-align:left}h1{color:#0b3553}</style></head><body><h1>心理测评聚合统计报告</h1><p>任务：${cleanText(taskName)}｜范围：当前所选任务聚合分析</p><table><tr><th>维度</th><th>高分人数</th><th>高分比例</th></tr>${dims}</table>${paragraphs}<p>本报告基于系统内实际测评结果生成，不构成心理诊断。</p></body></html>`
-  const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a'); a.href = url; a.download = '心晴_心理测评聚合统计报告.html'; a.click()
-  setTimeout(() => URL.revokeObjectURL(url), 5000)
-  status.value = '已导出（本地生成，已记录到下方导出记录）'
+async function exportReport() {
+  if (!reportId.value) { status.value='请先保存报告'; return }
+  const purpose = window.prompt('请输入导出用途')?.trim(); if (!purpose) return
+  try { await exportProfessionalReport(reportId.value, purpose); lastExportAt.value=new Date().toLocaleString('zh-CN',{hour12:false}); status.value='正式报告已通过导出中心生成并下载' } catch(e) { status.value=e instanceof Error?e.message:'导出失败' }
 }
 </script>
 
 <template>
-  <ReportPageHeader title="专业解读与导出" description="在聚合统计基础上记录专业意见，并按授权范围生成报告。"/>
+  <ReportPageHeader description="在聚合统计基础上记录专业意见，并按授权范围生成报告。"/>
   <FilterBar @query="onQuery" @reset="reset"/>
 
   <ErrorState v-if="error" :message="error"/>
@@ -85,6 +79,7 @@ function exportReport() {
           </label>
           <div class="action-row">
             <button class="btn" @click="save">保存草稿</button>
+            <button class="btn" @click="publishReport">确认并发布</button>
             <button class="btn primary" @click="sub='export'">进入导出设置</button>
           </div>
           <p class="hint" role="status">{{ status }}</p>
@@ -106,9 +101,7 @@ function exportReport() {
         <section class="card">
           <h2 class="section-title">报表导出设置</h2>
           <div class="notice">导出范围：当前所选任务的聚合分析结果。</div>
-          <label class="field">文件格式
-            <select v-model="exportFormat"><option value="pdf">PDF（浏览器打印/另存）</option><option value="html">HTML报告</option></select>
-          </label>
+          <p class="field">文件格式：CSV（由服务端生成并纳入导出治理）</p>
           <label class="checkbox-line"><input type="checkbox" checked disabled/> 启用隐私保护（强制）</label>
           <div class="action-row"><button class="btn primary" @click="exportReport">生成报告</button></div>
           <p class="hint" role="status">{{ status }}</p>
@@ -120,7 +113,7 @@ function exportReport() {
               <tr><th>聚合统计报告</th><td>当前任务实际测评数据</td></tr>
               <tr><th>个人身份数据</th><td>不包含</td></tr>
               <tr><th>角色</th><td>心理老师</td></tr>
-              <tr><th>当前文件</th><td>{{ exportFormat === 'pdf' ? '浏览器打印/另存PDF' : '聚合HTML文件' }}</td></tr>
+              <tr><th>当前文件</th><td>受控导出 CSV</td></tr>
             </tbody>
           </table>
           <div class="notice">报告内容来自当前选定任务；导出文件不包含个人身份与个体答卷数据。</div>

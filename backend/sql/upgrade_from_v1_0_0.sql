@@ -2,10 +2,10 @@
 -- 心晴 · 数据库增量升级脚本
 --
 -- 从  V1.0.0（迁移 0012_drop_care_case_unique）
--- 到  V1.1.6（迁移 0020_total_excludes_validity）
+-- 到  V1.1.6（迁移 0022_professional_reports）
 --
 -- 由 deploy/build_migration_sql.py 生成，**不要手工编辑**：它的数据源是
--- 链上 8 条迁移各自的 PRECHECKS 常量与 alembic 的离线渲染。
+-- 链上 10 条迁移各自的 PRECHECKS 常量与 alembic 的离线渲染。
 -- 改了迁移就重跑一次 `make db-upgrade-sql`。
 -- ==============================================================================
 
@@ -15,9 +15,9 @@
 --       mysqldump -h HOST -u USER -p --default-character-set=utf8mb4 \
 --         --single-transaction DB > backup_$(date +%Y%m%d).sql
 --
---   第二步 · 把整个文件交给 mysql 执行。文件按迁移分成 8 条，每条都是
+--   第二步 · 把整个文件交给 mysql 执行。文件按迁移分成 10 条，每条都是
 --       「先【检查】、后【DDL】」两小段：
---             第 1 条 / 共 8 条：0013_xxx
+--             第 1 条 / 共 10 条：0013_xxx
 --               【检查】…   ← 每一条都必须返回 Empty set
 --               【DDL】…    ← 这条迁移真正动手的地方
 --       ★ 一定要**按这个次序**：后面的迁移会读前面刚加上去的列，
@@ -33,7 +33,7 @@
 --
 --   第三步 · 核对：
 --       SELECT version_num FROM alembic_version;
---       应当是 0020_total_excludes_validity
+--       应当是 0022_professional_reports
 --
 --   注意三件事：
 --   ① 这个文件是 UTF-8、含中文注释，**必须**带 --default-character-set=utf8mb4，
@@ -71,7 +71,7 @@ DELIMITER ;
 
 
 -- ==============================================================================
--- 第 1 条 / 共 8 条：0013_v12_expand
+-- 第 1 条 / 共 10 条：0013_v12_expand
 -- ==============================================================================
 
 -- 【检查】1 条。**每一条都必须返回 Empty set**。
@@ -646,7 +646,7 @@ UPDATE alembic_version SET version_num='0013_v12_expand' WHERE alembic_version.v
 
 
 -- ==============================================================================
--- 第 2 条 / 共 8 条：0014_v12_enforce
+-- 第 2 条 / 共 10 条：0014_v12_enforce
 -- ==============================================================================
 
 -- 【检查】12 条。**每一条都必须返回 Empty set**。
@@ -954,7 +954,7 @@ UPDATE alembic_version SET version_num='0014_v12_enforce' WHERE alembic_version.
 
 
 -- ==============================================================================
--- 第 3 条 / 共 8 条：0015_calc_status_backfill
+-- 第 3 条 / 共 10 条：0015_calc_status_backfill
 -- ==============================================================================
 
 -- 【检查】这一条迁移没有需要事先问一遍的数据形状，直接往下跑它的 DDL。
@@ -970,7 +970,7 @@ UPDATE alembic_version SET version_num='0015_calc_status_backfill' WHERE alembic
 
 
 -- ==============================================================================
--- 第 4 条 / 共 8 条：0016_import_batch_name
+-- 第 4 条 / 共 10 条：0016_import_batch_name
 -- ==============================================================================
 
 -- 【检查】这一条迁移没有需要事先问一遍的数据形状，直接往下跑它的 DDL。
@@ -986,7 +986,7 @@ UPDATE alembic_version SET version_num='0016_import_batch_name' WHERE alembic_ve
 
 
 -- ==============================================================================
--- 第 5 条 / 共 8 条：0017_json_null_normalize
+-- 第 5 条 / 共 10 条：0017_json_null_normalize
 -- ==============================================================================
 
 -- 【检查】这一条迁移没有需要事先问一遍的数据形状，直接往下跑它的 DDL。
@@ -1006,7 +1006,7 @@ UPDATE alembic_version SET version_num='0017_json_null_normalize' WHERE alembic_
 
 
 -- ==============================================================================
--- 第 6 条 / 共 8 条：0018_row_conflict_resolution
+-- 第 6 条 / 共 10 条：0018_row_conflict_resolution
 -- ==============================================================================
 
 -- 【检查】这一条迁移没有需要事先问一遍的数据形状，直接往下跑它的 DDL。
@@ -1022,7 +1022,7 @@ UPDATE alembic_version SET version_num='0018_row_conflict_resolution' WHERE alem
 
 
 -- ==============================================================================
--- 第 7 条 / 共 8 条：0019_total_includes_validity
+-- 第 7 条 / 共 10 条：0019_total_includes_validity
 -- ==============================================================================
 
 -- 【检查】这一条迁移没有需要事先问一遍的数据形状，直接往下跑它的 DDL。
@@ -1046,7 +1046,7 @@ UPDATE alembic_version SET version_num='0019_total_includes_validity' WHERE alem
 
 
 -- ==============================================================================
--- 第 8 条 / 共 8 条：0020_total_excludes_validity
+-- 第 8 条 / 共 10 条：0020_total_excludes_validity
 -- ==============================================================================
 
 -- 【检查】2 条。**每一条都必须返回 Empty set**。
@@ -1070,9 +1070,9 @@ CALL xlp_check_empty(@xlp_hits, '检查 [1/2] 未通过：见上面这条 SELECT
 -- 存在没有完整 100 道原始答案的 MHT 结果，无法准确重算
 -- 期望结果：0 行（Empty set）
 -- ------------------------------------------------------------------------------
-SELECT ar.id FROM assessment_result ar JOIN assessment_session ses ON ses.id = ar.session_id JOIN assessment_scale s ON s.id = ses.scale_id AND s.code = 'MHT' LEFT JOIN (SELECT session_id, COUNT(DISTINCT question_id) AS n            FROM assessment_answer GROUP BY session_id) a ON a.session_id = ar.session_id WHERE COALESCE(a.n, 0) <> 100 LIMIT 5;
+SELECT ar.id FROM assessment_result ar JOIN assessment_session ses ON ses.id = ar.session_id JOIN assessment_scale s ON s.id = ses.scale_id AND s.code = 'MHT' LEFT JOIN (SELECT session_id, COUNT(DISTINCT question_id) AS n            FROM assessment_answer GROUP BY session_id) a ON a.session_id = ar.session_id WHERE COALESCE(a.n, 0) NOT IN (0, 100) LIMIT 5;
 -- ↑ 这一条是给你看的；下面这一次 CALL 是给机器过的门（有行就当场中断）。
-SELECT EXISTS(SELECT ar.id FROM assessment_result ar JOIN assessment_session ses ON ses.id = ar.session_id JOIN assessment_scale s ON s.id = ses.scale_id AND s.code = 'MHT' LEFT JOIN (SELECT session_id, COUNT(DISTINCT question_id) AS n            FROM assessment_answer GROUP BY session_id) a ON a.session_id = ar.session_id WHERE COALESCE(a.n, 0) <> 100 LIMIT 5) INTO @xlp_hits;
+SELECT EXISTS(SELECT ar.id FROM assessment_result ar JOIN assessment_session ses ON ses.id = ar.session_id JOIN assessment_scale s ON s.id = ses.scale_id AND s.code = 'MHT' LEFT JOIN (SELECT session_id, COUNT(DISTINCT question_id) AS n            FROM assessment_answer GROUP BY session_id) a ON a.session_id = ar.session_id WHERE COALESCE(a.n, 0) NOT IN (0, 100) LIMIT 5) INTO @xlp_hits;
 CALL xlp_check_empty(@xlp_hits, '检查 [2/2] 未通过：见上面这条 SELECT 打出来的数据');
 
 -- 【DDL】这条迁移要执行的全部语句（由 alembic 离线渲染，一条不多、一条不少），
@@ -1102,9 +1102,97 @@ UPDATE alembic_version SET version_num='0020_total_excludes_validity' WHERE alem
 
 
 -- ==============================================================================
+-- 第 9 条 / 共 10 条：0021_v2_task_governance
+-- ==============================================================================
+
+-- 【检查】这一条迁移没有需要事先问一遍的数据形状，直接往下跑它的 DDL。
+
+-- 【DDL】这条迁移要执行的全部语句（由 alembic 离线渲染，一条不多、一条不少），
+-- 末尾那条 UPDATE 把 alembic_version 推到 0021_v2_task_governance。
+-- ------------------------------------------------------------------------------
+-- Running upgrade 0020_total_excludes_validity -> 0021_v2_task_governance
+
+ALTER TABLE assessment_task ADD COLUMN voided_at DATETIME;
+
+ALTER TABLE assessment_task ADD COLUMN voided_by INTEGER;
+
+ALTER TABLE assessment_task ADD COLUMN void_reason VARCHAR(500);
+
+ALTER TABLE assessment_task ADD CONSTRAINT assessment_task_fk_voided_by FOREIGN KEY(voided_by) REFERENCES user_account (id);
+
+ALTER TABLE risk_event ADD COLUMN voided_at DATETIME;
+
+ALTER TABLE risk_event ADD COLUMN voided_by INTEGER;
+
+ALTER TABLE risk_event ADD COLUMN void_reason VARCHAR(500);
+
+ALTER TABLE risk_event ADD CONSTRAINT risk_event_fk_voided_by FOREIGN KEY(voided_by) REFERENCES user_account (id);
+
+UPDATE alembic_version SET version_num='0021_v2_task_governance' WHERE alembic_version.version_num = '0020_total_excludes_validity';
+
+
+-- ==============================================================================
+-- 第 10 条 / 共 10 条：0022_professional_reports
+-- ==============================================================================
+
+-- 【检查】这一条迁移没有需要事先问一遍的数据形状，直接往下跑它的 DDL。
+
+-- 【DDL】这条迁移要执行的全部语句（由 alembic 离线渲染，一条不多、一条不少），
+-- 末尾那条 UPDATE 把 alembic_version 推到 0022_professional_reports。
+-- ------------------------------------------------------------------------------
+-- Running upgrade 0021_v2_task_governance -> 0022_professional_reports
+
+CREATE TABLE professional_report (
+    id INTEGER NOT NULL AUTO_INCREMENT, 
+    report_no VARCHAR(64) NOT NULL, 
+    school_id INTEGER NOT NULL, 
+    report_type VARCHAR(32) NOT NULL, 
+    title VARCHAR(255) NOT NULL, 
+    status VARCHAR(32) NOT NULL, 
+    task_scope_json JSON NOT NULL, 
+    analysis_mode VARCHAR(32) NOT NULL, 
+    statistics_snapshot_json JSON NOT NULL, 
+    current_version INTEGER NOT NULL, 
+    created_by INTEGER NOT NULL, 
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, 
+    updated_by INTEGER NOT NULL, 
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, 
+    published_by INTEGER, 
+    published_at DATETIME, 
+    PRIMARY KEY (id), 
+    CONSTRAINT professional_report_fk_school FOREIGN KEY(school_id) REFERENCES school (id), 
+    CONSTRAINT professional_report_fk_created_by FOREIGN KEY(created_by) REFERENCES user_account (id), 
+    CONSTRAINT professional_report_fk_updated_by FOREIGN KEY(updated_by) REFERENCES user_account (id), 
+    CONSTRAINT professional_report_fk_published_by FOREIGN KEY(published_by) REFERENCES user_account (id), 
+    CONSTRAINT uq_professional_report_no UNIQUE (report_no)
+);
+
+CREATE INDEX ix_professional_report_school_status ON professional_report (school_id, status);
+
+CREATE TABLE professional_report_version (
+    id INTEGER NOT NULL AUTO_INCREMENT, 
+    report_id INTEGER NOT NULL, 
+    version_no INTEGER NOT NULL, 
+    overall_summary TEXT NOT NULL, 
+    dimension_interpretation TEXT NOT NULL, 
+    sample_validity_note TEXT NOT NULL, 
+    support_plan TEXT NOT NULL, 
+    statistics_snapshot_json JSON NOT NULL, 
+    created_by INTEGER NOT NULL, 
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, 
+    PRIMARY KEY (id), 
+    CONSTRAINT professional_report_version_fk_report FOREIGN KEY(report_id) REFERENCES professional_report (id), 
+    CONSTRAINT professional_report_version_fk_created_by FOREIGN KEY(created_by) REFERENCES user_account (id), 
+    CONSTRAINT uq_professional_report_version UNIQUE (report_id, version_no)
+);
+
+UPDATE alembic_version SET version_num='0022_professional_reports' WHERE alembic_version.version_num = '0021_v2_task_governance';
+
+
+-- ==============================================================================
 -- 到这里就结束了。核对一句：
 --   SELECT version_num FROM alembic_version;
--- 应当是 0020_total_excludes_validity。
+-- 应当是 0022_professional_reports。
 --
 -- 程序文件那一侧照常走一键安装包（升级模式不会重跑 seed、不会重置管理员密码、
 -- 不会碰数据库里的数据，只更新程序文件并再跑一次迁移——那时这一步已经是空转的）。

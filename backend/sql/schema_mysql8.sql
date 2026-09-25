@@ -446,15 +446,20 @@ CREATE TABLE `assessment_task` (
   `created_at` datetime NOT NULL DEFAULT (now()),
   `updated_at` datetime NOT NULL DEFAULT (now()),
   `source` varchar(16) NOT NULL DEFAULT 'IN_SYSTEM',
+  `voided_at` datetime DEFAULT NULL,
+  `voided_by` int DEFAULT NULL,
+  `void_reason` varchar(500) DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `task_no` (`task_no`),
   UNIQUE KEY `uq_assessment_task_school_id` (`id`,`school_id`),
   KEY `scale_id` (`scale_id`),
   KEY `school_id` (`school_id`),
   KEY `created_by` (`created_by`),
+  KEY `assessment_task_fk_voided_by` (`voided_by`),
   CONSTRAINT `assessment_task_ibfk_1` FOREIGN KEY (`scale_id`) REFERENCES `assessment_scale` (`id`),
   CONSTRAINT `assessment_task_ibfk_2` FOREIGN KEY (`school_id`) REFERENCES `school` (`id`),
-  CONSTRAINT `assessment_task_ibfk_3` FOREIGN KEY (`created_by`) REFERENCES `user_account` (`id`)
+  CONSTRAINT `assessment_task_ibfk_3` FOREIGN KEY (`created_by`) REFERENCES `user_account` (`id`),
+  CONSTRAINT `assessment_task_fk_voided_by` FOREIGN KEY (`voided_by`) REFERENCES `user_account` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- 目标行：这一场要测谁。**发放时按创建者的数据范围固化成行**，所以：
@@ -750,14 +755,19 @@ CREATE TABLE `risk_event` (
   `signal_type` varchar(64) NOT NULL,
   `requires_manual_review` tinyint(1) NOT NULL DEFAULT '0',
   `rule_version` varchar(64) NOT NULL DEFAULT 'LEGACY_UNKNOWN',
+  `voided_at` datetime DEFAULT NULL,
+  `voided_by` int DEFAULT NULL,
+  `void_reason` varchar(500) DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_risk_event_session_trigger_rule` (`session_id`,`trigger_rule`,`rule_version`),
   KEY `student_id` (`student_id`),
   KEY `reviewed_by` (`reviewed_by`),
   KEY `ix_risk_event_status_created_at` (`status`,`created_at`),
+  KEY `risk_event_fk_voided_by` (`voided_by`),
   CONSTRAINT `risk_event_ibfk_1` FOREIGN KEY (`student_id`) REFERENCES `student` (`id`),
   CONSTRAINT `risk_event_ibfk_2` FOREIGN KEY (`session_id`) REFERENCES `assessment_session` (`id`),
-  CONSTRAINT `risk_event_ibfk_3` FOREIGN KEY (`reviewed_by`) REFERENCES `user_account` (`id`)
+  CONSTRAINT `risk_event_ibfk_3` FOREIGN KEY (`reviewed_by`) REFERENCES `user_account` (`id`),
+  CONSTRAINT `risk_event_fk_voided_by` FOREIGN KEY (`voided_by`) REFERENCES `user_account` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- 关怀档案。
@@ -1589,6 +1599,53 @@ CREATE TABLE `care_case_event` (
   CONSTRAINT `care_case_event_ibfk_3` FOREIGN KEY (`operator_id`) REFERENCES `user_account` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE `professional_report` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `report_no` varchar(64) NOT NULL,
+  `school_id` int NOT NULL,
+  `report_type` varchar(32) NOT NULL,
+  `title` varchar(255) NOT NULL,
+  `status` varchar(32) NOT NULL,
+  `task_scope_json` json NOT NULL,
+  `analysis_mode` varchar(32) NOT NULL,
+  `statistics_snapshot_json` json NOT NULL,
+  `current_version` int NOT NULL,
+  `created_by` int NOT NULL,
+  `created_at` datetime NOT NULL DEFAULT (now()),
+  `updated_by` int NOT NULL,
+  `updated_at` datetime NOT NULL DEFAULT (now()),
+  `published_by` int DEFAULT NULL,
+  `published_at` datetime DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_professional_report_no` (`report_no`),
+  KEY `ix_professional_report_school_status` (`school_id`,`status`),
+  KEY `professional_report_fk_created_by` (`created_by`),
+  KEY `professional_report_fk_updated_by` (`updated_by`),
+  KEY `professional_report_fk_published_by` (`published_by`),
+  CONSTRAINT `professional_report_fk_school` FOREIGN KEY (`school_id`) REFERENCES `school` (`id`),
+  CONSTRAINT `professional_report_fk_created_by` FOREIGN KEY (`created_by`) REFERENCES `user_account` (`id`),
+  CONSTRAINT `professional_report_fk_updated_by` FOREIGN KEY (`updated_by`) REFERENCES `user_account` (`id`),
+  CONSTRAINT `professional_report_fk_published_by` FOREIGN KEY (`published_by`) REFERENCES `user_account` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `professional_report_version` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `report_id` int NOT NULL,
+  `version_no` int NOT NULL,
+  `overall_summary` text NOT NULL,
+  `dimension_interpretation` text NOT NULL,
+  `sample_validity_note` text NOT NULL,
+  `support_plan` text NOT NULL,
+  `statistics_snapshot_json` json NOT NULL,
+  `created_by` int NOT NULL,
+  `created_at` datetime NOT NULL DEFAULT (now()),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_professional_report_version` (`report_id`,`version_no`),
+  KEY `professional_report_version_fk_created_by` (`created_by`),
+  CONSTRAINT `professional_report_version_fk_report` FOREIGN KEY (`report_id`) REFERENCES `professional_report` (`id`),
+  CONSTRAINT `professional_report_version_fk_created_by` FOREIGN KEY (`created_by`) REFERENCES `user_account` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 -- =============================================================================
 -- 环上的外键，以及老表指向新表的那些
 -- =============================================================================
@@ -1631,7 +1688,7 @@ ALTER TABLE `assessment_import_row`
   ADD CONSTRAINT `assessment_import_row_fk_external_record` FOREIGN KEY (`external_result_record_id`) REFERENCES `assessment_external_result` (`id`);
 
 
--- 34 张业务表到此为止（另有一张 Alembic 自己的 alembic_version，不由这里建）。
+-- 36 张业务表到此为止（另有一张 Alembic 自己的 alembic_version，不由这里建）。
 --
 -- 建完之后必须再跑一次：
 --   python -m app.db.ensure_schema      # 校对 + 补 alembic_version

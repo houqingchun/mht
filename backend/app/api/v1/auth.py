@@ -190,6 +190,15 @@ def me(current_user: Annotated[UserAccount, Depends(get_current_user)], db: Anno
     return ok(serialize_user(db, current_user))
 
 
+@router.get("/me/data-scope-summary")
+def my_data_scope_summary(
+    current_user: Annotated[UserAccount, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    from app.security.data_scope import data_scope_summary
+    return ok(data_scope_summary(db, current_user))
+
+
 @router.post("/change-password")
 def change_password(
     payload: ChangePasswordRequest,
@@ -485,4 +494,3 @@ def update_permissions(
     )
     db.commit()
     return ok({"items": permission_matrix(db)})
-

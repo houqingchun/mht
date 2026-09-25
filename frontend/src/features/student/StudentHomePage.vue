@@ -70,7 +70,7 @@ onMounted(load)
       <div>
         <div class="eyebrow">学生测评</div>
         <h1>我的测评任务</h1>
-        <p class="page-desc">请在安静环境中按真实感受作答。提交后答案将锁定，学生端不展示分数或风险标签。</p>
+        <p class="page-desc">请在安静环境中按真实感受作答。提交后答案将锁定，学生端不展示分数或关注等级。</p>
       </div>
       <div class="actions">
         <button class="btn" @click="showPrivacy = true">隐私说明</button>

@@ -391,7 +391,7 @@ export function useDataImport() {
       if (result.withdrawn_risk_events) {
         // 「收回」要说出来：它会从工作台的待办里消失，而老师可能刚刚还在看那一条。
         // 措辞里必须带「还没人处理过」——被复核过的那几条不动（那是工作记录）。
-        parts.push(`收回尚未处理的风险提示 ${result.withdrawn_risk_events} 条`)
+        parts.push(`收回尚未处理的筛查信号 ${result.withdrawn_risk_events} 条`)
       }
       if (result.task_no) parts.push(`已建任务 ${result.task_no}`)
       // 全部放弃不是错误（用户选了放弃，事情就办完了），但也不该报成一次「导入成功」

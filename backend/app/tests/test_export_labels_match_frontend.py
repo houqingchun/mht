@@ -1,12 +1,17 @@
 """导出用的中文映射必须与 `labels.ts` 逐字一致。
 
-`services/export_labels.py` 是 `frontend/src/services/labels.ts` 里九张表的一份镜像，
-存在的唯一理由是导出的 CSV 由后端生成，而后端读不到 .ts。镜像就会漂移，所以这里直接
-把那份 TypeScript **当作数据源读进来**比对，而不是在测试里再抄一遍中文——抄一遍的话，
-三处中文（labels.ts / export_labels.py / 这个测试）就有三种改错的方式，而测试只认自己
-那一份，改起来还会一起变绿。
+`services/export_labels.py` 是 `frontend/src/services/labels.ts` 里那十二张**会进导出文件**的表
+的一份镜像，存在的唯一理由是导出的 CSV 由后端生成，而后端读不到 .ts。镜像就会漂移，所以
+这里直接把那份 TypeScript **当作数据源读进来**比对，而不是在测试里再抄一遍中文——抄一遍
+的话，三处中文（labels.ts / export_labels.py / 这个测试）就有三种改错的方式，而测试只认
+自己那一份，改起来还会一起变绿。
 
 改中文的正确做法是同时改两边；只改一边，这里就红。
+
+**「会进导出文件的才镜像」**：`labels.ts` 里那四十多张表大部分只有界面读者，加进来只会
+让每一次改中文都要多看一处。判据是「有没有一条 CSV 列读它」——所以新增一张表之前先回答
+那一句话（`IMPORT_CONFLICT_LABELS` / `CALCULATION_STATUS_LABELS` 那几张就不在这里，
+它们只渲染在弹层里）。
 """
 
 from __future__ import annotations
@@ -18,7 +23,8 @@ import pytest
 
 from app.services import export_labels
 
-LABELS_TS = Path(__file__).resolve().parents[3] / "frontend" / "src" / "services" / "labels.ts"
+FRONTEND_SRC = Path(__file__).resolve().parents[3] / "frontend" / "src"
+LABELS_TS = FRONTEND_SRC / "services" / "labels.ts"
 
 # (后端 map, labels.ts 里的 map 名)。`labels.ts` 把档案阶段那张叫 STATUS_LABELS，
 # 后端这边加上 CASE_ 前缀，因为同一个模块里还要放任务目标的状态。
@@ -32,6 +38,9 @@ MIRRORED_MAPS = [
     (export_labels.PARTICIPATION_LABELS, "PARTICIPATION_DISPOSITION_LABELS"),
     (export_labels.MATCH_STATUS_LABELS, "MATCH_STATUS_LABELS"),
     (export_labels.UNMATCHED_REASON_LABELS, "UNMATCHED_REASON_LABELS"),
+    (export_labels.REPORT_STATUS_LABELS, "REPORT_STATUS_LABELS"),
+    (export_labels.DIMENSION_LABELS, "DIMENSION_LABELS"),
+    (export_labels.SCORE_DISTRIBUTION_LABELS, "SCORE_DISTRIBUTION_LABELS"),
 ]
 
 
@@ -103,6 +112,32 @@ def test_unassessed_label_matches_labels_ts():
     所以直接断言这个词在 labels.ts 里以同样的字面量存在。
     """
     assert f"'{export_labels.UNASSESSED_LABEL}'" in frontend_labels_ts()
+
+
+def test_small_cohort_label_matches_the_frontend():
+    """「样本过小」**不在 `labels.ts` 里**，所以它守不了上面那条办法。
+
+    §11：分母小于 `MIN_COHORT_FOR_AGGREGATE` 时不下发比率与均值（`_report_rate` 返回
+    `None`），而界面上那句话是**直接写在视图里的字面量**（`LeaderOverviewPage.vue` /
+    `ScoreBandBars.vue` / `ClassComparisonPanel.vue`）——`labels.ts` 里没有它，后端也没有
+    任何常量。导出文件里要写同一句话，就只能到前端**源码树**里找这四个字。
+
+    判据写成「至少有一个文件里有」而不是点名某个文件：那几个渲染点会随页面重构搬家，
+    而这句话本身不该变。**空转自检不能省**——路径写错而一个文件都没扫到时，下面的
+    `any` 与「文案真的没同步」长得一模一样，所以先断言真的扫到了东西。
+    """
+    assert FRONTEND_SRC.exists(), f"读不到 {FRONTEND_SRC}"
+    sources = [p for p in FRONTEND_SRC.rglob("*") if p.suffix in {".vue", ".ts"}]
+    assert len(sources) > 20, f"只扫到 {len(sources)} 个前端源文件，这个路径大概是错的"
+    hits = [
+        p
+        for p in sources
+        if f"'{export_labels.SMALL_COHORT_LABEL}'" in p.read_text(encoding="utf-8")
+    ]
+    assert hits, (
+        f"前端源码里找不到 '{export_labels.SMALL_COHORT_LABEL}'"
+        "——导出文件与界面说的不是同一句话（改文案要两边一起改）"
+    )
 
 
 def test_unknown_code_falls_back_to_the_code_itself():

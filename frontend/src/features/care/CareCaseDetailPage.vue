@@ -14,6 +14,8 @@ import { showToast } from '../../services/toast'
 import { useSettings } from '../../composables/useSettings'
 import { daysFromNow, formatDuration, today } from '../../services/dates'
 import {
+  VOIDED_SITTING_LABEL,
+  VOIDED_TASK_SOURCE_NOTE,
   ageLabel,
   calculationStatusLabel,
   calculationStatusTone,
@@ -150,6 +152,16 @@ const latestDuration = computed(() => {
   return recorded[recorded.length - 1].duration_seconds
 })
 
+/**
+ * 历次场次里有几场所属的筛查任务已经作废（V2.0.0 §4.15 / §4.6）。
+ *
+ * 与「学生测评记录」页那一处同一个数、同一个理由：**作废的场次照旧留在 `history` 里**
+ * （`care_service` 那一段刻意的「不加 `effective_session_predicate()`」，CLAUDE.md §27），
+ * 这里只决定要不要把「它不参与当前判断」这句话说出来。零时整句不出现——没有作废场次
+ * 却说「上面有 0 场已作废」，那是关于数据的一句错话（§14）。
+ */
+const voidedCount = computed(() => (detail.value?.history || []).filter(h => h.task_voided).length)
+
 async function load() {
   loading.value = true
   error.value = ''
@@ -234,7 +246,7 @@ async function saveReview() {
   if (!detail.value) return
   const risk = detail.value.risk_events.find((item) => item.status === 'PENDING') || detail.value.risk_events[0]
   if (!risk) {
-    showToast('error', '没有可复核的风险事件')
+    showToast('error', '没有可复核的筛查信号')
     return
   }
 
@@ -716,6 +728,18 @@ onMounted(loadComparison)
           <div v-if="detail.history.length < 2" class="notice" style="margin-top:12px">
             这名学生只有一次测评记录，还看不出变化。要看他当前相对于同龄人的位置，
             请打开<b>班级对照</b>页签——那一页不需要历史数据。
+          </div>
+          <!-- 作废那一档的说明（V2.0.0 §4.15 / §4.6）。**两条线都不删掉那一场**：
+               图表照旧画出它的点，只是把「它不参与当前判断」说出来。理由与
+               `care_service` 那段刻意的「不加 `effective_session_predicate()`」逐字同源
+               ——降级/作废说的是「现在以哪一份为准」，不是「那一次不算测评」。
+               两句措辞都取自 `labels.ts`，视图里不另抄一份（§3）。 -->
+          <div v-if="voidedCount > 0" class="notice" style="margin-top:12px">
+            上面有 <b>{{ voidedCount }}</b> 场所属的筛查任务已作废（{{
+              VOIDED_TASK_SOURCE_NOTE
+            }}）。它们仍然画在图上——那几场是他真实考过的，答案、用时、当天的分都还在
+            ——但这几场<b>{{ VOIDED_SITTING_LABEL }}</b>：不要把它们的分数当成他现在
+            怎么样的依据，也不要据此比较变化。
           </div>
           <div class="notice" style="margin-top:12px">
             趋势只描述历次分值变化，不构成诊断或疗效结论。

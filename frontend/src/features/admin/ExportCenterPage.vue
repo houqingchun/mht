@@ -209,7 +209,7 @@ onMounted(load)
         :rows="jobs"
         row-key="id"
         :page-size="20"
-        empty-text="还没有导出记录。在重点学生、工作台或测评任务里点导出，这里就会出现一条。"
+        empty-text="还没有导出记录。在重点关注学生、工作台或测评任务里点导出，这里就会出现一条。"
       >
         <template #export_type="{ row }">{{ exportTypeLabel(row.export_type) }}</template>
 

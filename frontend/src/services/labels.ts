@@ -111,10 +111,25 @@ export const TASK_STATUS_LABELS: Record<string, string> = {
   NOT_STARTED: '未开始',
   ACTIVE: '进行中',
   PAUSED: '已暂停',
-  CLOSED: '已结束'
+  CLOSED: '已结束',
+  VOIDED: '已作废'
 }
 
 export const TASK_STATUS_ORDER: readonly string[] = Object.keys(TASK_STATUS_LABELS)
+
+/**
+ * 「这一场来源的筛查任务已作废」在**历次记录**里的两句措辞（V2.0.0 §4.15 / §4.6）。
+ *
+ * 它们不在上面那张表里，因为上面那张是**状态码 → 中文**的映射（后端发一个码、界面翻一个
+ * 词），而这两句是一段完整的说明：`VOIDED` 那一格仍然取 `TASK_STATUS_LABELS.VOIDED`
+ * （「已作废」），这两句说的是**它在这一屏上的含义**——「已作废」两个字单独摆在一列里，
+ * 读的人会以为那是一条待办的状态，而这一场分真正要说明的是「别拿它当现在的依据」。
+ *
+ * 放在 `labels.ts` 而不是视图里，理由与全站其余文案同源（§3）：视图里不写中文，
+ * 否则同一句话在历次记录、趋势页、导出文件里会各写一份，改一处漏一处。
+ */
+export const VOIDED_SITTING_LABEL = '已作废，不参与当前判断'
+export const VOIDED_TASK_SOURCE_NOTE = '来源测评任务已作废'
 
 // 键序 = 一个版本的发布流程（草稿 → 已发布 → 已归档），`SCALE_STATUS_ORDER` 取它。
 export const SCALE_STATUS_LABELS: Record<string, string> = {
@@ -585,10 +600,19 @@ export const ROSTER_CONFLICT_LABELS: Record<string, string> = {
   STUDENT_NO_EXISTS: '学号已在名册上'
 }
 
-/** 风险事件状态 —— 后端 RiskEvent.status。 */
+/**
+ * 筛查信号（`RiskEvent`）状态 —— 后端 `RiskEvent.status`。
+ *
+ * 三个码里 `VOIDED` 是 V2.0.0 加上的（任务作废时把还没人处理的那些一起作废，
+ * §4.5）：它**不是**「已复核」——复核是有人看过并作了判断，作废是这一场测评本身
+ * 不成立了，两者对读者要做的事完全不同（一个是「这条已经处理过了」，
+ * 一个是「这条不用处理了」）。所以它有自己的措辞与自己的色带，
+ * 不能落进 `riskEventStatusTone` 的 else 里被读成绿色。
+ */
 export const RISK_EVENT_STATUS_LABELS: Record<string, string> = {
   PENDING: '待复核',
-  REVIEWED: '已复核'
+  REVIEWED: '已复核',
+  VOIDED: '已作废'
 }
 
 /** 跟进记录状态 —— 后端 FollowUpRecord.status。 */
@@ -660,11 +684,11 @@ export const AUTH_SESSION_STATUS_LABELS: Record<string, string> = {
 /**
  * 导出作业的**类型** —— 后端 `export_service.EXPORT_TYPE_*`。
  *
- * 七种取值全部可达，住在三个路由模块里：`audit.py` 三档（关注档案摘要 / 高度关注
+ * 八种取值全部可达，住在四个路由模块里：`audit.py` 三档（关注档案摘要 / 高度关注
  * 摘要 / 个案档案）、`tasks.py` 三档（任务完成明细 / 未参与名单 / 未匹配行清单）、
- * 以及 `analytics.py` 的效度复测名单（2026-09-24 加）。它与文件的列清单是两件事：
- * 同一份「关注档案摘要」按遮蔽等级不同列是一样的，而「任务完成统计」与「未参与名单」
- * 是同一场任务的两份不同文件。
+ * `analytics.py` 的效度复测名单（2026-09-24 加）、以及 `reporting.py` 的专业分析报告
+ * （V2.0.0 §8 加）。它与文件的列清单是两件事：同一份「关注档案摘要」按遮蔽等级不同
+ * 列是一样的，而「任务完成统计」与「未参与名单」是同一场任务的两份不同文件。
  *
  * **没有 `*_ORDER`**：导出中心那一列不做排序（有用的是状态与时间，见下）。
  */
@@ -675,7 +699,28 @@ export const EXPORT_TYPE_LABELS: Record<string, string> = {
   TASK_COMPLETION: '任务完成明细',
   NON_PARTICIPANTS: '未参与名单',
   UNMATCHED_IMPORT_ROWS: '未匹配行清单',
-  VALIDITY_RETEST: '效度复测名单'
+  VALIDITY_RETEST: '效度复测名单',
+  PROFESSIONAL_REPORT: '专业分析报告'
+}
+
+/**
+ * 专业分析报告的**状态** —— 后端 `reporting_service` 的 `report.status`。
+ *
+ * 三档说的是「这份报告现在能不能被改」：草稿能改，已发布锁死（`save_draft` 回 409，
+ * 要改先建新版本），已归档是历史留档。
+ *
+ * **没有 `*_ORDER`**：报告列表是普通 `<table>`，没有 `Column.order` 的读者
+ * （§3 第四面）。键序仍按生命周期写（草稿 → 已发布 → 已归档），哪一天那一列可排序
+ * 了照它加 `REPORT_STATUS_ORDER` 即可。
+ *
+ * 这张表**同时是导出文件里那一格的来源**（`services/export_labels.py` 有一份逐字
+ * 镜像，`test_export_labels_match_frontend.py` 两边比对）：CSV 里原来印的是
+ * `DRAFT` / `PUBLISHED` 原文，那是 §3 第三面漏了很久的一处。
+ */
+export const REPORT_STATUS_LABELS: Record<string, string> = {
+  DRAFT: '草稿',
+  PUBLISHED: '已发布',
+  ARCHIVED: '已归档'
 }
 
 /**
@@ -842,7 +887,9 @@ export function riskEventStatusLabel(code: string | null | undefined) {
 }
 
 export function riskEventStatusTone(code: string | null | undefined): Tone {
-  return code === 'PENDING' ? 'amber' : 'green'
+  if (code === 'PENDING') return 'amber'
+  if (code === 'VOIDED') return 'gray'
+  return 'green'
 }
 
 export function followUpStatusLabel(code: string | null | undefined) {
@@ -887,6 +934,20 @@ export function participationTone(code: string | null | undefined): Tone {
 
 export function exportTypeLabel(code: string | null | undefined) {
   return labelOf(EXPORT_TYPE_LABELS, code)
+}
+
+export function reportStatusLabel(code: string | null | undefined) {
+  return labelOf(REPORT_STATUS_LABELS, code)
+}
+
+/**
+ * 草稿给琥珀色（还没定稿，等着有人来改），已发布给绿色（已生效、且已锁死），
+ * 已归档给灰色（历史留档，不是出事了）。
+ */
+export function reportStatusTone(code: string | null | undefined): Tone {
+  if (code === 'PUBLISHED') return 'green'
+  if (code === 'DRAFT') return 'amber'
+  return 'gray'
 }
 
 export function maskLevelLabel(code: string | null | undefined) {

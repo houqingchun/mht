@@ -28,6 +28,7 @@ from app.models.assessment import AssessmentAnswer, AssessmentSession, Assessmen
 from app.models.audit import AuditLog
 from app.models.care import StudentCareCase
 from app.models.organization import ClassGroup, Grade, Student
+from app.models.reporting import ProfessionalReport, ProfessionalReportVersion
 from app.models.scale import AssessmentScale, ScaleQuestion, ScaleRule
 from app.scale_engine.engine import DEFAULT_RULE_CONFIG, rule_config_to_json
 from app.services.scale_rule_service import MHT_RULE_VERSION
@@ -238,6 +239,58 @@ def test_purge_is_repeatable(db_session):
         _count(db_session, ScaleRule),
     )
     assert before == after == (1, 4, 4, 1, 1, 1)
+
+
+def test_purge_drops_the_reports_the_demo_accounts_created(db_session):
+    """P1 的专业报告跟着演示账号一起清，基线账号自己建的那一份要留着。
+
+    **两个方向都得断**：只断「演示那份没了」的话，一个「把整张表清空」的实现照样绿，
+    而那一句会把真实操作员写过的报告一起删掉——`purge_demo_data` 的承诺是
+    「回到只有 `seed.py` 基线的状态」，不是「这张表清空」。守这条的是后半段：那份
+    基线报告在清理之后**还在**，且它的版本行也还在（版本行没有 user 列，只能跟着
+    报告走，删错方向就是 1451）。
+
+    它此前漏了，而 `ExportJob` 就在同一段代码的旁边（同一个「不是测评数据、但是
+    账号的子行」的形状）：e2e 那条报告用例每跑一次建一份报告、从不回收，
+    于是共享演示库上这一行单调增长。
+    """
+    seed_demo_data(db_session)
+    school_id = db_session.scalar(select(Student.school_id))
+    admin_id = db_session.scalar(select(UserAccount.id).where(UserAccount.account == "admin"))
+    demo_id = db_session.scalar(select(UserAccount.id).where(UserAccount.account == "S002"))
+
+    def add_report(number: str, owner_id: int) -> ProfessionalReport:
+        report = ProfessionalReport(
+            report_no=number,
+            school_id=school_id,
+            title=f"清理守卫 {number}",
+            task_scope_json={"task_ids": []},
+            statistics_snapshot_json={"overview": {}},
+            created_by=owner_id,
+            updated_by=owner_id,
+        )
+        db_session.add(report)
+        db_session.flush()
+        db_session.add(
+            ProfessionalReportVersion(
+                report_id=report.id,
+                version_no=1,
+                statistics_snapshot_json={"overview": {}},
+                created_by=owner_id,
+            )
+        )
+        db_session.flush()
+        return report
+
+    add_report("RPT-DEMO-1", demo_id)
+    kept = add_report("RPT-BASE-1", admin_id)
+
+    purge_demo_data(db_session)
+
+    assert _count(db_session, ProfessionalReport) == 1, "演示账号建的报告该走，基线账号建的那份该留"
+    assert db_session.scalar(select(ProfessionalReport.report_no)) == "RPT-BASE-1"
+    assert _count(db_session, ProfessionalReportVersion) == 1, "版本行要跟着它自己的报告走"
+    assert db_session.scalar(select(ProfessionalReportVersion.report_id)) == kept.id
 
 
 def test_reset_clears_assessment_data_but_keeps_the_roster(db_session):

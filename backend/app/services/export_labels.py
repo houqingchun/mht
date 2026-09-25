@@ -2,7 +2,7 @@
 
 `frontend/src/services/labels.ts` 是前端展示的唯一映射层（CLAUDE.md §3），但导出是后端
 拼出来的文件——后端 import 不了一个 .ts，而这份 CSV 的读者是拿到文件的学校，不是浏览器。
-所以这里是那四张表的一份镜像，逐字相同，并由
+所以这里是那些**会进导出文件**的表的一份镜像，逐字相同，并由
 `tests/test_export_labels_match_frontend.py` 两边比对：只改 `labels.ts` 的中文而不同步
 这里，测试就变红。
 
@@ -11,8 +11,17 @@
 导出漏翻译了很久：界面上写着「重点关注」，同一份数据导出成 CSV 就是 `KEY_ATTENTION`，
 因为没有任何一条测试看得见文件里写了什么。
 
-九张表与九个函数都照着 `labels.ts` 的同名函数写，**包括缺值时的表现**：
+十二张表与十二个函数都照着 `labels.ts` 的同名函数写，**包括缺值时的表现**：
 性别缺失是 `—`、未测评为 `未测评`（`levelLabel` 的既有约定），不是空单元格。
+
+**这是一个会长的东西**：每多一个会进导出文件的枚举码，这里就要多一张表、`labels.ts`
+要多一张、`test_export_labels_match_frontend.py` 的 `MIRRORED_MAPS` 要多一行。
+漏掉任何一处都不会报错（§3 第三面），所以加码时按这三处一起数一遍。
+
+**下面每一张表上方的「第 N 张」只是一个位置，不是身份**——`STUDENT_STATUS_LABELS`
+（2026-09-24）插在第二的位置之后，那之后每一张的序号都整体后移了，而当时没有任何东西
+发现（`REPORT_STATUS_LABELS` 的注释就因此错了一个版本）。认一张表靠它上方的**常量名**；
+序号只用来读「它大概什么时候进来的」。
 
 第五张表（`SOURCE_LABELS`，测评来源）是 2026-09-16 加「外部导入」时补的：受控导出取的是
 每个学生**最新**的那场会话，学校导入一份外部普查结果之后，导出的关注等级与用时可能就
@@ -119,8 +128,72 @@ UNMATCHED_REASON_LABELS: dict[str, str] = {
     "MATCHED": "已匹配但被放弃",
 }
 
+# 与 labels.ts 的 REPORT_STATUS_LABELS 逐字一致——第十张表，随 V2.0.0 §8 的专业报告
+# 导出（`reporting_service.report_document`）一起来。
+#
+# 这里原本写着「第九张」。它**写下时是对的**，2026-09-24 插进 `STUDENT_STATUS_LABELS`
+# （效度复测名单导出）之后才变成错的——**这个序号是位置，插一张表就会整体后移**，
+# 而它不会被任何东西发现。所以下面每一张的序号都只是「写这一段时的位置」，不是身份；
+# 认一张表靠它上方的常量名，不靠序号。
+#
+# 它是这一层**最晚被发现**的一处漏码，而漏了整整一个版本：那一份 CSV 里写着
+# `writer.writerow(["状态", report.status])`，于是界面上写着「已发布」的报告，
+# 导出成文件就是 `PUBLISHED`。这与 `SOURCE_LABELS` / `PARTICIPATION_LABELS` 那两次
+# 是同一个形状（§3 第三面：前两面都只覆盖界面，谁也看不见文件里写了什么），
+# 区别是这一次它同时还有第二个洞——那一列当时连 `export_labels` 都没 import。
+REPORT_STATUS_LABELS: dict[str, str] = {
+    "DRAFT": "草稿",
+    "PUBLISHED": "已发布",
+    "ARCHIVED": "已归档",
+}
+
+# 与 labels.ts 的 DIMENSION_LABELS 逐字一致——第十一张表。
+#
+# 同一批 export 里补的：§7.3 要求快照进文件，而快照的 `dimensions[].dimension_code`
+# 是 `LEARNING_ANXIETY` 这类**英文编码**（CLAUDE.md §3：维度是英文编码，不是 A–H 单字母）。
+# 不翻译的话，一份给学校看的报告里会印出八个编码。
+#
+# **这是仓库里第二份「维度编码 → 中文」**，第一份是
+# `assessment_import_service.DIMENSION_BY_LABEL`（中文 → 编码，方向相反，由
+# `test_assessment_import_api.py::test_the_dimension_labels_are_a_mirror_of_the_frontend`
+# 守着）。两份各自被各自的守卫钉在 `labels.ts` 上，所以它们不会各说各话；**别把它们
+# 合并成一个双向字典**——那会让其中一侧的守卫失去靶子。
+DIMENSION_LABELS: dict[str, str] = {
+    "LEARNING_ANXIETY": "学习焦虑",
+    "INTERPERSONAL_ANXIETY": "对人焦虑",
+    "LONELINESS": "孤独倾向",
+    "SELF_BLAME": "自责倾向",
+    "SENSITIVITY": "过敏倾向",
+    "PHYSICAL_SYMPTOMS": "身体症状",
+    "PHOBIC_TENDENCY": "恐怖倾向",
+    "IMPULSIVE_TENDENCY": "冲动倾向",
+}
+
+# 与 labels.ts 的 SCORE_DISTRIBUTION_LABELS 逐字一致——第十二张表。
+#
+# 与 `LEVEL_LABELS`（关注等级）是**两个轴**：那是「这个学生整体是什么状态」，这是
+# 「这一份统计里，落在各分数段的人各有多少」。导出文件里那一行《维度分布》两者都不出现，
+# 出现的是「低分区间 / 中分区间 / 高分区间」这三档——而它们同样是编码（`LOW` / `MEDIUM`
+# / `HIGH`）。
+SCORE_DISTRIBUTION_LABELS: dict[str, str] = {
+    "LOW": "低分区间",
+    "MEDIUM": "中分区间",
+    "HIGH": "高分区间",
+}
+
 # 与 labels.ts 里 levelLabel 的兜底一致：没有测评结果不等于"测出来什么都没有"。
 UNASSESSED_LABEL = "未测评"
+
+# 「样本过小」——**它不在 `labels.ts` 里**，是一句直接写在视图里的字面量
+# （`LeaderOverviewPage.vue` / `ScoreBandBars.vue` / `ClassComparisonPanel.vue`）。
+# 后端那一侧同样没有常量：`_report_rate` 只是**返回 `None`**（§11：分母小于
+# `MIN_COHORT_FOR_AGGREGATE` 时不下发比率与均值）。
+#
+# 导出文件里 `None` 不能写成空白：那一格与「一个都没有」（`0`）在两处都必须长得不一样，
+# 而一份没有解释的空单元格读起来像「这份文件漏了一格」。所以这里给它一个常量，
+# 由 `test_small_cohort_label_matches_the_frontend` 在前端**源码树**里找这四个字
+# （不是 `labels.ts`——它不在那儿）。
+SMALL_COHORT_LABEL = "样本过小"
 
 MISSING_LABEL = "—"
 
@@ -173,3 +246,18 @@ def match_status_label(code: str | None) -> str:
 def unmatched_reason_label(code: str | None) -> str:
     """未匹配行清单上的读法——`MATCHED` 在这一屏读成「已匹配但被放弃」（见上）。"""
     return label_of(UNMATCHED_REASON_LABELS, code)
+
+
+def report_status_label(code: str | None) -> str:
+    """专业分析报告的状态（草稿 / 已发布 / 已归档）。"""
+    return label_of(REPORT_STATUS_LABELS, code)
+
+
+def dimension_label(code: str | None) -> str:
+    """MHT 八维度（学习焦虑 / 对人焦虑 / …）——`scale_engine.dimension_for_question` 的那八个码。"""
+    return label_of(DIMENSION_LABELS, code)
+
+
+def score_distribution_label(code: str | None) -> str:
+    """维度得分分布区间（低分区间 / 中分区间 / 高分区间）。"""
+    return label_of(SCORE_DISTRIBUTION_LABELS, code)

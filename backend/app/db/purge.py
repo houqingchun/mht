@@ -66,6 +66,7 @@ from app.models.importing import (
     StudentRosterImportRow,
 )
 from app.models.organization import ClassGroup, Grade, Student
+from app.models.reporting import ProfessionalReport, ProfessionalReportVersion
 from app.models.scale import AssessmentScale, ScaleQuestion, ScaleRule
 from app.scale_engine.engine import DEFAULT_RULE_CONFIG, rule_config_from_json, rule_config_to_json
 from app.services.scale_rule_service import MHT_RULE_VERSION, RULE_TYPE
@@ -222,6 +223,26 @@ def purge_demo_data(db: Session) -> dict:
     )
     deleted[ExportJob.__tablename__] = _delete_where(
         db, ExportJob, ExportJob.requested_by.in_(demo_account_ids)
+    )
+    # P1 的专业报告与它们的版本行，同一个口径（只清演示账号名下的），
+    # 也是同一个理由：`professional_report.created_by` / `updated_by` 都是 NOT NULL，
+    # 没有可以置空的地方，所以必须排在账号行之前。
+    #
+    # 版本行按 `report_id` 挂在报告行下、**没有 user 列**，所以它只能跟着报告走：
+    # 先把「演示账号建的那几份报告」的 id 选出来，再删它们的版本。反过来删的后果
+    # 不是报错——MySQL 会以 1451 拒绝删那份报告，而报出来的是一句英文约束名。
+    #
+    # 它此前漏了，而 `ExportJob` 就在旁边：e2e 那条报告用例每跑一次就建一份报告
+    # （建 → 保存 → 导出 → 发布，从不回收），于是共享演示库上这一行单调增长，
+    # 而 `make purge-demo` 说是「回到只有 seed.py 基线的状态」。
+    demo_report_ids = select(ProfessionalReport.id).where(
+        ProfessionalReport.created_by.in_(demo_account_ids)
+    )
+    deleted[ProfessionalReportVersion.__tablename__] = _delete_where(
+        db, ProfessionalReportVersion, ProfessionalReportVersion.report_id.in_(demo_report_ids)
+    )
+    deleted[ProfessionalReport.__tablename__] = _delete_where(
+        db, ProfessionalReport, ProfessionalReport.created_by.in_(demo_account_ids)
     )
     # user_scope next: it points at the account, the student, the class and the
     # grade, so it is the child of all four.

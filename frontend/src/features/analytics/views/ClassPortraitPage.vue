@@ -96,7 +96,7 @@ function reset() {
 </script>
 
 <template>
-  <ReportPageHeader title="班级维度画像" description="查看班级样本质量、维度画像及与所属年级的对比。"/>
+  <ReportPageHeader description="查看班级样本质量、维度画像及与所属年级的对比。"/>
   <FilterBar show-grade show-class show-metric :grade-options="gradeOptions" :class-options="classOptions" @query="onQuery" @reset="reset"/>
 
   <ErrorState v-if="error" :message="error"/>

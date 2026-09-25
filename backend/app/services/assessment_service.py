@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -17,6 +17,9 @@ from app.models.assessment import (
     # 「这一场算不算数」的唯一定义（§18.8）。定义在模型层，因为 `task_service`
     # 也要用它，而本模块反过来依赖着 `task_service`——反向 import 会成环。
     effective_session_predicate,
+    # 「这场任务还算不算数」的同族定义（§4.12）：作废的那些不算。同样住在模型层，
+    # 理由同上——`analytics_service` / `task_service` / `care_service` 都在用它。
+    active_task_predicate,
 )
 from app.models.care import StudentCareCase
 from app.models.enums import RoleCode
@@ -122,9 +125,14 @@ def latest_session(db: Session, student_id: int) -> AssessmentSession | None:
     """
     return db.scalar(
         select(AssessmentSession)
+        .outerjoin(AssessmentTask, AssessmentTask.id == AssessmentSession.task_id)
         .where(
             AssessmentSession.student_id == student_id,
             effective_session_predicate(),
+            # 任务被作废时那一场不算「他最近的一次」（§4.14 的防御性约束之一）。
+            # 这里的连接是**外连接**（任务外的会话没有 task_id），所以「没有任务」那一支
+            # 必须留着：`NULL != 'VOIDED'` 在 SQL 里是 NULL 而不是真。
+            or_(AssessmentSession.task_id.is_(None), active_task_predicate()),
         )
         .order_by(*latest_session_order())
         .limit(1)
@@ -245,7 +253,10 @@ def list_student_tasks(db: Session, user: UserAccount) -> list[dict]:
             & (AssessmentSession.student_id == student.id)
             & effective_session_predicate(),
         )
-        .where(AssessmentTarget.student_id == student.id)
+        # 作废的任务不给学生看（§4.15）：学生这一侧**隐藏**它，心理老师那一侧照常
+        # 显示并带「已作废，不参与当前判断」的标签——同一件事两种读者两个口径，
+        # 所以这个判据必须与那一侧共用同一个谓词，不能各写一遍。
+        .where(AssessmentTarget.student_id == student.id, active_task_predicate())
         .order_by(AssessmentTask.id.desc())
     ).all()
     result = []
@@ -297,7 +308,10 @@ def list_student_assessment_history(db: Session, user: UserAccount) -> list[dict
             & (AssessmentSession.student_id == student.id)
             & effective_session_predicate(),
         )
-        .where(AssessmentTarget.student_id == student.id)
+        # 作废的任务不给学生看（§4.15）：学生这一侧**隐藏**它，心理老师那一侧照常
+        # 显示并带「已作废，不参与当前判断」的标签——同一件事两种读者两个口径，
+        # 所以这个判据必须与那一侧共用同一个谓词，不能各写一遍。
+        .where(AssessmentTarget.student_id == student.id, active_task_predicate())
         .order_by(AssessmentTask.id.desc())
     ).all()
     items = []

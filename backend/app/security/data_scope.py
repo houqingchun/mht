@@ -35,7 +35,80 @@ from sqlalchemy.orm import Session
 from app.core.errors import AppError
 from app.models.account import UserAccount, UserScope
 from app.models.enums import ScopeType
-from app.models.organization import Student
+from app.models.organization import ClassGroup, Grade, Student
+
+
+def _class_display_text(grade_name: str, class_name: str) -> str:
+    """`初一` + `1班` → `初一 1 班`（§5.2 的示例形状）。
+
+    `ClassGroup.name` 有**两个写入方、两种形状**：种子写的是 `1班`，而名册导入把它
+    文件里那一列（`701` 这类编号，见 `student_import_service`）原样存下来。所以这里
+    只对「已经以 `班` 结尾」的那一种补空格，其余原样接在年级后面——对着 `701` 猜一个
+    `1 班` 是替学校改他们自己的编号，而那个编号的含义没有确认过（CLAUDE.md 缺口 2）。
+    """
+    if class_name.endswith("班"):
+        return f"{grade_name} {class_name[:-1].strip()} 班"
+    return f"{grade_name} {class_name}"
+
+
+def data_scope_summary(db: Session, user: UserAccount) -> dict:
+    """The user-facing reading of "which students do I cover" (§5.2 / §5.3).
+
+    **It must be the union of every granted dimension, because that is what
+    `student_scope_predicate` grants.** The two used to disagree: the predicate
+    is an `or_` over all scope rows, while this function returned at the first
+    matching branch (`if grade_ids and not class_ids …`), so a user holding both
+    a GRADE and a CLASS row was told "初二 1 班" while the queries underneath
+    them also covered a whole grade. The number on screen and the row filter are
+    the same question, so they get the same answer.
+
+    `scopeType` names the **single** dimension when exactly one contributes, and
+    `MIXED` when several do — `displayText` always lists all of them. A `SCHOOL`
+    row subsumes the rest and short-circuits, but only when it actually carries a
+    `school_id`: the predicate skips a `SCHOOL` row with a NULL `school_id`
+    (`:82`), so reading it as 全校 here would claim a range the queries deny.
+
+    Fail-safe, like the predicate: no usable row yields `NONE`, never 全校.
+    """
+    scopes = db.scalars(select(UserScope).where(UserScope.user_id == user.id)).all()
+
+    # 全校：与谓词同一判据（`school_id is not None`）。半填的 SCHOOL 行不授予任何东西，
+    # 所以它也不该在这里被读成「全校」——那会让屏幕上写着「范围：全校」而下面一个数是空的。
+    if any(scope.scope_type == ScopeType.SCHOOL and scope.school_id is not None for scope in scopes):
+        return {"scopeType": "SCHOOL", "displayText": "全校", "schoolWide": True}
+
+    dimensions: list[str] = []
+    parts: list[str] = []
+
+    grade_ids = sorted({s.grade_id for s in scopes if s.scope_type == ScopeType.GRADE and s.grade_id})
+    if grade_ids:
+        names = db.scalars(select(Grade.name).where(Grade.id.in_(grade_ids)).order_by(Grade.id)).all()
+        dimensions.append("GRADE")
+        parts.append("、".join(names) + "年级")
+
+    class_ids = sorted({s.class_id for s in scopes if s.scope_type == ScopeType.CLASS and s.class_id})
+    if class_ids:
+        rows = db.execute(
+            select(Grade.name, ClassGroup.name)
+            .join(Grade, Grade.id == ClassGroup.grade_id)
+            .where(ClassGroup.id.in_(class_ids))
+            .order_by(Grade.id, ClassGroup.id)
+        ).all()
+        dimensions.append("CLASS")
+        parts.append("、".join(_class_display_text(g, c) for g, c in rows))
+
+    student_ids = {s.student_id for s in scopes if s.scope_type == ScopeType.STUDENT and s.student_id}
+    if student_ids:
+        dimensions.append("STUDENT")
+        parts.append(f"指定学生（{len(student_ids)}人）")
+
+    if not parts:
+        return {"scopeType": "NONE", "displayText": "未配置数据范围", "schoolWide": False}
+    return {
+        "scopeType": dimensions[0] if len(dimensions) == 1 else "MIXED",
+        "displayText": "、".join(parts),
+        "schoolWide": False,
+    }
 
 
 def student_scope_predicate(db: Session, user: UserAccount) -> ColumnElement[bool]:

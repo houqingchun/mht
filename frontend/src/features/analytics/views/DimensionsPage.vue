@@ -150,7 +150,7 @@ async function exportValidityRetest() {
 </script>
 
 <template>
-  <ReportPageHeader title="全校八维度分析" description="查看各心理维度的高分比例、平均得分和分布情况。"/>
+  <ReportPageHeader description="查看当前数据范围内各心理维度的高分比例、平均得分和分布情况。"/>
   <FilterBar show-validity @query="onQuery" @reset="reset"/>
 
   <ErrorState v-if="error" :message="error"/>

@@ -48,7 +48,7 @@ onMounted(load)
       <div>
         <div class="eyebrow">完成记录</div>
         <h1>我的测评记录</h1>
-        <p class="page-desc">学生端不展示分数、风险标签、重点题和诊断性描述。</p>
+        <p class="page-desc">学生端不展示分数、关注等级、重点题和诊断性描述。</p>
       </div>
       <div class="actions">
         <button class="btn" @click="router.push('/student/home')">返回</button>

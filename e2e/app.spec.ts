@@ -596,7 +596,7 @@ test.describe('Analytics', () => {
     await trigger.click();
     await expect(child).not.toBeVisible();
     await trigger.click();
-    await page.getByRole('link', { name: '重点学生' }).click();
+    await page.getByRole('link', { name: '重点关注学生' }).click();
     await expect(child).toBeVisible();
   });
 
@@ -686,7 +686,19 @@ test.describe('Analytics report functions', () => {
 
   test('overview queries selected tasks and renders aggregate results', async ({ page }) => {
     await page.goto('/counselor/analytics/overview');
-    await expect(page.getByRole('heading', { name: '全校预警总览' })).toBeVisible();
+    // 标题的唯一出处是路由的 `meta.title`（`ReportPageHeader.vue` 读它），而这一页由
+    // **两个角色共用同一个组件**——两个角色各写一条 `meta.title`，从前德育领导那条带
+    // 「全校」前缀，于是同一套组件里有两处硬编码标题。
+    //
+    // V2.0.0 §5.4 的建议 + §9 P1-04 把两条统一成「筛查关注概览」，**范围改由页头那枚
+    // 「当前数据范围」徽标表达**——徽标对德育领导读出来就是「全校」。所以这一条断的是
+    // （现在两条路由一样的）那一个标题，而「这个屏幕上的数字描述的是谁的范围」这件事
+    // 由 `ReportPageHeader` 的徽标断（`describe('数据范围徽标')` 那一组）。
+    //
+    // 别再改回「全校…」那一版：它会让同一屏上出现两个范围口径的自相矛盾版本
+    // ——标题说全校、徽标也说全校（对领导是对的），可同一条路由给心理老师走的时候
+    // 标题仍然说全校，而数据其实是 scoped 的。
+    await expect(page.getByRole('heading', { name: '筛查关注概览' })).toBeVisible();
     // `exact: true` 是必须的：`getByText` 是**子串**匹配，而「实际应测人数」既是这一格 KPI 卡的
     // 标签，也是覆盖率卡片脚注里那句分母口径（「可评价样本 ÷ 实际应测人数」）的一部分——
     // 不收严就是 strict mode violation。这不改变这条断言要说的事（报表默认加载并渲染出 KPI），
@@ -703,7 +715,11 @@ test.describe('Analytics report functions', () => {
 
   test('dimensions switches validity basis and all three result views', async ({ page }) => {
     await page.goto('/counselor/analytics/dimensions');
-    await expect(page.getByRole('heading', { name: '全校八维度分析' })).toBeVisible();
+    // `exact: true` 保留着，但它的**理由在 V2.0.0 §5.4 之后变了**：两个角色的路由标题
+    // 现在同名（「八维度分析」），所以收严不再是为了分出两个角色——页内还有别的地方
+    // 会出现这四个字（导航项、`ReportPageHeader` 的说明）。写死那一段旧理由会误导
+    // 下一个人去「恢复」德育领导那条带「全校」前缀的标题。
+    await expect(page.getByRole('heading', { name: '八维度分析', exact: true })).toBeVisible();
     await page.getByLabel('分析口径').selectOption('VALIDITY_UNFLAGGED');
     await page.getByRole('button', { name: /查询/ }).click();
     await expect(page.getByText('各维度高分人次')).toBeVisible();
@@ -727,7 +743,7 @@ test.describe('Analytics report functions', () => {
   // 筛查」，`validity_flagged_count = 2`），所以默认加载的那一帧就已经有东西可扫。
   test('both report pages agree on the validity retest figure', async ({ page }) => {
     await page.goto('/counselor/analytics/dimensions');
-    await expect(page.getByRole('heading', { name: '全校八维度分析' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '八维度分析', exact: true })).toBeVisible();
     await expect(page.getByText('已自动加载最新可分析任务')).toBeVisible();
     // 标签在两页上**语序不同**（这一页写「效度建议复测」，总览页写「效度复测建议」），
     // 所以两处各按自己的原文取。这不是笔误：`kpiCard` 用的是 `^…$` 全等正则，把其中一处
@@ -735,7 +751,7 @@ test.describe('Analytics report functions', () => {
     const dimensions = await numberIn(kpiCard(page, '效度建议复测').locator('.kpi-value'));
 
     await page.goto('/counselor/analytics/overview');
-    await expect(page.getByRole('heading', { name: '全校预警总览' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '筛查关注概览' })).toBeVisible();
     await expect(page.getByText('已自动加载最新可分析任务')).toBeVisible();
     // 总览页那一格不在 `KpiCard` 里，在 `MetricStrip` 的 `.metric-mini` 里（值在 `<b>` 上）。
     const overview = await numberIn(
@@ -850,21 +866,255 @@ test.describe('Analytics report functions', () => {
     expect(classTotal).toBe(tableCount);
   });
 
-  test('report saves interpretation and exports current results', async ({ page }) => {
+  /**
+   * RPT-09 在 V2.0.0 重写过，所以这一条也重写了。三件事是这次重写的理由，各断一次：
+   *
+   *  · **草稿落在服务端**（§5.4）：状态行里带着服务端发的报告编号 `RPT-…`。此前
+   *    它存在浏览器 `localStorage` 里、写的是一句「已保存（浏览器本地草稿）」——
+   *    换一台电脑就没了，而屏幕上说它保存了。
+   *  · **导出走导出作业**（§5.5）：不再由浏览器拼一个 Blob 直接下载，而是
+   *    `POST /professional-reports/{id}/export-jobs` 建一个作业、再由导出中心下载。
+   *    所以这里断的是**服务端那句回执**，不是 `download` 事件。
+   *  · **已发布不可覆盖**（§5.4）：发布之后 `save_draft` 回 `REPORT_IMMUTABLE`（409），
+   *    界面把服务端那句话放到状态行上。
+   *
+   * 数据残留：这条用例会往库里留下一行 `professional_report`（＋一个版本行）与一个
+   * `export_job`。报告**没有删除接口**（与 `export_job` 一样：它是工作事实，只有撤销），
+   * 所以它靠 `make purge-demo` 清——那条链路的清除口径见 PROGRESS 的缺口。
+   * 不断言行数：报告编号按天编号，写死会在某一天红在一个与功能无关的地方。
+   */
+  test('report saves interpretation on the server and exports through the export center', async ({ page }) => {
     await page.goto('/counselor/analytics/report');
-    await expect(page.getByRole('heading', { name: '专业解读与导出' })).toBeVisible();
+
+    // ① 标题的唯一出处是路由的 `meta.title`（`ReportPageHeader.vue` 读它），而不是
+    //    视图里写的那一句话——同一套组件给两个角色用，标题写死在视图里就会分岔。
+    await expect(page.getByRole('heading', { name: '专业分析报告' })).toBeVisible();
+
+    // ② 这一页进来就自动选中最新的可分析任务并查询（`FilterBar` 的 `loadTasks()`），
+    //    所以主体直接出来——断这一句就是在证明「上面那条标题下面确实有东西」，
+    //    而不是一个连任务都没选中的空壳。
+    //
+    //    **没有断 `请选择测评任务后点击查询`**：那条空态只有库里一个任务都没有时
+    //    才可达（`onQuery` 拿不到 taskIds 就不发请求），而它在那时说的「请选择」也是
+    //    错的话——任务列表本来就是空的，没有东西可选。文案那一处记在 PROGRESS 的缺口里，
+    //    不在这里为它写一条永远跑不到的断言。
+    await expect(
+      page.getByRole('status').filter({ hasText: '已自动加载最新可分析任务' })
+    ).toBeVisible();
+
+    // ③ 主体出来：两个子页签 + 四段专业解读的输入框。
+    await expect(page.getByRole('button', { name: '报表导出' })).toBeVisible();
+    await expect(page.getByLabel('1. 整体情况说明')).toBeVisible();
+    await expect(page.getByLabel('4. 后续教育支持计划')).toBeVisible();
+
+    // ④ 保存：状态行里是**服务端发的编号**，不是「浏览器本地草稿」。
     await page.getByLabel('1. 整体情况说明').fill('基于当前任务实际统计结果形成的专业说明。');
     await page.getByRole('button', { name: '保存草稿' }).click();
-    await expect(page.getByText('已保存（浏览器本地草稿）')).toBeVisible();
+    await expect(
+      page.getByRole('status').filter({ hasText: '草稿已保存至服务器（RPT-' })
+    ).toBeVisible();
+
+    // ⑤ 导出：用途是 `window.prompt` 取的，所以先挂上对话框的应答再点。
     await page.getByRole('button', { name: '进入导出设置' }).click();
-    await page.getByLabel('文件格式').selectOption('html');
-    const downloadPromise = page.waitForEvent('download');
+    page.on('dialog', (dialog) => dialog.accept('e2e：核对正式报告导出链路'));
     await page.getByRole('button', { name: '生成报告' }).click();
-    const download = await downloadPromise;
-    expect(download.suggestedFilename()).toBe('心晴_心理测评聚合统计报告.html');
-    await expect(page.getByRole('status').filter({ hasText: '已导出' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: '专业解释与导出记录' })).toBeVisible();
+    await expect(
+      page.getByRole('status').filter({ hasText: '正式报告已通过导出中心生成并下载' })
+    ).toBeVisible();
+    // 导出记录那一行只在导出成功之后才渲染（`lastExportAt`），所以先证明它在。
+    await expect(page.locator('.audit-section tbody tr')).toHaveCount(1);
+
+    // ⑥ 发布：当前版本被锁定。先回「专业解读」那一页签。
+    await page.getByRole('button', { name: '专业解读' }).click();
+    await page.getByRole('button', { name: '确认并发布' }).click();
+    await expect(
+      page.getByRole('status').filter({ hasText: '报告已发布，当前版本已锁定' })
+    ).toBeVisible();
+
+    // ⑦ 已发布不可覆盖（§5.4 的核心验收）：再点一次保存，服务端回 409
+    //    `REPORT_IMMUTABLE`，界面把**服务端那句话**放到状态行上。
+    await page.getByRole('button', { name: '保存草稿' }).click();
+    await expect(
+      page.getByRole('status').filter({ hasText: '已发布版本不可覆盖' })
+    ).toBeVisible();
   });
+});
+
+// ========== 数据范围徽标（V2.0.0 §5.2 / P0-02）==========
+
+test.describe('数据范围徽标', () => {
+  /**
+   * 页头那枚「当前数据范围：…」徽标（`ReportPageHeader.vue`），读数来自
+   * `GET /api/v1/auth/me/data-scope-summary`。
+   *
+   * 它守的是 P0-02 那个毛病的**界面**那一半：页面文字说「全校」而数字其实是授权范围的。
+   * §5.4 把两条路由标题里的「全校」拿掉之后，范围这句话**只剩徽标一个出口**——所以
+   * 这一组每一条都成对地断：**说得出真实范围**，**且不说「全校」**。
+   *
+   * 两种造账号的办法，各有各的理由：
+   * - 第 1 条用种子里那两位既有账号（心理老师 / 德育领导）：「全校」是他们的真实范围，
+   *   零残留，同时是第 2 条的**对照**——没有它，「徽标不说全校」可能只是因为徽标
+   *   什么都不显示。
+   * - 第 2 条新建一个临时账号：库里没有年级 / 班级范围的心理老师，而**改既有账号的
+   *   scope 不行**——`playwright.config.ts` 是 `fullyParallel`，别的 spec 会同时看到
+   *   另一个名册，那是「跑 e2e 不许改掉共享演示数据」。
+   *
+   * 新建账号带三条已知代价，都是既有的、记在这里免得下一个人重新推一遍：
+   * 1. 账号**没有删除接口**（§4：停用 ≠ 删除），每跑一次留一个临时账号。与
+   *    `describe('账号管理')` 留下的那个同类，已知且接受（CLAUDE.md 测试注意）。
+   * 2. 范围指向 `db/seed.py` 的**基线**年级 / 班级，不是 `seed_demo` 新建的那些：
+   *    `purge_demo_data` 遇到仍被引用的演示班级会跳过不删（`db/purge.py`），跑一次就给
+   *    那次清理留一块擦不掉的残渣；基线那一段上有 S001，它本来就活下来，所以指向它
+   *    不多挡任何东西。**这一条有守卫**：名册里必须看得见 S001。
+   * 3. 新账号带 `must_change_password`（§16.5：临时密码只该活一次登录），而
+   *    `AppLayout.vue` 会据此弹强制改密弹层、把 `waitForURL` 卡死。所以先用接口把那一次
+   *    改密走完——那不是绕开检查，是把用户本来就必须做的那一步做掉。
+   */
+
+  type ScopeOption = { scope_type: string; scope_id: number; name: string };
+
+  const TEMP_PASSWORD = 'e2e-scope-temp';
+  const ROTATED_PASSWORD = 'e2e-scope-rotated';
+
+  async function apiLogin(page: Page, account: string, password: string, role: string) {
+    const response = await page.request.post('/api/v1/auth/login', {
+      data: { account, password, role },
+    });
+    expect(response.ok(), `${account} 登录失败，这一条失去了对象：${await response.text()}`).toBeTruthy();
+    return (await response.json()).data.access_token as string;
+  }
+
+  /**
+   * 建一个**只有一种**数据范围的临时心理老师，并把它变成一个能走界面登录的账号。
+   *
+   * 范围那一项**从服务端给的下拉选项里挑**，不写死 id：选项自带 `scope_id`，而在共享
+   * 的开发库上写死一个 id，会在任何人插一个年级 / 班级之后指到别的东西上。挑中的那一项
+   * 原样返回给调用方，让断言拿它拼期望值。
+   */
+  async function newCounselorWithScope(page: Page, scopeType: 'GRADE' | 'CLASS') {
+    const adminToken = await apiLogin(page, 'admin', '123456', 'admin');
+    const optionsResponse = await page.request.get('/api/v1/admin/accounts/scope-options', {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    expect(optionsResponse.ok(), '范围下拉取不到，这一条失去了对象').toBeTruthy();
+    const options = (await optionsResponse.json()).data.items as ScopeOption[];
+
+    const granted =
+      scopeType === 'GRADE'
+        ? options.find((item) => item.scope_type === 'GRADE' && item.name === '初一')
+        : // 班级取 **id 最小**的那一个：基线的 `初一 1班` 由 `db/seed.py` 先建，演示班与
+          // 导入班都在它之后（上面第 2 条代价说的就是为什么必须挑到它）。
+          options
+            .filter((item) => item.scope_type === 'CLASS')
+            .sort((a, b) => a.scope_id - b.scope_id)[0];
+    expect(granted, `范围下拉里没有可用的 ${scopeType} 选项，这一条失去了对象`).toBeTruthy();
+
+    const account = `1${String(Date.now()).slice(-10)}`;
+    const created = await page.request.post('/api/v1/admin/accounts', {
+      headers: { Authorization: `Bearer ${adminToken}` },
+      data: {
+        role_code: 'counselor',
+        display_name: '验收范围老师',
+        account,
+        temporary_password: TEMP_PASSWORD,
+        scopes: [{ scope_type: granted!.scope_type, scope_id: granted!.scope_id }],
+      },
+    });
+    expect(created.ok(), `临时账号没建出来：${await created.text()}`).toBeTruthy();
+
+    const token = await apiLogin(page, account, TEMP_PASSWORD, 'counselor');
+    const changed = await page.request.post('/api/v1/auth/change-password', {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { old_password: TEMP_PASSWORD, new_password: ROTATED_PASSWORD },
+    });
+    expect(changed.ok(), `临时密码没换成正式密码：${await changed.text()}`).toBeTruthy();
+
+    return { account, granted: granted!, headers: { Authorization: `Bearer ${token}` } };
+  }
+
+  /** 走界面登录一个**不在 `ROLES` 里**的临时账号（`helpers.ts` 的 `loginAs` 只认那四个种子账号）。 */
+  async function loginAsAccount(page: Page, account: string) {
+    await page.goto('/login');
+    await expect(page).toHaveURL('/login');
+    await page.getByRole('button', { name: '心理老师' }).click();
+    await page.getByRole('textbox', { name: /手机号/ }).fill(account);
+    await page.getByRole('textbox', { name: /密码/i }).fill(ROTATED_PASSWORD);
+    await page.getByRole('button', { name: '登录' }).click();
+    await page.waitForURL('/counselor/workbench');
+  }
+
+  test('两个全校范围的角色都读到「全校」，而标题那一侧不再宣称范围', async ({ page }) => {
+    await loginAs(page, 'counselor');
+    await page.goto('/counselor/analytics/overview');
+    await expect(page.locator('.scope-badge')).toHaveText('当前数据范围：全校');
+
+    await loginAs(page, 'leader');
+    await page.goto('/leader/analytics/overview');
+    await expect(page.locator('.scope-badge')).toHaveText('当前数据范围：全校');
+    // 标题与徽标**各说各的事**：标题回答「这一页是干什么的」，徽标回答「下面的数是谁的
+    // 数」。两条一起断——只有一个「筛查关注概览」标题、且范围只从徽标说出来。
+    await expect(page.locator('.report-page-head h1')).toHaveText('筛查关注概览');
+  });
+
+  for (const scopeType of ['GRADE', 'CLASS'] as const) {
+    test(`收紧到 ${scopeType} 的心理老师读到自己那一段，且读不到「全校」`, async ({ page }) => {
+      const { account, granted, headers } = await newCounselorWithScope(page, scopeType);
+
+      const summaryResponse = await page.request.get('/api/v1/auth/me/data-scope-summary', { headers });
+      expect(summaryResponse.ok()).toBeTruthy();
+      const data = (await summaryResponse.json()).data as {
+        scopeType: string;
+        displayText: string;
+        schoolWide: boolean;
+      };
+
+      // ① 名册真的收在那一段里——徽标与行过滤必须同源（`student_scope_predicate`）。
+      //    只断下面那句中文的话，一个「说得对、底下根本没按范围过滤」的实现是绿的，
+      //    而那正是 P0-02 那个毛病的反向版本（屏幕对了、数据是另一回事）。
+      const rosterResponse = await page.request.get('/api/v1/students', { headers });
+      expect(rosterResponse.ok(), '临时账号读不到名册，这一条失去了下半句').toBeTruthy();
+      const roster = (await rosterResponse.json()).data.items as Array<{
+        student_no: string;
+        grade: string;
+        class_name: string;
+      }>;
+      // 先证明有东西可扫：空名册上「每一行都属于那一段」恒真。
+      expect(roster.length, '这一条要证明「只剩那一段」，名册不能是空的').toBeGreaterThan(0);
+      // 种子名册上的 S001 必须在里面。它同时是**残渣的守卫**：范围一旦指到 `seed_demo`
+      // 新建的班级上，`purge_demo_data` 就会跳过那个班不删（`db/purge.py`），跑一次 e2e
+      // 给那次清理留一块擦不掉的残渣。红了就说明挑范围的规则要改回基线那一段。
+      expect(roster.map((row) => row.student_no)).toContain('S001');
+      for (const row of roster) {
+        if (scopeType === 'GRADE') expect(row.grade).toBe(granted.name);
+        else expect(row.class_name).toBe(granted.name);
+      }
+      // 年级名从**名册**上取，不在这里写死一个字面量（换一所学校 / 加一个年级时，
+      // 写死的那一份会悄悄变错，而它看起来完全正常）。
+      const rosterGrade = roster[0].grade;
+
+      // ② 那句中文本身。`not.toContain` 单独成一条：`displayText` 里恰好没有这两个字，
+      //    与这一屏整体不该宣称全校，是两件事（`schoolWide` 是给程序读的那一半）。
+      expect(data.scopeType).toBe(scopeType);
+      expect(data.schoolWide).toBe(false);
+      expect(data.displayText).not.toContain('全校');
+      if (scopeType === 'GRADE') {
+        expect(data.displayText).toBe(`${granted.name}年级`);
+      } else {
+        // 班级名在这所学校里不唯一（每一年级都有一个 1班），所以徽标要连着年级念。
+        // 「念出了班级名」与「念出了年级」分开断——只断一处的话，光秃秃的「1 班」
+        // 与漏掉年级的 `初一 1班` 各自能蒙混过一半。
+        expect(data.displayText.replace(/\s+/g, '')).toContain(granted.name);
+        expect(data.displayText).toContain(rosterGrade);
+      }
+
+      // ③ 屏幕上是同一句话。徽标是 `v-if="scope"` 的，所以取不到数时它整句不出现——
+      //    `toHaveText` 在那种情况下会红，这条断言因此不是空转的。
+      await loginAsAccount(page, account);
+      await page.goto('/counselor/analytics/overview');
+      await expect(page.locator('.report-page-head h1')).toHaveText('筛查关注概览');
+      await expect(page.locator('.scope-badge')).toHaveText(`当前数据范围：${data.displayText}`);
+    });
+  }
 });
 
 // ========== Admin System Tests ==========
@@ -993,10 +1243,21 @@ test.describe('权限矩阵', () => {
     await page.getByRole('button', { name: '配置权限' }).click();
 
     await expect(page.getByRole('heading', { name: '角色权限矩阵' })).toBeVisible();
-    // 五项能力各一块，每块四个角色。
-    await expect(page.locator('.perm-block')).toHaveCount(5);
+    // 八项能力各一块（V2.0.0 起 P1 专业报告加入三项），每块四个角色。
+    // 数字随 `CAPABILITY_LABELS` 走：**加了新能力就要来改它**——这一条断的正是
+    // 「后端定义了的能力，界面上都有得配」。改名而不改这里会红，那是对的。
+    await expect(page.locator('.perm-block')).toHaveCount(8);
     await expect(page.locator('.perm-block').first().locator('.perm-cell')).toHaveCount(4);
-    for (const label of ['聚合统计', '学生心理详情', '重点题/原始答卷', '组织与账号', '受控导出']) {
+    for (const label of [
+      '聚合统计',
+      '学生心理详情',
+      '重点题/原始答卷',
+      '组织与账号',
+      '受控导出',
+      '专业报告查看',
+      '专业报告编辑',
+      '专业报告发布'
+    ]) {
       await expect(page.locator('.perm-block h3', { hasText: label })).toBeVisible();
     }
   });
@@ -1140,7 +1401,7 @@ test.describe('已接通的后端数据', () => {
   test('counselor case list renders the queue tabs', async ({ page }) => {
     await loginAs(page, 'counselor');
     await page.goto('/counselor/cases');
-    await expect(page.getByRole('heading', { name: '重点学生与长期跟踪' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '重点关注学生与长期跟踪' })).toBeVisible();
     await expect(page.locator('.queue-tab')).toHaveCount(6);
   });
 
@@ -2154,7 +2415,7 @@ test.describe('无障碍契约', () => {
 
     // 22 条路由的 `meta.title` 此前没有任何读者：开到第五个标签就分不出哪个是哪一个。
     await page.goto('/counselor/cases');
-    await expect(page).toHaveTitle('心晴 · 重点学生');
+    await expect(page).toHaveTitle('心晴 · 重点关注学生');
   });
 });
 
@@ -3172,5 +3433,260 @@ test.describe('失败与竞态不留下旧数据', () => {
     // 留着那一行的话，标题栏写着 `MHT-RULE-1.1.0 · 生效中`、正文写着读取失败——
     // 读者会以为这次失败说的是 1.1.0，而它说的是别的版本。
     await expect(panel).not.toContainText('MHT-RULE-');
+  });
+});
+
+/**
+ * P0-01 测评任务的删除与作废治理（规格 §4.10–§4.12）。
+ *
+ * 三条用例都遵守「先证明有东西可扫」：断「它不在了」之前先断「它在」——一张空表
+ * 能让任何一条「消失」断言变绿。
+ *
+ * **数据处置**（`跑 e2e 不许改掉操作员自己的东西`）：
+ * - ① 自建一场空任务、当场删掉：沿途零残留（删的是任务自己与它的目标行）；
+ * - ② 只在**最大的那场演示任务**上打开影响预览然后取消，一行都不写；
+ * - ③ 自建一场任务 + 一个绑在它上面的**预览批次**（不提交），作废之后留着——
+ *   与既有的那几个 e2e 预览批次同族（§25），`make purge-demo` 一并清掉。
+ *
+ * 这里断的是**界面**（§3 的第二面：视图有没有取用标签与判据）。七个场景的**语义**
+ * 由 `backend/app/tests/test_task_governance.py` 的 18 条用例钉住，不在这边重推。
+ *
+ * 两处**刻意不断**，理由写在这里免得下次被读成漏了：
+ * - 「作废后不再影响统计」「不删除人工关怀记录」在界面上没有一处**只有作废才会变**
+ *   的像素：演示库上的统计数字同时被并发的其它用例改动（`fullyParallel`），拿前后两次
+ *   读取相比会变成一条会无故变红的守卫。所以这边断的是那两句话**被说了出来**
+ *   （影响预览里的「N 份答卷」「关联 N 份关怀档案…不会删除，也不会被修改」），
+ *   而「说了就真的做了」由后端那 18 条钉住。
+ * - 「IMPORTED task 作废后 import batch 仍存在」走的是一份**预览**批次（来源是导入，
+ *   批次真的挂在任务上），因为要做出一个**已提交**的导入批次，文件里那一列班级必须是
+ *   数字编号（`704`），而演示名册的班叫 `1班`——提交得先动共享名册，代价比它换来的
+ *   那点保护大（§26 / §27 记着同一类取舍）。后端那一侧由
+ *   `test_task_governance.py::test_void_imported_task_keeps_import_batches` 钉住。
+ */
+test.describe('测评任务的删除与作废治理', () => {
+  // ★ 这一组**串行**跑，不是并发。这是 2026-09-25 被一次红逼出来的，理由要留着：
+  //
+  // 全仓只有这一组会用 `POST /api/v1/assessment-tasks` 真建任务（其余建任务的用例走的
+  // 是种子 / 演示数据）。而那个端点**并发不安全**：`task_service.create_school_assessment_task`
+  // 拼的是 `TASK-{utcnow:%Y%m%d%H%M%S}-{全库任务数 + 1}`，同一秒内的两个请求会算出
+  // **同一个任务号**，撞 `task_no` 唯一键，其中一个拿到 500。
+  //
+  // 实测复现（两个并发 curl POST，探针跑完即删）：`req1 http=500` / `req2 http=200`。
+  // 所以三条并发时那次「1 failed / 2 passed」，红的原因不在被测代码，而在**我的两条
+  // 用例自己撞自己**（`Playwright` 默认 3 workers）。
+  //
+  // 串行是**绕过，不是修复**：真实用户在同一秒里点两次「新建任务」仍然会有一个 500。
+  // 它在创建路径上，不属于 P0-01（删除 / 作废治理），所以没有顺手改；它记在 PROGRESS.md
+  // 「顺带发现、未修」那一节里等人裁。
+  test.describe.configure({ mode: 'serial' })
+
+  /** 心理老师的 API 会话。浏览器那一路另走 `loginAs`，两条互不影响。 */
+  async function counselorHeaders(page: Page) {
+    const login = await page.request.post('/api/v1/auth/login', {
+      data: { account: '13800000001', password: '123456', role: 'counselor' },
+    });
+    expect(login.ok(), '心理老师 API 登录没有成功，这一条失去了对象').toBeTruthy();
+    return { Authorization: `Bearer ${(await login.json()).data.access_token}` };
+  }
+
+  /**
+   * 按任务号查这一场（判据用服务端发的数，不写死）。
+   *
+   * **`status=ALL` 不含已作废的**（§4.11：`ALL` 说的是「全部还在用的任务」）。它正是
+   * 「默认列表里它消失了」那条断言的依据——而这句话还有半截：只查 `ALL` 分不出
+   * 「真删掉了」与「只是作废了」，所以两处结论都得查一次（`VOIDED` 那一趟才是判别式的）。
+   */
+  async function findTask(page: Page, headers: Record<string, string>, taskNo: string, status = 'ALL') {
+    const listed = await page.request.get(`/api/v1/assessment-tasks?status=${status}`, { headers });
+    const items = (await listed.json()).data.items as Array<{ task_no: string; status: string }>;
+    return items.find((t) => t.task_no === taskNo);
+  }
+
+  /** 一份一行都匹配不上的 MHT 文件：只会拿到逐行结论，不写任何测评记录。 */
+  function unmatchedAssessmentCsv(name: string): string {
+    const header = ['姓名', '性别', '年龄', '年级', '班级', '所用时间',
+      ...Array.from({ length: 100 }, (_, i) => `${i + 1}.题干`)].join(',');
+    const cell = [name, '1', '12', '1', '4', '3600秒', ...Array(100).fill('0')].join(',');
+    return `${header}\n${cell}\n`;
+  }
+
+  test('还没产生正式测评事实的空任务可以整体删除', async ({ page }) => {
+    const headers = await counselorHeaders(page);
+    const taskName = `e2e空任务-${Date.now()}`;
+    const created = await page.request.post('/api/v1/assessment-tasks', {
+      headers,
+      data: { name: taskName },
+    });
+    expect(created.ok(), '建任务接口没有成功，这一条失去了对象').toBeTruthy();
+    const { id: taskId, task_no: taskNo } = (await created.json()).data;
+
+    // 先证明它真的落在「可以整体删除」那一支——判据来自服务端，不是这里猜的。
+    const check = await page.request.get(`/api/v1/assessment-tasks/${taskId}/delete-check`, {
+      headers,
+    });
+    expect((await check.json()).data.canHardDelete, '这一场没有产生过事实，本该可整体删除')
+      .toBe(true);
+
+    await loginAs(page, 'counselor');
+    await page.goto('/counselor/tasks');
+    const row = page.locator('tbody tr', { hasText: taskNo });
+    await expect(row, '新建的任务没有出现在列表里，这一条失去了对象').toHaveCount(1);
+
+    await row.getByRole('button', { name: '删除任务' }).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toContainText(`删除任务「${taskName}」`);
+    // 影响预览排在控件之前，说的正是这一支的后果。
+    await expect(dialog.locator('.form-dialog-description')).toContainText(
+      '这场任务还没有产生正式测评事实，可以整体删除，删除后不可恢复。');
+    // 空任务不需要填任何东西：这一支**没有**作废原因那一格。
+    await expect(dialog.locator('textarea')).toHaveCount(0);
+
+    await dialog.getByRole('button', { name: '确认删除' }).click();
+    await expect(page.getByText('任务已删除')).toBeVisible();
+    await expect(page.locator('tbody tr', { hasText: taskNo })).toHaveCount(0);
+
+    // 「从列表里消失了」有两种：真删掉了，或者只是作废了（默认列表也不含作废的）。
+    // 两条都要断——只断前一条的话，一个把它误作废成 VOID 的实现照样是绿的。
+    expect(await findTask(page, headers, taskNo), '任务没有真的删掉，只是从这一屏上消失了')
+      .toBeUndefined();
+    expect(await findTask(page, headers, taskNo, 'VOIDED'), '空任务本该被整体删除，却只是被作废了')
+      .toBeUndefined();
+  });
+
+  test('产生了测评事实的任务只能作废，影响预览逐条说出保留了什么', async ({ page }) => {
+    const headers = await counselorHeaders(page);
+    const listed = await page.request.get('/api/v1/assessment-tasks?status=ALL', { headers });
+    const items = (await listed.json()).data.items as Array<{
+      id: number; task_no: string; name: string; total_targets: number; completed_targets: number;
+    }>;
+    // 挑靶子按**数据**挑（目标学生最多的那一场），不写死任务名：写死会在某一天
+    // 红在一个与功能无关的地方。
+    const target = [...items].sort((a, b) => b.total_targets - a.total_targets)[0];
+    expect(target, '列表里一场任务都没有，这一条失去了对象').toBeTruthy();
+
+    const check = await page.request.get(`/api/v1/assessment-tasks/${target.id}/delete-check`, {
+      headers,
+    });
+    const impact = (await check.json()).data as {
+      canHardDelete: boolean; sessionCount: number; careCaseCount: number;
+    };
+    // 先证明这一场**真的有**测评事实与关怀档案：没有的话，下面那两句承诺压根不会
+    // 出现在屏幕上，而断言会变成一句空话。
+    expect(impact.canHardDelete, '这一场没有可作废的事实，这一条失去了对象').toBe(false);
+    expect(impact.sessionCount).toBeGreaterThan(0);
+    expect(impact.careCaseCount).toBeGreaterThan(0);
+
+    await loginAs(page, 'counselor');
+    await page.goto('/counselor/tasks');
+    const row = page.locator('tbody tr', { hasText: target.task_no });
+    await expect(row).toHaveCount(1);
+    await row.getByRole('button', { name: '删除任务' }).click();
+
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toContainText(`作废任务「${target.name}」`);
+    const description = dialog.locator('.form-dialog-description');
+    await expect(description).toContainText(
+      '作废不删除任何记录：答卷、结果、关怀档案原样保留，只是不再参与当前统计。');
+    await expect(description).toContainText(`${impact.sessionCount} 份答卷`);
+    await expect(description).toContainText(
+      `关联 ${impact.careCaseCount} 份关怀档案，档案与人工记录不会删除，也不会被修改`);
+
+    // 作废原因必填：不填直接提交，弹窗留在原地并指出缺什么。
+    await dialog.getByRole('button', { name: '确认作废' }).click();
+    await expect(dialog.locator('.field-error')).toContainText('作废原因不能为空');
+    await expect(dialog, '校验没过时弹窗不该关掉——关掉的话那些字没人看得见').toBeVisible();
+
+    // 取消 → 这一场原样还在（取消的语义在下面第三条上用自建任务做严格断言，
+    // 这里只断「它没被这一次点击弄没」——演示数据上任何跨两次读取的比对都会
+    // 被并发用例改动，那是一条会无故变红的守卫）。
+    await dialog.getByRole('button', { name: '取消' }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(page.locator('tbody tr', { hasText: target.task_no })).toHaveCount(1);
+  });
+
+  test('作废之后从默认列表消失，只在「已作废」里找得到（导入批次仍在）', async ({ page }) => {
+    const headers = await counselorHeaders(page);
+    const stamp = Date.now();
+    const taskName = `e2e作废任务-${stamp}`;
+    const created = await page.request.post('/api/v1/assessment-tasks', {
+      headers,
+      data: { name: taskName },
+    });
+    expect(created.ok(), '建任务接口没有成功，这一条失去了对象').toBeTruthy();
+    const { id: taskId, task_no: taskNo } = (await created.json()).data;
+
+    // 绑一个**预览**批次：这一批是导入来的、真的挂在这场任务上，而它一行都不匹配，
+    // 所以不会写任何测评记录——「作废不删导入批次」这句话因此有了可查的对象。
+    const preview = await page.request.post('/api/v1/assessment-imports/preview', {
+      headers,
+      multipart: {
+        file: {
+          name: 'e2e-void-import.csv',
+          mimeType: 'text/csv',
+          buffer: Buffer.from(unmatchedAssessmentCsv(`查无此人${stamp}`), 'utf-8'),
+        },
+        batch_name: `e2e作废批次-${stamp}`,
+        tested_on: '2020-01-15',
+        task_id: String(taskId),
+      },
+    });
+    expect(preview.ok(), '测评导入预览没有成功，这一条失去了对象').toBeTruthy();
+    const batchNo = (await preview.json()).data.batch_no as string;
+
+    // 先证明这一个批次真的把这场任务推进了「只能作废」那一支（服务端的判据）。
+    const check = await page.request.get(`/api/v1/assessment-tasks/${taskId}/delete-check`, {
+      headers,
+    });
+    const impact = (await check.json()).data as { canHardDelete: boolean; importBatchCount: number };
+    expect(impact.importBatchCount, '预览批次没有挂到这场任务上').toBe(1);
+    expect(impact.canHardDelete, '有导入批次时不该还能整体删除').toBe(false);
+
+    await loginAs(page, 'counselor');
+    await page.goto('/counselor/tasks');
+    const row = page.locator('tbody tr', { hasText: taskNo });
+    await expect(row, '新建的任务没有出现在列表里，这一条失去了对象').toHaveCount(1);
+
+    // 先取消一次：这一场是自建的、没有别人碰它，所以「取消 = 什么都没写」在这里
+    // 可以严格地断——状态必须还是没作废。
+    await row.getByRole('button', { name: '删除任务' }).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toContainText(`作废任务「${taskName}」`);
+    await expect(dialog.locator('.form-dialog-description')).toContainText(
+      '作废不删除任何记录：答卷、结果、关怀档案原样保留，只是不再参与当前统计。');
+    await expect(dialog.locator('.form-dialog-description')).toContainText('1 个导入批次');
+    await dialog.getByRole('button', { name: '取消' }).click();
+    await expect(dialog).toHaveCount(0);
+    expect((await findTask(page, headers, taskNo))?.status, '取消之后任务不该被作废')
+      .not.toBe('VOIDED');
+
+    // 再打开一次，这回真的作废。
+    await row.getByRole('button', { name: '删除任务' }).click();
+    const reason = `e2e 作废 ${stamp}`;
+    await page.getByRole('dialog').locator('textarea').fill(reason);
+    await page.getByRole('dialog').getByRole('button', { name: '确认作废' }).click();
+    await expect(page.getByText('任务已作废，历史记录已保留且不再参与当前统计')).toBeVisible();
+
+    // ① 默认列表里消失，而接口说它是 VOIDED（不是被删了——两件事在这里分开断）。
+    await expect(page.locator('tbody tr', { hasText: taskNo })).toHaveCount(0);
+    expect(await findTask(page, headers, taskNo), '作废之后它不该还留在「还在用」的那一批里')
+      .toBeUndefined();
+    expect((await findTask(page, headers, taskNo, 'VOIDED'))?.status,
+      '作废之后这一场应当还在，只是状态变成已作废').toBe('VOIDED');
+
+    // ② 「已作废」筛选找得到它，并且带的是那个中文标签（不是裸编码）。
+    //
+    // 定位器限定在**页头**里：`select.select` 这一条会命中两个元素（`DataTable` 的
+    // 「每页条数」下拉也带 `select` 类），而 Playwright 在严格模式下会直接报错并列出
+    // 两个候选。那不是「找错了」，是「两个都对」——所以要按位置把话说清楚。
+    await page.locator('.page-head select').selectOption('VOIDED');
+    const voidedRow = page.locator('tbody tr', { hasText: taskNo });
+    await expect(voidedRow, '已作废筛选里应当有它').toHaveCount(1);
+    await expect(voidedRow.locator('.pill')).toContainText('已作废');
+
+    // ③ 导入批次原样还在（作废的是任务，不是它带来的数据）。
+    await page.goto('/counselor/data');
+    const batchRow = page.locator('tbody tr', { hasText: batchNo });
+    await expect(batchRow, '作废任务时把它的导入批次一起删掉了').toHaveCount(1);
+    await expect(batchRow.locator('.pill')).toContainText('预览');
   });
 });

@@ -23,13 +23,23 @@ PRECHECKS = (
         "AND validity_score IS NULL LIMIT 5",
     ),
     (
+        # 判据是「会被不准确重算」，不是「答案不齐」——两者差一档，差的正是 0 答案那一档。
+        # `RECALCULATE_RESULTS` 内连接 `GROUP BY assessment_answer` 的子查询，所以它只碰
+        # **有答案**的会话：0 答案的结果行它压根不重算（那一行会保留原规则版本）。因此
+        # 「无法准确重算」精确等于 `1 <= n <> 100`，而 `n = 0` 是**误报**。
+        #
+        # 那个误报会让迁移在一台正常的库上中止：`POST /assessment-sessions/{id}/reset`
+        # 删答案但**刻意保留 result 行**（好让下次提交走 `submit_session` 的幂等早返回，
+        # 见 `api/v1/assessment.py` 的注释），于是「会话 IN_PROGRESS、0 答案、有一份
+        # 旧结果」是这套系统正常产生的状态，任何跑过学生答题 e2e 的库都有一行。
+        # 它描述的那场作答已经不存在了——没有答案可算，也就没有「算得准不准」。
         "存在没有完整 100 道原始答案的 MHT 结果，无法准确重算",
         "SELECT ar.id FROM assessment_result ar "
         "JOIN assessment_session ses ON ses.id = ar.session_id "
         "JOIN assessment_scale s ON s.id = ses.scale_id AND s.code = 'MHT' "
         "LEFT JOIN (SELECT session_id, COUNT(DISTINCT question_id) AS n "
         "           FROM assessment_answer GROUP BY session_id) a ON a.session_id = ar.session_id "
-        "WHERE COALESCE(a.n, 0) <> 100 LIMIT 5",
+        "WHERE COALESCE(a.n, 0) NOT IN (0, 100) LIMIT 5",
     ),
 )
 

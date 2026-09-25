@@ -19,7 +19,6 @@ import {
   riskEventStatusTone,
   statusLabel,
   statusTone,
-  userScopeLabel,
   validityLabel,
   validityTone
 } from '../../services/labels'
@@ -37,13 +36,14 @@ import {
   getCareCases,
   getCounselorWorkbench,
   getCounselorReminders,
+  getDataScopeSummary,
   getMe,
   reopenCareCase,
   type AnalyticsReport,
   type CareCaseDetail,
   type CareCaseItem,
   type CounselorWorkbench,
-  type CurrentUser,
+  type DataScopeSummary,
   type ReminderItem
 } from '../../services/api'
 
@@ -63,7 +63,7 @@ const loading = ref(true)
 const error = ref('')
 
 /**
- * 读者自己。
+ * 页头那行范围口径。
  *
  * `load()` 一直在调 `getMe()`——它要拿 `role_code` 判这一页该不该给这个人看——
  * 但**取到之后用完就丢**，于是这一页上没有任何一个字说明「这些数字描述的是谁的范围」。
@@ -72,19 +72,21 @@ const error = ref('')
  * §9）：`getCareCases()` 只回调用者范围内的档案，`completion_rate` 的分母也是。
  * 一个只带 1 个班范围的心理老师看到「关注档案总数 12」，会读成「这所学校 12 份档案」。
  * §9 那句「范围数字必须在 UI 上写明口径，否则它冒充全校数字，比不给数字更糟」
- * 说的正是这一处，而「我的范围筛查统计」那一页（`AnalyticsPage`）已经这么做了。
+ * 说的正是这一处，而心理老师那几页统计（`筛查关注概览` 等，`/counselor/analytics/*`）
+ * 已经这么做了——它们的页头由 `ReportPageHeader.vue` 渲染，带一枚「当前数据范围」徽标（§5.2）。
  *
- * 口径文字的形状与「全部学生」页头那一行同源（`CasesPage.vue` 的 `scopeText`）：
- * 读 `/auth/me` 的 `scopes[]`，**取不到就整句不出现**，不猜一个「全校」——
- * 一句说不清的范围比没有范围更糟，因为它会被照着安排工作。
- * 多行范围在服务端由 `or_` 合并，所以这里并列（并集，比任何单行都大）。
+ * 这一行与「全部学生」页头那一行（`CasesPage.vue` 的 `scopeText`）现在读的是**同一个
+ * 来源**：服务端的 `GET /auth/me/data-scope-summary`（§5.3）。此前两处各自把
+ * `/auth/me` 的 `scopes[]` 拼一遍——那是全站第二套范围口径，而它与服务端不等价
+ * （并集、`SCHOOL` 短路那两条的详细理由写在 `CasesPage.vue` 那一处）。
+ * 「同一件事只许有一个定义」在 UI 上也成立：两页各拼一遍，改一处漏一处的时候，
+ * 同一个人在两个屏幕上会读到两种范围。
+ *
+ * 取不到时**整句不出现**（`v-if`），不猜一个「全校」——一句说不清的范围比没有范围更糟，
+ * 因为它会被照着安排工作。
  */
-const me = ref<CurrentUser | null>(null)
-const scopeText = computed(() => {
-  const types = [...new Set((me.value?.scopes ?? []).map(s => s.scope_type))]
-  if (!types.length) return ''
-  return types.map(userScopeLabel).join('、')
-})
+const scopeSummary = ref<DataScopeSummary | null>(null)
+const scopeText = computed(() => scopeSummary.value?.displayText ?? '')
 
 // Dialog state
 const showConfirm = ref(false)
@@ -284,8 +286,13 @@ async function load() {
       await router.push('/login')
       return
     }
-    // 留下来的理由见 `me` 的声明：页头那行范围口径读的就是它。
-    me.value = current
+    // 页头那行范围口径（见 `scopeText`）。**单独 try**：这一句话读不到不该把整张
+    // 工作台一起拦下——它是口径说明，不是这一页的数据。
+    try {
+      scopeSummary.value = await getDataScopeSummary()
+    } catch {
+      scopeSummary.value = null
+    }
     metrics.value = await getCounselorWorkbench()
     cases.value = await getCareCases()
     // 副面板失败不影响工作台其余部分，所以它自带 catch，放在这里而不是外层 try 里。
@@ -339,7 +346,7 @@ async function saveReview() {
   if (!detail.value) return
   const risk = detail.value.risk_events.find((item) => item.status === 'PENDING') || detail.value.risk_events[0]
   if (!risk) {
-    showToast('error', '没有可复核的风险事件')
+    showToast('error', '没有可复核的筛查信号')
     return
   }
 
@@ -578,8 +585,9 @@ onMounted(load)
         <h1>今日工作台</h1>
         <!-- 副标题此前写的是一句**设计说明**（「以待复核、逾期跟进和复测任务为核心，
              不默认展开高敏感内容」）——它说的是这一页是怎么设计的，而读者站在这一页上
-             要回答的问题是「这些数字说的是谁」。同一句话在「我的范围筛查统计」那一页
-             已经换成口径了（`AnalyticsPage`，e2e 按 `.page-desc` 断言它）。
+             要回答的问题是「这些数字说的是谁」。同一句话在心理老师那几页统计上
+             已经换成口径了（`/counselor/analytics/*` 的页头，`ReportPageHeader.vue`
+             那枚「当前数据范围」徽标，§5.2）。
              这里每一个数都按数据范围算（§9），所以这一行说的就是范围。
              取不到 `scopes` 时换一句不给数字的：仍然说的是范围，只是不说成「全校」。 -->
         <p class="page-desc">
@@ -789,7 +797,7 @@ onMounted(load)
               <!-- 截断必须自己说出来。没有这一句，20 条与 400 条长得一模一样，
                    而这一块正是老师排工作量的地方。 -->
               <p v-if="remindersTruncated" class="muted tiny" style="margin-top:10px">
-                另有 {{ remindersHidden }} 项未显示，请到「重点学生」逐条处理。
+                另有 {{ remindersHidden }} 项未显示，请到「重点关注学生」逐条处理。
               </p>
               <!-- 两支是**互斥且穷尽**的，所以「去哪处理」这句话不会两遍也不落空。
                    没有截断时这一支同样要写：`.timeline` 有 460px 的上限，19 条里
@@ -797,7 +805,7 @@ onMounted(load)
                    而屏幕上看起来就是「提醒只有这五条」。它与队列那一句是同一类声明
                    （「你看到的这份清单是不是全部」），差别是这一处裁的是**高度**。 -->
               <p v-else-if="reminders.length" class="muted tiny" style="margin-top:10px">
-                共 {{ reminders.length }} 项，列表可上下滚动；逐条处理请到「重点学生」。
+                共 {{ reminders.length }} 项，列表可上下滚动；逐条处理请到「重点关注学生」。
               </p>
             </template>
           </div>
@@ -873,7 +881,7 @@ onMounted(load)
           <button v-if="detail.case_status !== 'CLOSED'" type="button" @click="closeCase">关闭档案</button>
           <button v-else type="button" @click="reopenCase">重新打开</button>
         </div>
-        <h3>风险事件</h3>
+        <h3>筛查信号</h3>
         <ul>
           <li v-for="event in detail.risk_events" :key="event.id">
             命中重点关注题目，建议心理老师及时人工复核。 ·

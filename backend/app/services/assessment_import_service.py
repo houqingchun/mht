@@ -77,6 +77,7 @@ from app.models.assessment import (
     AssessmentTaskScope,
     DimensionResult,
     RiskEvent,
+    active_task_predicate,
 )
 from app.models.care import ManualReview
 from app.models.enums import ScopeType
@@ -1031,12 +1032,24 @@ def _resolve_import_task(
 
     不存在与看不见都回 404、同一句话：两种情况下操作员要做的事是同一件（去看任务
     列表里有没有这一场），而分开报等于告诉他「这个 id 是存在的」。
+
+    **已作废的任务收不下这一批**（§4.12：作废任务不进统计、不进下拉）。这里与上面
+    那条不同，回的是 **422 加一句原因**，不是 404：这个 id 是操作员从界面上选来的、
+    它确实存在，装作「不存在」会让他反复刷新重选同一个。作废是终态，所以出路只有两条，
+    都在提示里写着——换一场任务，或者不绑任务（本轮导入自己成一批）。
     """
     if task_id is None:
         return None
     task = db.get(AssessmentTask, task_id)
     if task is None or task.school_id != school.id:
         raise AppError("NOT_FOUND", "测评任务不存在", 404)
+    if task.status == "VOIDED":
+        raise AppError(
+            "VALIDATION_ERROR",
+            "这场测评任务已作废，不能再关联导入记录："
+            "请改选一场有效的任务，或者不关联任务（本次导入会自成一批）",
+            422,
+        )
     ensure_task_reader(actor)
     return task
 
@@ -2219,7 +2232,13 @@ def existing_import_session(
 
     两个条件缺一不可：会话自身是导入的（`source`），它所在的任务也是导入批次任务。
     只按 `submitted_at` 落在本月来找会在系统内那场恰好也在本月的学生身上误报——
-    而「系统内答过」根本不是重复，他答的是另一场测评。
+    「系统内答过」根本不是重复，他答的是另一场测评。
+
+    **已作废任务里的那一场不算**（`active_task_predicate`，§4.12 的同一条）。少了这一句，
+    「作废本月的导入任务、再把同一份文件导一次」会出现下面这条谁也读不通的路：
+    判重说这一行是 `DUPLICATE`（要人拍板），操作员选「覆盖」，于是一次新的导入
+    **改写了那场已经作废的测评**——而它不进任何统计，最后既没留下一份新的、
+    也没改变那份旧的在界面上的可见性。作废之后同月再导，在语义上就是**没导过**。
     """
     start, end = month_bounds(tested_on)
     return db.scalar(
@@ -2231,6 +2250,7 @@ def existing_import_session(
             AssessmentTask.source == "IMPORTED",
             AssessmentSession.submitted_at >= start,
             AssessmentSession.submitted_at < end,
+            active_task_predicate(),
         )
         .order_by(AssessmentSession.id.desc())
     )
@@ -3404,6 +3424,17 @@ def _task_for_month(
     **而真正被就地改写的会话属于 09-17 那一批**。批次号、审计的 `resource_id`、
     被改写的会话三者说的必须是同一件事，不然轨迹答不上「这次导入动了什么」。
     取最新之后，列表上的名字也是用户最近一次导入确认过的那个。
+
+    **已作废的那一场不复用**（`active_task_predicate`，§4.12）。这是 2026-09-25 修的
+    一个静默缺陷：作废之后同月再导一次，这一支会把新数据**原样塞回那场已作废的任务**，
+    而那一场从此不进任何统计（§4.12）——操作员的感受是「导进去了，但哪儿都查不到」，
+    而屏幕上从头到尾没有一句话说得出这件事。作废是**终态**（模型上的注释写着这一条），
+    所以同月再导就该是一场**新的**任务；被作废的那一场连同它的批次、行、外部结果
+    一条不少地留着当历史（§4.16），两场并存正是 §4.17 说的那种形状。
+
+    判据用的是 `active_task_predicate()` 而不是在这里另写一次
+    `status != "VOIDED"`——那一句已经是「这场任务还算不算数」的唯一定义，而
+    `analytics_service` / `care_service` / `task_service` 读的都是它。
     """
     start, end = month_bounds(tested_on)
     existing = db.scalar(
@@ -3413,6 +3444,7 @@ def _task_for_month(
             AssessmentTask.source == "IMPORTED",
             AssessmentTask.start_at >= start,
             AssessmentTask.start_at < end,
+            active_task_predicate(),
         )
         .order_by(AssessmentTask.id.desc())
     )

@@ -2,7 +2,7 @@ import csv
 import io
 from datetime import datetime
 
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import and_, case, delete, func, select, update
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
@@ -15,12 +15,15 @@ from app.models.assessment import (
     AssessmentTarget,
     AssessmentTask,
     AssessmentTaskScope,
+    RiskEvent,
     effective_session_predicate,
     expected_participation_predicate,
 )
 from app.models.common import now_local_naive
 from app.models.enums import RoleCode
 from app.models.organization import ClassGroup, Grade, School, Student
+from app.models.importing import AssessmentImportBatch
+from app.models.care import ManualReview, StudentCareCase
 from app.models.scale import AssessmentScale
 from app.security.data_scope import ensure_student_in_scope, student_scope_predicate
 from app.security.permissions import (
@@ -254,9 +257,21 @@ def task_target_counts(db: Session, task_id: int) -> tuple[int, int]:
     return counts["expected_targets"], counts["completed_targets"]
 
 
-def list_assessment_tasks(db: Session, user: UserAccount) -> list[dict]:
+def list_assessment_tasks(db: Session, user: UserAccount, *, status_filter: str | None = None) -> list[dict]:
     ensure_task_reader(user)
-    tasks = db.scalars(select(AssessmentTask).order_by(AssessmentTask.id.desc())).all()
+    statement = select(AssessmentTask)
+    if status_filter == "VOIDED":
+        statement = statement.where(AssessmentTask.status == "VOIDED")
+    else:
+        # §4.11：**只有显式选「已作废」时才显示 VOIDED**，`ALL` 也不含它。
+        # 「全部」说的是「全部还在用的任务」，不是「连作废过的一起列出来」——
+        # 后者会让一场已经作废的普查回到列表上，而它的目标行正被 §4.12 从各处统计里
+        # 排除掉：同一个任务在两页上一在（列表）一不在（统计），读者没法解释。
+        #
+        # `ACTIVE` / `CLOSED` 两个字面量**不在这里筛**（那要下一段按推出来的状态做），
+        # 所以它们与 `ALL` 一样只拿到「不含 VOIDED」的那个集合，再由下一段收窄。
+        statement = statement.where(AssessmentTask.status != "VOIDED")
+    tasks = db.scalars(statement.order_by(AssessmentTask.id.desc())).all()
     # 整场任务的应测数（**不加范围谓词**），`effective_task_status` 的口径。
     # 一次分组查询把全部任务取齐，不按任务各查一遍——下面那一组数跟调用者的范围走，
     # 这一组不跟，两套数必须都算出来。
@@ -284,21 +299,32 @@ def list_assessment_tasks(db: Session, user: UserAccount) -> list[dict]:
     scope = student_scope_predicate(db, user)
     items = []
     for task in tasks:
+        total_all, completed_all = whole.get(task.id, (0, 0))
+        # 注意：发出去的是**推出来的**状态，不是 `assessment_task.status`
+        # 那一列的原文。理由与口径见 `effective_task_status`。
+        status = effective_task_status(
+            task, total_targets=total_all, completed_targets=completed_all, now=now
+        )
+        # §4.11 的「进行中 / 已结束」筛的是**这个**状态，不是上面 SQL 里那一列的原文。
+        # `assessment_task.status` 是写入时定死的字面量（一场过了截止日期的普查在上面
+        # 仍然写着 `ACTIVE`，CLAUDE.md §12），按它筛会得到「列表上明明写着已结束、选
+        # 『已结束』却一条都筛不出来」——同一个状态两个来源，正是 §12 那件事的复现。
+        #
+        # 位置在计数之前：被筛掉的那几场不必再各查一次参与口径（那是这一轮里最贵的
+        # 一个查询）。判据只有 `ACTIVE` / `CLOSED` 两个值——`VOIDED` 与 `ALL` 已经在
+        # 上面那一段收窄过了，这里再判一次会把 `VOIDED` 全部筛掉。
+        if status_filter in ("ACTIVE", "CLOSED") and status != status_filter:
+            continue
         # 一次查询给出这一场在这位读者的范围里的五个数（§18.10）。从前这里是两个
         # 各查一遍的标量——那时「目标」「完成」是两个独立的事实，而现在「应测」是
         # 由分子分母**一起**算出来的，分开查会让两者在某次改动之后对不上。
         counts = task_participation_counts(db, task.id, scope=scope)
-        total_all, completed_all = whole.get(task.id, (0, 0))
         items.append(
             {
                 "id": task.id,
                 "task_no": task.task_no,
                 "name": task.name,
-                # 注意：发出去的是**推出来的**状态，不是 `assessment_task.status`
-                # 那一列的原文。理由与口径见 `effective_task_status`。
-                "status": effective_task_status(
-                    task, total_targets=total_all, completed_targets=completed_all, now=now
-                ),
+                "status": status,
                 "scope_type": task.scope_type,
                 "start_at": task.start_at.isoformat() if task.start_at else None,
                 "end_at": task.end_at.isoformat() if task.end_at else None,
@@ -317,6 +343,103 @@ def list_assessment_tasks(db: Session, user: UserAccount) -> list[dict]:
             }
         )
     return items
+
+
+def ensure_task_in_scope(db: Session, user: UserAccount, task_id: int) -> None:
+    """删除 / 作废这场任务，得先看它的人在不在你的数据范围里（§4.9）。
+
+    §4.9 给心理老师那一格写的不是光秃秃的「是」，而是「**需在数据范围/任务权限内**」——
+    与 §9 那条「能力回答『心理老师能不能删任务』，范围回答『这位心理老师能不能删**这**
+    一场』」是同一条。少了它，一个只带 `CLASS` 范围的心理老师能删掉整所学校的普查任务：
+    他确实是心理老师（能力过关），而那一场里一个他的学生都没有。
+
+    判据取**目标行里的学生**而不是 `created_by`：任务可以在创建之后被转交、补发，
+    而「这场任务测的是不是我的学生」才是这条规则要回答的问题。任务**一条目标行都没有**
+    时放行——那时候没有任何学生的数据会被它牵连，而刚建好还没发出去的任务正是这个形状
+    （它与「目标行都在别人的范围里」是两件事，不能合成一条）。
+
+    读与写共用它（`task_delete_check` 进门就调），所以预览说能删、真删的时候也一定能删
+    ——两处各写一遍必然漂，而漂的那一天界面上会出现「预览说能删、点下去 403」。
+    """
+    task = db.get(AssessmentTask, task_id)
+    if task is None:
+        raise AppError("NOT_FOUND", "测评任务不存在", 404)
+    total = db.scalar(
+        select(func.count(AssessmentTarget.id)).where(AssessmentTarget.task_id == task_id)
+    ) or 0
+    if total == 0:
+        return
+    visible = db.scalar(
+        select(func.count(AssessmentTarget.id))
+        .join(Student, Student.id == AssessmentTarget.student_id)
+        .where(AssessmentTarget.task_id == task_id, student_scope_predicate(db, user))
+    ) or 0
+    if visible == 0:
+        raise AppError(
+            "SCOPE_FORBIDDEN",
+            "这场测评任务里的学生不在你的数据范围内，不能删除或作废",
+            403,
+        )
+
+
+def task_delete_check(db: Session, user: UserAccount, task_id: int) -> dict:
+    ensure_task_writer(user)
+    ensure_task_in_scope(db, user, task_id)
+    task = db.get(AssessmentTask, task_id)
+    target_count = db.scalar(select(func.count(AssessmentTarget.id)).where(AssessmentTarget.task_id == task.id)) or 0
+    session_count = db.scalar(select(func.count(AssessmentSession.id)).where(AssessmentSession.task_id == task.id)) or 0
+    result_count = db.scalar(select(func.count(AssessmentResult.id)).join(AssessmentSession).where(AssessmentSession.task_id == task.id)) or 0
+    import_batch_count = db.scalar(select(func.count(AssessmentImportBatch.id)).where(AssessmentImportBatch.task_id == task.id)) or 0
+    committed_count = db.scalar(select(func.count(AssessmentImportBatch.id)).where(AssessmentImportBatch.task_id == task.id, AssessmentImportBatch.status == "COMMITTED")) or 0
+    risk_count = db.scalar(select(func.count(RiskEvent.id)).where(RiskEvent.session_id.in_(select(AssessmentSession.id).where(AssessmentSession.task_id == task.id)))) or 0
+    pending_risk_count = db.scalar(select(func.count(RiskEvent.id)).where(RiskEvent.session_id.in_(select(AssessmentSession.id).where(AssessmentSession.task_id == task.id)), RiskEvent.status == "PENDING")) or 0
+    manual_count = db.scalar(select(func.count(ManualReview.id)).join(RiskEvent, RiskEvent.id == ManualReview.risk_event_id).where(RiskEvent.session_id.in_(select(AssessmentSession.id).where(AssessmentSession.task_id == task.id)))) or 0
+    student_ids = select(AssessmentSession.student_id).where(AssessmentSession.task_id == task.id)
+    care_count = db.scalar(select(func.count(StudentCareCase.id)).where(StudentCareCase.student_id.in_(student_ids))) or 0
+    hard = session_count == result_count == committed_count == risk_count == import_batch_count == 0
+    return {
+        "taskId": task.id, "taskNo": task.task_no, "taskName": task.name,
+        "source": task.source, "status": task.status,
+        "deleteMode": "HARD_DELETE" if hard else "VOID", "canHardDelete": hard,
+        "targetCount": target_count, "sessionCount": session_count, "resultCount": result_count,
+        "importBatchCount": import_batch_count, "committedImportBatchCount": committed_count,
+        "riskEventCount": risk_count, "pendingRiskEventCount": pending_risk_count,
+        "manualReviewCount": manual_count, "careCaseCount": care_count,
+        "warning": ("该任务尚未产生正式测评事实，将物理删除。" if hard else
+                    "该任务已产生正式测评事实，删除将按作废处理，原始历史与人工关怀记录会保留。"),
+    }
+
+
+def delete_or_void_task(db: Session, user: UserAccount, task_id: int, *, reason: str | None) -> dict:
+    check = task_delete_check(db, user, task_id)
+    task = db.get(AssessmentTask, task_id)
+    # 幂等：已经作废过的任务再作废一次，改的正是 `voided_at` / `voided_by` /
+    # `void_reason` 这三列——也就是「谁在什么时候、因为什么把它作废的」这条记录本身。
+    # 第二次调用看上去什么都没发生（状态仍然是 VOIDED、计数也一样），而轨迹已经被
+    # 后来者覆盖了，且**没有任何东西看得出来**。
+    #
+    # 界面上确实有一道遮挡（`TasksPage.vue` 的删除按钮 `v-if="row.status !== 'VOIDED'"`），
+    # 但那是**前端**的，挡不住直接调接口、双击、或者两个标签页各点一次。与 §4 那句
+    # 「后端鉴权是最终权限来源，前端隐藏不是安全措施」是同一条。
+    if task.status == "VOIDED":
+        raise AppError(
+            "CONFLICT",
+            "这场测评任务已经作废过了，不能重复作废：重复作废会覆盖「谁在什么时候作废的」那条记录。",
+            409,
+        )
+    if check["canHardDelete"]:
+        db.execute(delete(AssessmentTarget).where(AssessmentTarget.task_id == task_id))
+        db.execute(delete(AssessmentTaskScope).where(AssessmentTaskScope.task_id == task_id))
+        db.delete(task)
+        return {**check, "mode": "HARD_DELETE", "status": "DELETED"}
+    cleaned = (reason or "").strip()
+    if not cleaned:
+        raise AppError("VALIDATION_ERROR", "已有正式测评事实的任务作废时必须填写原因", 422)
+    now = now_local_naive()
+    task.status, task.voided_at, task.voided_by, task.void_reason = "VOIDED", now, user.id, cleaned
+    db.execute(update(AssessmentSession).where(AssessmentSession.task_id == task_id, AssessmentSession.is_effective.is_(True)).values(is_effective=False))
+    db.execute(update(RiskEvent).where(RiskEvent.session_id.in_(select(AssessmentSession.id).where(AssessmentSession.task_id == task_id)), RiskEvent.status == "PENDING").values(status="VOIDED", voided_at=now, voided_by=user.id, void_reason=cleaned))
+    return {**check, "mode": "VOID", "status": "VOIDED"}
 
 
 def create_school_assessment_task(
@@ -961,4 +1084,3 @@ def mark_target_participation(
     target.marked_at = now_local_naive()
     db.flush()
     return target
-

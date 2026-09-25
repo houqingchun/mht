@@ -100,7 +100,7 @@ function reset() { report.value = null; error.value = ''; loading.value = false 
 </script>
 
 <template>
-  <ReportPageHeader title="全校预警总览" description="汇总测评覆盖、筛查信号与待复核工作，数据仅用于教育支持。"/>
+  <ReportPageHeader description="汇总当前数据范围内的测评覆盖、筛查信号与待复核工作，数据仅用于教育支持。"/>
   <FilterBar @query="onQuery" @reset="reset"/>
 
   <ErrorState v-if="error" :message="error"/>

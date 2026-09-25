@@ -1832,6 +1832,20 @@ dd {
   gap: 16px;
 }
 
+/* 标题下面那段「这一步会发生什么」。与 `.form-dialog-field` 的 `hint` 同一套视觉语言
+   （灰、小一号），区别是它不属于任何一格。换行保留（`white-space: pre-line`）：
+   删除影响预览是一行一条计数，压成一整段会读不出「哪几个数一起构成这次删除」。 */
+.form-dialog-description {
+  margin: 0;
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: #f4f7fa;
+  color: #4a5a6d;
+  font-size: 0.86rem;
+  line-height: 1.6;
+  white-space: pre-line;
+}
+
 /* 每一格：label（字段名 + 控件）下面可能还有一行 `hint`。外面这层与里面那层
    都用同一个 6px 间距，于是「控件 → 提示语」的间隔与「字段名 → 控件」一致。 */
 .form-dialog-field {

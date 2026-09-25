@@ -54,7 +54,7 @@ onMounted(load)
   <div>
     <div class="page-head">
       <div>
-        <div class="eyebrow">重点学生治理</div>
+        <div class="eyebrow">重点关注学生治理</div>
         <h1>重点进展</h1>
         <p class="page-desc">德育领导查看必要的身份摘要、责任人和进度，不展示原始答案及访谈正文。</p>
         <!-- 口径要写在界面上：这一页只列**在办**的档案。不说的话，读者会拿它当

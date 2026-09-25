@@ -23,6 +23,7 @@ import ReportGradesPage from '../features/analytics/views/GradesPage.vue'
 import ReportClassPage from '../features/analytics/views/ClassPortraitPage.vue'
 import ReportExportPage from '../features/analytics/views/ReportExportPage.vue'
 import StudentHistoryPage from '../features/student/StudentHistoryPage.vue'
+import LeaderAnalyticsReportPage from '../features/leader/LeaderAnalyticsReportPage.vue'
 
 export const routes: RouteRecordRaw[] = [
   { path: '/', redirect: '/login' },
@@ -38,7 +39,7 @@ export const routes: RouteRecordRaw[] = [
 
       // Counselor
       { path: 'counselor/workbench', component: CounselorWorkbenchPage, meta: { role: 'counselor', title: '工作台' } },
-      { path: 'counselor/cases', component: CasesPage, meta: { role: 'counselor', title: '重点学生' } },
+      { path: 'counselor/cases', component: CasesPage, meta: { role: 'counselor', title: '重点关注学生' } },
       { path: 'counselor/cases/:studentId', component: CareCaseDetailPage, meta: { role: 'counselor', title: '学生档案' } },
       // 路径里**没有** `cases`，这是有意的：档案页回答「这份档案走到哪一步了」，
       // 这一页回答「这个学生考过几次、每次多少分」——而**没有档案的学生也要看得到**，
@@ -48,11 +49,11 @@ export const routes: RouteRecordRaw[] = [
       { path: 'counselor/students/:studentId/records', component: StudentRecordsPage, meta: { role: 'counselor', title: '学生测评记录' } },
       { path: 'counselor/data', component: DataCenterPage, meta: { role: 'counselor', title: '数据中心' } },
       { path: 'counselor/analytics', redirect: '/counselor/analytics/overview', meta: { role: 'counselor', title: '统计分析' } },
-      { path: 'counselor/analytics/overview', component: ReportOverviewPage, meta: { role: 'counselor', title: '全校预警总览' } },
-      { path: 'counselor/analytics/dimensions', component: ReportDimensionsPage, meta: { role: 'counselor', title: '全校八维度分析' } },
+      { path: 'counselor/analytics/overview', component: ReportOverviewPage, meta: { role: 'counselor', title: '筛查关注概览' } },
+      { path: 'counselor/analytics/dimensions', component: ReportDimensionsPage, meta: { role: 'counselor', title: '八维度分析' } },
       { path: 'counselor/analytics/grades', component: ReportGradesPage, meta: { role: 'counselor', title: '年级维度对比' } },
       { path: 'counselor/analytics/classes', component: ReportClassPage, meta: { role: 'counselor', title: '班级维度画像' } },
-      { path: 'counselor/analytics/report', component: ReportExportPage, meta: { role: 'counselor', title: '专业解读与导出' } },
+      { path: 'counselor/analytics/report', component: ReportExportPage, meta: { role: 'counselor', title: '专业分析报告' } },
       { path: 'counselor/audit', component: AuditPage, meta: { role: 'counselor', title: '审计日志' } },
       { path: 'counselor/exports', component: ExportCenterPage, meta: { role: 'counselor', title: '导出中心' } },
       { path: 'counselor/tasks', component: TasksPage, meta: { role: 'counselor', title: '测评任务' } },
@@ -61,11 +62,13 @@ export const routes: RouteRecordRaw[] = [
       { path: 'leader/overview', component: LeaderOverviewPage, meta: { role: 'leader', title: '领导总览' } },
       { path: 'leader/progress', component: ProgressPage, meta: { role: 'leader', title: '重点进展' } },
       { path: 'leader/analytics', redirect: '/leader/analytics/overview', meta: { role: 'leader', title: '学校统计' } },
-      { path: 'leader/analytics/overview', component: ReportOverviewPage, meta: { role: 'leader', title: '全校预警总览' } },
-      { path: 'leader/analytics/dimensions', component: ReportDimensionsPage, meta: { role: 'leader', title: '全校八维度分析' } },
+      // 与心理老师那两条同名（V2.0.0 §5.4 / §9 P1-04）：两个角色共用同一个组件，
+      // 「全校」前缀是这套组件里的第二处硬编码标题。范围由页头那枚徽标表达。
+      { path: 'leader/analytics/overview', component: ReportOverviewPage, meta: { role: 'leader', title: '筛查关注概览' } },
+      { path: 'leader/analytics/dimensions', component: ReportDimensionsPage, meta: { role: 'leader', title: '八维度分析' } },
       { path: 'leader/analytics/grades', component: ReportGradesPage, meta: { role: 'leader', title: '年级维度对比' } },
       { path: 'leader/analytics/classes', component: ReportClassPage, meta: { role: 'leader', title: '班级维度画像' } },
-      { path: 'leader/analytics/report', component: ReportExportPage, meta: { role: 'leader', title: '专业解读与导出' } },
+      { path: 'leader/analytics/report', component: LeaderAnalyticsReportPage, meta: { role: 'leader', title: '学校心理工作分析摘要' } },
       { path: 'leader/tasks', component: TasksPage, meta: { role: 'leader', title: '测评任务' } },
       { path: 'leader/audit', component: AuditPage, meta: { role: 'leader', title: '审计日志' } },
 

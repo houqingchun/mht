@@ -53,7 +53,7 @@ function reset() { report.value = null; error.value = ''; selectedDimCode.value 
 </script>
 
 <template>
-  <ReportPageHeader title="年级维度对比" description="对比各年级心理维度表现，辅助识别需要重点支持的群体。"/>
+  <ReportPageHeader description="对比各年级心理维度表现，辅助识别需要重点支持的群体。"/>
   <FilterBar @query="onQuery" @reset="reset"/>
 
   <ErrorState v-if="error" :message="error"/>
@@ -129,7 +129,14 @@ function reset() { report.value = null; error.value = ''; selectedDimCode.value 
 
     <section class="card band-card">
       <h2 class="section-title">各年级关注等级分布</h2>
-      <p class="muted tiny">按总分区间分档，每名可评价学生只落一档，三档互不叠加；区间取自本次结果所用的量表评分规则版本。与全校总览那张图**同一个算法**，所以各年级三档之和恒等于全校那一份。</p>
+      <!-- 这里此前写的是「各年级三档之和恒等于**全校**那一份」。等式本身是对的
+           （两处都走 `_level_distribution`，且 `_report_scope` 只取有目标行的学生，
+           所以每个入样学生都落进恰好一个年级分组），**错的是「全校」这两个字**：
+           两份数都按读者的数据范围算（§9），一个只带一个班范围的心理老师看到的
+           「总览那一份」是他自己那 40 个人，不是全校。用「全校」去称呼它，正是
+           §9 那条「范围数字必须在 UI 上写明口径，否则它冒充全校数字，比不给更糟」。
+           所以改成范围中性的说法，并顺手把口径指给读者——页头那枚徽标就写着它。 -->
+      <p class="muted tiny">按总分区间分档，每名可评价学生只落一档，三档互不叠加；区间取自本次结果所用的量表评分规则版本。与总览那张图**同一个算法**，所以各年级三档之和恒等于总览那一份。两份数的范围都是你的数据范围（见页头「当前数据范围」）。</p>
       <div v-if="gradesWithSamples.length" class="band-grid">
         <div v-for="g in gradesWithSamples" :key="g.grade_name" class="band-cell">
           <h3 class="band-cell-title">{{ g.grade_name }}</h3>

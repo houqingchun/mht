@@ -36,7 +36,7 @@
 --   scale_rule                  1 行   评分规则：总分 / 维度分段与效度阈值都随这一行走（CLAUDE.md §6）
 --   user_scope                  1 行   admin 的范围行：§9 里没有范围行的账号，每个列表都是空的
 --
--- 其余 28 张业务表一行都不写：名册、员工账号、测评任务、
+-- 其余 30 张业务表一行都不写：名册、员工账号、测评任务、
 -- 一切测评与关怀记录全空。开通之后的第一件事是「组织学生 → 学生信息导入」
 -- （学生账号跟着名册一起生成，不在「账号与权限」里建），不是往这个文件里加行。
 --
@@ -251,11 +251,13 @@ UNION ALL SELECT 'assessment_scale' AS 表, COUNT(*) AS 行数 FROM assessment_s
 UNION ALL SELECT 'auth_session' AS 表, COUNT(*) AS 行数 FROM auth_session
 UNION ALL SELECT 'export_job' AS 表, COUNT(*) AS 行数 FROM export_job
 UNION ALL SELECT 'grade' AS 表, COUNT(*) AS 行数 FROM grade
+UNION ALL SELECT 'professional_report' AS 表, COUNT(*) AS 行数 FROM professional_report
 UNION ALL SELECT 'role_permission' AS 表, COUNT(*) AS 行数 FROM role_permission
 UNION ALL SELECT 'student_roster_import_batch' AS 表, COUNT(*) AS 行数 FROM student_roster_import_batch
 UNION ALL SELECT 'system_setting' AS 表, COUNT(*) AS 行数 FROM system_setting
 UNION ALL SELECT 'assessment_task' AS 表, COUNT(*) AS 行数 FROM assessment_task
 UNION ALL SELECT 'class_group' AS 表, COUNT(*) AS 行数 FROM class_group
+UNION ALL SELECT 'professional_report_version' AS 表, COUNT(*) AS 行数 FROM professional_report_version
 UNION ALL SELECT 'scale_question' AS 表, COUNT(*) AS 行数 FROM scale_question
 UNION ALL SELECT 'scale_rule' AS 表, COUNT(*) AS 行数 FROM scale_rule
 UNION ALL SELECT 'assessment_import_batch' AS 表, COUNT(*) AS 行数 FROM assessment_import_batch
