@@ -87,11 +87,14 @@
 |---|---|
 | ① 版本号 → `2.0.0` | `555674b`（**独立提交**，5 个文件，含两份生成的 SQL 头） |
 | ② §5.9 余下五条 | 第 **1 / 2 / 3 / 4 / 6** 条裁决并落地，落点索引见 §5.10 第二节 |
-| ③ 出包 | `make deploy-package` → `dist/心晴部署包_V2.0.0.zip` |
+| ③ 出包 | `make deploy-package` → `dist/心晴部署包_V2.0.0.zip`（**12,093,090 字节 / 11.5 MB**，六步全绿） |
 
 第二轮的回归实测：**Backend Tests 847 passed / 0 failed / 513.30s**、
 **E2E 144 passed (33.7s)**。后端 +8 全部来自这一轮新增的三条用例组，
 e2e 数不变是因为它这一轮只动了注释（唯一那次红与被测代码无关，见 §5.10 第四节）。
+
+两条提交：`555674b`（升版本）+ `624d3d9`（五条落地）；**是否推送 `origin/V2.0.0`
+仍等你发话**（第一轮那条 `70e654e` 是你说「2 推送」之后推的）。
 
 ## 3. 下一步（最重要）
 
@@ -945,6 +948,9 @@ AskUserQuestion 里点选，第 4 条按仓库既有约定直接改（当时对�
 第 2 步（把 §5.9 那五条用平实语言讲清楚）促成四个 AskUserQuestion 决定，第 1 步与第 3 步
 分别是**升版本**与**出包**。本节记这三件事的落点，也是这一轮的收尾索引。
 
+两条提交：**`555674b`（升版本，独立）** 与 **`624d3d9`（§5.9 余下五条 + e2e 那处修复）**。
+拆两条的理由见下面第一节末尾。
+
 #### 一、版本号 → `2.0.0`（独立提交 `555674b`）
 
 `backend/app/version.py` 是**唯一出处**（CLAUDE.md §19），所以这次只动五处，一处都不是
@@ -1043,13 +1049,42 @@ expect(target, '列表里没有一场完成过任何学生的任务，这一条�
 
 #### 五、出包
 
-`make deploy-package` → `dist/心晴部署包_V2.0.0.zip`。出包前**先清 staging**（只留
-`wheels/`）：`--keep` 的 `copytree(dirs_exist_ok=True)` 会把上一版的前端产物留成孤儿，
-那是已知陷阱、不是新发现。
+`make deploy-package` → **`dist/心晴部署包_V2.0.0.zip`，12,093,090 字节（约 11.5 MB）**，
+六步全绿（`EXIT=0`）：前端 `vue-tsc -b && vite build` 通过、31 个 wheel、包内自检五条全过、
+zip 里的中文文件名都带 UTF-8 标志位。包里 `package-info.txt` 是
+`version=2.0.0+20260925`；包内 `backend/app/version.py` 是 `__version__ = "2.0.0"`。
 
-**产物名与 `version.py` 同源**（`V2.0.0` 三段都在名字里），而包里那份
-`upgrade_from_v1_0_0.sql` 由出包脚本**当场重新生成**（§30 的 `step("3/6")`），
-所以它认的是这次源码树里的版本号，不是仓库里那份快照。
+**这次没有用 `--keep`**，所以那一行的 `rmtree` 走了正常路径、目录是全新建的——
+「`--keep` 会把上一版前端产物留成孤儿」那个陷阱这一次**不适用**（它是同一个版本重跑时
+才会遇上的，见 §18 与该脚本 `:762` 那段）。产物名与 `version.py` 同源（`V2.0.0` 三段都在
+名字里），而包里那份 `upgrade_from_v1_0_0.sql` 由出包脚本**当场重新生成**（§30 的
+`step("3/6")`，排在整份拷贝之前），所以它认的是这棵树上的版本号、不是仓库里那份快照：
+实测它的表头已经写着「到 **V2.0.0**（迁移 `0022_professional_reports`）」，
+`seed_mysql8.sql` 的表头写着「版本：**V2.0**（2.0.0）」。
+
+**★ 这一次的 wheel 不是从 pypi 下的，而这件事要记清楚。** 出包环境当时**连不上
+pypi.org**（`SSLError(SSLEOFError(8, 'UNEXPECTED_EOF_WHILE_READING'))`，
+重试 5 次后 `Could not find a version that satisfies the requirement alembic==1.20.0`），
+所以第 2 步改用**本地 wheel 源**：把上一版
+`dist/心晴部署包_V1.1.6/wheels/` 那 31 个文件当 `--find-links`，用
+`PIP_NO_INDEX=1 PIP_FIND_LINKS=… make deploy-package` 跑完。
+
+**这一步的正当性是一条可复核的事实，不是一句「应该一样」**：这次要装的 31 项由
+`deploy/requirements.lock.txt` 一处决定，而它（连同 `backend/pyproject.toml`）
+在 `V1.1.6`(`08254dc`) 与本次 `HEAD` 之间**零 diff**：
+
+```
+$ git diff 08254dc HEAD -- backend/pyproject.toml deploy/requirements.lock.txt | wc -l
+0
+```
+
+所以两次的 pin 清单逐字节相同，而 pin 清单是 `locked_requirements()` 的**唯一输入**
+——「跨版本复用一份 wheel 目录假设两个版本的依赖完全一样」（该脚本 `:711-714` 那句）
+在这里是被**验证过**的，不是被假设的。第 5 步的**依赖闭环自检照旧跑过**
+（「依赖闭环完整」那一行），31 个 wheel 一个不少。
+
+**下一次联网出包时不必复刻这套**：它是这次网络不可达的绕行，不是新工序。要是哪天
+pin 清单真的变了，上面那条 `git diff` 会当场数出非零行数——**那就必须重新下载**。
 
 ## 6. 关键文件
 
