@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -21,7 +21,7 @@ from app.models.assessment import (
     # 理由同上——`analytics_service` / `task_service` / `care_service` 都在用它。
     active_task_predicate,
 )
-from app.models.care import StudentCareCase
+from app.models.care import ManualReview, StudentCareCase
 from app.models.enums import RoleCode
 from app.models.organization import Student
 from app.models.scale import AssessmentScale, ScaleQuestion, ScaleRule
@@ -839,6 +839,131 @@ def retry_calculation(db: Session, user: UserAccount, session_id: int) -> dict:
     return data
 
 
+def _touched_risk_signals(db: Session, session_id: int) -> int:
+    """这一场上「有人碰过」的筛查信号条数（`reset_sitting` 要拦的那几条）。
+
+    判据是**有没有人做过决定**，不是状态码本身：复核会把 `status` 推成 `REVIEWED`
+    并写上 `reviewed_by` / `reviewed_at`（`care_service.create_manual_review`），
+    作废会写上 `voided_by` / `voided_at`（`task_service.delete_or_void_task`）。
+    两对时间戳都要单独判——状态码是别人推出来的结论，那两对才是「谁、什么时候」
+    的原始记录，而这里问的正是后者。
+
+    再加一条 `manual_review` 的存在性判断，兜的是**数据库那一侧**：
+    `manual_review.risk_event_id` 是全库唯一指向 `risk_event` 的外键，而它是
+    RESTRICT（全库没有 `ondelete=`，CLAUDE.md §1）。一个「状态还是 PENDING、却已经
+    挂着复核记录」的行正常路径到不了，但真到了的时候，漏掉这一条会让删除在 flush 时
+    撞 1451——用户看到的是一句英文的 500，而不是这里那句说得清来龙去脉的 409。
+    """
+    return (
+        db.scalar(
+            select(func.count(RiskEvent.id)).where(
+                RiskEvent.session_id == session_id,
+                or_(
+                    RiskEvent.status != "PENDING",
+                    RiskEvent.reviewed_by.is_not(None),
+                    RiskEvent.reviewed_at.is_not(None),
+                    RiskEvent.voided_by.is_not(None),
+                    RiskEvent.voided_at.is_not(None),
+                    RiskEvent.id.in_(select(ManualReview.risk_event_id)),
+                ),
+            )
+        )
+        or 0
+    )
+
+
+def reset_sitting(db: Session, session: AssessmentSession) -> None:
+    """把一场测评清回「还没答过」：答卷、评分事实、这一场开出来的待办一起清掉。
+
+    ## 为什么连结果一起清（2026-09-25 用户裁决）
+
+    从前这条路上只删答案、**保留 result 行**，于是「重置 → 重答 → 再交卷」走的不是
+    重新评分，而是 `submit_session` 的幂等提前返回——学生重新答一遍，拿回来的是
+    **上一次那一份分**。那不是「看起来没问题」，它让一次重置在按结果说话的每一处
+    （关注等级、关注率、受控导出、个案详情）都留下一份与当前答卷对不上的记录
+    （PROGRESS §5.9 第 3 项）。裁决是清掉：重置之后这一场回到「还没测」，
+    下一次交卷重新算、重新盖章、重新开待办。
+
+    ## 清掉的是这一场自己的东西，一样不多
+
+    - 答卷 / 结果 / 八维度：都是这一场算出来的，全库没有任何外键指向后两者
+      （`grep` 数得出来），所以它们随这一场走，不会把别的东西悬空。
+    - 筛查信号：**只清没人碰过的那几条**。
+    - **关怀档案、人工复核、跟进、回访、复测一个字都不动**——与
+      `task_service.delete_or_void_task` 同一条口径：那些是人的工作记录，
+      不随一次作答的存废一起消失。
+
+    ## 有人碰过就整场不清（409），而这是「连结果一起清」的直接后果
+
+    `uq_risk_event_session_trigger_rule` 是 `(session_id, trigger_rule, rule_version)`，
+    **状态不在键里**——一条 `REVIEWED` / `VOIDED` 的行照样占着那个三元组。结果行一删，
+    重答之后 `score_session` 会重新走 `maybe_raise_risk_events` 并插同一个三元组
+    （规则版本没变，`trigger_rule` 还是那道题），于是撞 1062、学生拿到一个 500。
+    所以这道门不是「顺手加的拦」，它只有两个出路：把那条信号删掉（那是抹掉一次人工
+    复核，用户明令禁止），或者别清这一场。选后者，并把原因说给用户听。
+
+    判据与 `task_delete_check` 的「有没有正式测评事实」同源，只是粒度是**一场**，
+    不是一场任务。**拦住之后学生不能重答**（`create_or_get_session` 会返回这一场），
+    这是这条裁断的已知代价，记在 PROGRESS 里。
+
+    ## 导入的场次不能走这条路
+
+    这一场不是学生在系统里做的，它的答案本来就不该被重来。而且清掉上面那几样对一个
+    导入场次来说是最坏的一种组合——一份没有答卷、却有评分结果的「重点关注」，
+    学校既无法复核也无法解释。外部普查的结果要改，只能重新导入。
+    """
+    if session.source == "IMPORTED":
+        raise AppError("SESSION_LOCKED", "该测评由学校导入，不能在系统内重新作答", 409)
+    touched = _touched_risk_signals(db, session.id)
+    if touched:
+        raise AppError(
+            "CONFLICT",
+            f"这一场已经有 {touched} 条筛查信号被人工处理过（复核或作废），不能重置："
+            "重置会清掉这一场的评分结果，而重答之后同一场会重新生成同一批信号——"
+            "那与已经处理过的那几条冲突。人工处理记录与原始答卷都不删除。",
+            409,
+        )
+
+    db.execute(delete(AssessmentAnswer).where(AssessmentAnswer.session_id == session.id))
+    db.execute(delete(DimensionResult).where(DimensionResult.session_id == session.id))
+    db.execute(delete(AssessmentResult).where(AssessmentResult.session_id == session.id))
+    db.execute(delete(RiskEvent).where(RiskEvent.session_id == session.id))
+
+    # 会话上「算过什么」的六列一起回退。留着任何一列都在描述一次不再存在的作答：
+    # `answer_snapshot_hash` 说的是「这份答卷算出来过」，`calculation_status` 说的是
+    # 「算完了」，而答卷本身已经没有了。
+    #
+    # `tested_at` / `tested_at_source` 也回退，因为这一场现在**没有**测评日期：
+    # 此前 `/reset` 只清 `submitted_at` 而留着 `tested_at`，于是 CLAUDE.md §23 那条
+    # 「`tested_at` 与 `submitted_at` 今天总是一样」在这条路上本来就不成立。
+    # 两者一起回落到列默认值，正是**一张刚开出来、还没交过的卷子**的样子——
+    # `PENDING_VERIFICATION` 在这里不是「不知道那天测的」，而是「还没测」。
+    session.status = "IN_PROGRESS"
+    session.submitted_at = None
+    session.duration_seconds = None
+    session.tested_at = None
+    session.tested_at_source = "PENDING_VERIFICATION"
+    session.calculation_status = "PENDING"
+    session.calculation_error = None
+    session.answer_snapshot_hash = None
+    session.answer_hash_algorithm = None
+    # 交卷时写下的幂等键说的是「这一场那次交卷」，而那次交卷已经不存在了。
+    session.idempotency_key = None
+
+    # 目标行跟着回到「在办」。留着 `COMPLETED` 而答案没了，会让学生的任务列表
+    # 与答题页各说各话。
+    if session.task_id is not None:
+        target = db.scalar(
+            select(AssessmentTarget).where(
+                AssessmentTarget.task_id == session.task_id,
+                AssessmentTarget.student_id == session.student_id,
+            )
+        )
+        if target is not None:
+            target.status = "IN_PROGRESS"
+            target.completed_at = None
+
+
 def submit_session(db: Session, user: UserAccount, session_id: int, idempotency_key: str | None = None) -> dict:
     """Submit an assessment session.
 
@@ -873,13 +998,16 @@ def submit_session(db: Session, user: UserAccount, session_id: int, idempotency_
                 "该答题会话已提交，且幂等键不一致",
                 409,
             )
-        # A reset-then-retake arrives here with the timing facts erased: /reset
-        # clears `submitted_at` and `duration_seconds` but keeps the result row
-        # (deleting it would erase scored facts the audit trail and any manual
-        # review point at — CLAUDE.md §1). Returning without re-deriving them would
-        # leave a genuinely re-submitted session permanently undated, and the retake
-        # would show 用时「—」 on every surface. Scoring is untouched: the stored
-        # result is still what comes back.
+        # 这一支防的是「有结果、却没有交卷时间」的那一行，而它**不再由 /reset 产生**
+        # ——2026-09-25 起重置会连结果行一起清掉（`reset_sitting`），于是重答走的是
+        # 下面那条全新路径，不再落进这里。今天造得出这个状态的只剩历史行与手工改库
+        # （V1.0 就没有这条不变量的写入侧）。留着它是因为后果不可恢复：不重新盖章的话
+        # 这一场从此永远没有 `submitted_at`，`latest_session_order` 会把它排到最后
+        # （未交卷的排在后面），个案详情会把**上一场**当成「本次测评」显示，而用时
+        # 在每一处都是「—」。评分一个字都不动：回来的仍然是库里那一份结果。
+        #
+        # 它现在由 `test_a_result_without_a_submission_timestamp_is_re_stamped` 覆盖，
+        # 而那一条自己把那个状态造出来（接口造不出来了）——判据仍然是这条分支在不在。
         if session.submitted_at is None:
             _stamp_submission(db, session, answer_times_for_session(db, session.id))
         return result_payload(db, session)

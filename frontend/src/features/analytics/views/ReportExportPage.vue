@@ -134,7 +134,14 @@ async function exportReport() {
       </section>
     </template>
   </template>
-  <div v-else class="empty">请选择测评任务后点击查询</div>
+  <!--
+    空态是一句**关于数据的话**，不是一句操作指导语（§14）。
+    这一支此前写着「请选择测评任务后点击查询」——而进这一页时会自动加载最新可分析
+    任务（`FilterBar.loadTasks`），所以走到这里意味着**真的没有可用任务**，
+    此时那个下拉框本身就选不出东西来。一句话把用户支使去做一件做不到的事，
+    比不说更糟。
+  -->
+  <div v-else class="empty">本学年还没有可用的测评任务</div>
 </template>
 
 <style scoped>

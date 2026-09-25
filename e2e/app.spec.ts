@@ -205,6 +205,17 @@ test.describe('账号管理', () => {
  * Clear the student's answers via the API so each test starts from question 1.
  * The session id is not in the URL (that segment is the *task* id), so look it
  * up from /student/tasks first.
+ *
+ * **2026-09-25 起，这个端点连这一场的评分事实一起清**（`assessment_service.reset_sitting`
+ * 删结果、八维度与筛查信号，理由见 PROGRESS §5.9 第 3 项）。对本文件的影响：下面那三条
+ * 「进度 / 光标」用例与 `enterFirstAssessment` **都不提交答卷**，所以演示库里那个学生的
+ * 这一场跑完之后是「答过、没交过卷」。
+ *
+ * 从前跑完之后是「答过、没交过卷、却留着上一次那一份分」——那正是旧 `/reset` 留下的
+ * 不一致（重答的学生拿回旧分）。清掉它是对的，代价是：这一组跑过之后，那个学生在
+ * **按结果说话**的页面上（关注等级、关注率）变成「未测评」，`make seed-demo` 才补得回来。
+ * 全量 e2e 里没有任何用例依赖那一份分（演示数据里还有二十多名学生），这一点是跑出来的，
+ * 不是推出来的。
  */
 async function resetStudentSession(page: ReturnType<typeof test.extend>) {
   await page.evaluate(async () => {
@@ -894,10 +905,11 @@ test.describe('Analytics report functions', () => {
     //    所以主体直接出来——断这一句就是在证明「上面那条标题下面确实有东西」，
     //    而不是一个连任务都没选中的空壳。
     //
-    //    **没有断 `请选择测评任务后点击查询`**：那条空态只有库里一个任务都没有时
-    //    才可达（`onQuery` 拿不到 taskIds 就不发请求），而它在那时说的「请选择」也是
-    //    错的话——任务列表本来就是空的，没有东西可选。文案那一处记在 PROGRESS 的缺口里，
-    //    不在这里为它写一条永远跑不到的断言。
+    //    **没有断那条空态文案**：它只有库里一个任务都没有时才可达（`onQuery` 拿不到
+    //    taskIds 就不发请求），而演示库上永远有任务——为它写断言就是一条永远跑不到的
+    //    用例。那句话本身 2026-09-25 已经改对了（「请选择测评任务后点击查询」→
+    //    「本学年还没有可用的测评任务」，查询按钮同时置灰），五个落点见 PROGRESS；
+    //    这里只留一句说明，不摆一条恒绿的断言。
     await expect(
       page.getByRole('status').filter({ hasText: '已自动加载最新可分析任务' })
     ).toBeVisible();
@@ -3464,21 +3476,20 @@ test.describe('失败与竞态不留下旧数据', () => {
  *   `test_task_governance.py::test_void_imported_task_keeps_import_batches` 钉住。
  */
 test.describe('测评任务的删除与作废治理', () => {
-  // ★ 这一组**串行**跑，不是并发。这是 2026-09-25 被一次红逼出来的，理由要留着：
+  // ★ 这里 2026-09-25 一度写过 `test.describe.configure({ mode: 'serial' })`，**已经删掉**。
   //
-  // 全仓只有这一组会用 `POST /api/v1/assessment-tasks` 真建任务（其余建任务的用例走的
-  // 是种子 / 演示数据）。而那个端点**并发不安全**：`task_service.create_school_assessment_task`
-  // 拼的是 `TASK-{utcnow:%Y%m%d%H%M%S}-{全库任务数 + 1}`，同一秒内的两个请求会算出
-  // **同一个任务号**，撞 `task_no` 唯一键，其中一个拿到 500。
+  // 当时的红：全仓只有这一组会用 `POST /api/v1/assessment-tasks` 真建任务（其余建任务的
+  // 用例走的是种子 / 演示数据），而那个端点并发不安全——`create_school_assessment_task`
+  // 拼的是 `TASK-{utcnow:%Y%m%d%H%M%S}-{全库任务数 + 1}`，同一秒里的两个请求算出**同一个
+  // 任务号**，撞唯一键的那个拿到 500（实测两个并发 curl：`req1 http=500` / `req2 http=200`）。
+  // 于是这一组自己撞自己（Playwright 默认 3 workers），红的原因不在被测代码。
   //
-  // 实测复现（两个并发 curl POST，探针跑完即删）：`req1 http=500` / `req2 http=200`。
-  // 所以三条并发时那次「1 failed / 2 passed」，红的原因不在被测代码，而在**我的两条
-  // 用例自己撞自己**（`Playwright` 默认 3 workers）。
+  // 串行是**绕过，不是修复**：真实用户在同一秒里点两次「新建任务」照样 500。修复落在
+  // `services/numbering.py`（撞号就往上试一个号），所以那条串行线不再需要——**别再把它
+  // 加回来**：它是「这一组需要串行」这句话里唯一会过期的那半截，留着会掩盖真回归。
   //
-  // 串行是**绕过，不是修复**：真实用户在同一秒里点两次「新建任务」仍然会有一个 500。
-  // 它在创建路径上，不属于 P0-01（删除 / 作废治理），所以没有顺手改；它记在 PROGRESS.md
-  // 「顺带发现、未修」那一节里等人裁。
-  test.describe.configure({ mode: 'serial' })
+  // 语义由 `backend/app/tests/test_numbering_concurrency.py` 钉住（两个独立事务 +
+  // 钉死的时钟，必然撞号）。这份 e2e 不重复推它，也不为它造数据。
 
   /** 心理老师的 API 会话。浏览器那一路另走 `loginAs`，两条互不影响。 */
   async function counselorHeaders(page: Page) {
@@ -3559,10 +3570,19 @@ test.describe('测评任务的删除与作废治理', () => {
     const items = (await listed.json()).data.items as Array<{
       id: number; task_no: string; name: string; total_targets: number; completed_targets: number;
     }>;
-    // 挑靶子按**数据**挑（目标学生最多的那一场），不写死任务名：写死会在某一天
-    // 红在一个与功能无关的地方。
-    const target = [...items].sort((a, b) => b.total_targets - a.total_targets)[0];
-    expect(target, '列表里一场任务都没有，这一条失去了对象').toBeTruthy();
+    // 挑靶子按**数据**挑，不写死任务名：写死会在某一天红在一个与功能无关的地方。
+    //
+    // ★ 判据是 `completed_targets`（有学生真的答完了），**不是 `total_targets`**。
+    // 2026-09-25 这一条红过一次，红的原因不在被测代码，在原来那句启发式：
+    // `total_targets` 数的是**配置**（范围内有多少学生），而这一组里另两条用例会
+    // **并发**建一场新任务（Playwright 默认 3 workers），新任务的目标数与演示那一场
+    // **一样多**（都是「范围内全部学生」）——于是「目标最多的那一场」能指到那个刚建出来、
+    // 一场都没答过的空任务上，`canHardDelete` 是 `true`，而这条用例要的恰恰是「有事实的
+    // 那一场」。完成数是**事实**，空任务恒为 0，按它排稳定。
+    const target = [...items]
+      .filter((t) => t.completed_targets > 0)
+      .sort((a, b) => b.completed_targets - a.completed_targets)[0];
+    expect(target, '列表里没有一场完成过任何学生的任务，这一条失去了对象').toBeTruthy();
 
     const check = await page.request.get(`/api/v1/assessment-tasks/${target.id}/delete-check`, {
       headers,

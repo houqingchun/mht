@@ -12,8 +12,10 @@
   「没有这个学生」「不在你的范围内」这三种失败**各有各的话术**（前两种分开报是刻意的，
   后一种与前一种同话术也是刻意的，理由见服务里的 `locate_student`）。
 * 外部的取值约定（性别 `1/2`、答案 `1/0`）在入库前就翻译成系统编码，落库不留外部词汇。
-* 导入的会话对学生是**只读**的：他既不能继续作答，也不能 reset——后者会把一条
-  「没有答卷的重点关注」留在库里。
+* 导入的会话对学生是**只读**的：他既不能继续作答，也不能 reset。拒绝的那条判据在
+  `assessment_service.reset_sitting` 的第一行，而它 2026-09-25 之后的理由是新的——
+  从前是「删了答案会留下一条没有答卷的重点关注」，现在是「这一场本来就不该被重来，
+  而 reset 会连同它的评分事实一起清掉」。
 """
 
 import re
@@ -1334,7 +1336,8 @@ def test_a_student_cannot_answer_or_reset_an_imported_session(client, db_session
     assert opened.status_code == 409
     assert opened.json()["error"]["message"] == "该测评由学校导入，不能在系统内作答"
 
-    # reset 删答案但保留结果行 —— 对导入的记录来说那会留下一条没有答卷的「重点关注」
+    # reset 会把这一场清回「还没答过」——对导入的记录来说，那是把学校带进来的那份外部
+    # 普查结果连同它的评分事实一起抹掉，而学生手里并没有这份答卷可以重新答一遍
     reset = client.post(f"/api/v1/assessment-sessions/{session.id}/reset", headers=student_headers)
     assert reset.status_code == 409
     assert reset.json()["error"]["message"] == "该测评由学校导入，不能在系统内重新作答"

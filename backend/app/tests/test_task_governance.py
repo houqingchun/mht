@@ -328,6 +328,122 @@ def test_void_task_can_be_listed_with_voided_filter(client, db_session):
     assert voided["status"] == "VOIDED"
 
 
+# ---------------------------------------------------------------------------
+# 第二组之二：学生这一侧的可见性（§4.15）
+# ---------------------------------------------------------------------------
+
+
+def student_task_nos(client, headers) -> list[str]:
+    """学生「测评任务」列表里的任务编号（`/student/tasks` 的载荷里 `task_no` 与 `id` 都有）。"""
+    response = client.get("/api/v1/student/tasks", headers=headers)
+    assert response.status_code == 200, response.text
+    return [item["task_no"] for item in response.json()["data"]["items"]]
+
+
+def student_history_nos(client, headers) -> list[str]:
+    """学生「我的记录」列表里的任务编号。
+
+    这一份载荷**没有任务 id**（只有 `task_no` / `task_name` / 自己的完成状态），所以
+    两个助手都按 `task_no` 比——那也正好是学生在屏幕上认得出的那个东西。
+    """
+    response = client.get("/api/v1/student/assessment-history", headers=headers)
+    assert response.status_code == 200, response.text
+    return [item["task_no"] for item in response.json()["data"]["items"]]
+
+
+def open_sheet(client, headers, task_id: int):
+    return client.post("/api/v1/assessment-sessions", headers=headers, json={"task_id": task_id})
+
+
+def test_a_voided_task_disappears_from_the_students_own_pages(client, db_session):
+    """§4.15：作废的任务**不给学生看**，而心理老师那一侧照常（同一件事两种读者）。
+
+    学生的两个入口各断一次——`/student/tasks`（待办那张卡）与 `/student/assessment-history`
+    （「我的记录」）。它们此前都在服务层里带着 `active_task_predicate()`，而**没有任何
+    用例看得见这一句**：`grep VOIDED app/tests` 里除了这个文件一行都没有，而这个文件
+    各条断的都是心理老师那一侧（`/assessment-tasks`）。也就是说把那两个 `.where` 里的
+    谓词整个摘掉，全量套件照样全绿，而学生会在「我的记录」里看到一场学校已经作废的
+    测评——还带着他自己的分数与用时（§4.15 禁的正是这一条）。
+
+    **先证明他原本看得见**：作废之前两个列表里都有它。少了这半句，一个「学生永远看不到
+    任何任务」的实现（比如谓词写反了）同样能让后面三句成立——而它把整条学生端废掉了。
+    最后一句是**反方向**的：心理老师那一侧必须照常看得到并带着「已作废」的状态
+    （规范 §4.15 与 CLAUDE.md §1 同一条：心理老师的专业档案保留它，学生那边不显示）。
+    少了它，一个「把 VOIDED 从全站所有查询里抹掉」的实现也能让上面三句全绿，而那时
+    这场任务从任何入口都找不回来了（连它作废过这件事都查不到）。
+    """
+    counselor = headers_for(client, "counselor")
+    student = headers_for(client, "student")
+    task_id = create_task(client, counselor, name="学生可见性用例")
+    a_sitting_with_a_result(db_session, task_id)
+    task_no = db_session.get(AssessmentTask, task_id).task_no
+
+    assert task_no in student_task_nos(client, student), "作废之前他就看不到，那下面两句断的是空气"
+    assert task_no in student_history_nos(client, student)
+
+    assert delete_task(client, counselor, task_id, reason="这一场发错了").status_code == 200
+
+    assert task_no not in student_task_nos(client, student)
+    assert task_no not in student_history_nos(client, student)
+
+    listed = client.get(
+        "/api/v1/assessment-tasks", headers=counselor, params={"status": "VOIDED"}
+    )
+    assert listed.status_code == 200, listed.text
+    assert task_id in [item["id"] for item in listed.json()["data"]["items"]], (
+        "作废不是「从库里消失」：心理老师这一侧照常看得到它，只是带着「已作废」的标签"
+    )
+
+
+def test_a_student_cannot_start_a_new_sheet_on_a_voided_task(client, db_session):
+    """列表藏了、`POST /assessment-sessions` 也开不了——两个入口是同一件事的两面。
+
+    只藏列表是不够的：学生手敲 `/student/assessment/<taskId>` 走的就是这一个端点，
+    而它此前**没有任何用例**钉过（`effective_task_status` 那道门是给「过了截止日期」
+    写的，作废只是顺带被它挡住的）。
+
+    这里刻意造的是「这场任务有事实、而这名学生**一场都没开过**」的库：走
+    `start_assessment_import` 把一批文件绑在一场任务上（`:856` 的 `task_id=task.id`）
+    就是这个形状，而它让任务有资格走作废（`import_batch_count > 0`）。若改用
+    「先让这名学生开一张卷子再作废」，那一条路的答案是**另一个**：他手里那份卷子
+    不被收回（§12「已结束不等于把人踢出卷子」，`POST` 会把既有会话原样返回给他）——
+    那是刻意的，别把两件事混成一条断言。
+
+    **对照那一句不能省**：同一名学生、同一时刻对着**没作废**的那一场能开卷，
+    所以下面那个 404 来自任务的状态，而不是「没有目标行」或端点本身坏了。
+    """
+    counselor = headers_for(client, "counselor")
+    student = headers_for(client, "student")
+    doomed = create_task(client, counselor, name="作废后不该还能开卷")
+    control = create_task(client, counselor, name="同一名学生的对照组")
+
+    assert open_sheet(client, student, control).status_code == 200, (
+        "对照组都开不了卷，那下面那个 404 证明不了任何事"
+    )
+
+    stu = seeded_student(db_session)
+    db_session.add(
+        AssessmentImportBatch(
+            batch_no="BATCH-VOID-2",
+            school_id=stu.school_id,
+            file_name="结果(4).csv",
+            batch_name="绑了任务但还没提交的批次",
+            file_sha256="1" * 64,
+            status="PREVIEW",
+            imported_by=counselor_account(db_session).id,
+            task_id=doomed,
+            total_rows=1,
+        )
+    )
+    db_session.flush()
+
+    response = delete_task(client, counselor, doomed, reason="这一场发错了")
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["mode"] == "VOID", "没走作废这条路，那这条用例问的不是它"
+
+    assert open_sheet(client, student, doomed).status_code == 404
+
+
 def test_void_imported_task_keeps_import_batches(client, db_session):
     """外部导入的批次任务作废时，**批次行一行都不删**（§4.16）。
 

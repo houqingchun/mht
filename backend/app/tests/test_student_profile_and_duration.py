@@ -200,11 +200,15 @@ def test_a_future_answer_stamp_is_clamped_to_zero_not_negative(db_session):
 
 
 def test_a_reset_retake_re_stamps_the_submission(client, db_session):
-    """重考后必须重新打上提交事实。
+    """重考后必须重新打上提交事实——交卷时间与用时都从这一场重新算起。
 
-    `/reset` 清空答案、`submitted_at` 与用时，但**不删结果行**（删了会抹掉审计与
-    人工复核指向的评分事实）。于是再次提交走的是幂等早返回那条路——如果那里不补
-    打时间戳，重考完的会话会永远没有用时，而注释还写着「下次提交会重算」。
+    2026-09-25 之前 `/reset` **保留结果行**，于是重考走的是 `submit_session` 的
+    幂等早返回，那一支再补打时间戳；现在重置连结果一起清掉（用户裁决，见
+    `assessment_service.reset_sitting`），重考走的是一条全新的评分路径，盖章本来
+    就在里面。两个版本下这条判据都成立，而它守的东西也一直是同一个：**重考完的
+    会话不能没有用时**——`duration_seconds` 空着时，学生在「我的记录」里看到的是
+    一次没有用时的作答，而按人取最近一场的每一处（个案详情、受控导出）也会把这一场
+    当成「还没交卷」排到最后。
     """
     headers, session_id = create_student_session(client)
     save_answers(client, headers, session_id)
@@ -224,9 +228,7 @@ def test_a_reset_retake_re_stamps_the_submission(client, db_session):
     replay = client.post(f"/api/v1/assessment-sessions/{session_id}/submit", headers=headers)
     assert replay.status_code == 200
     data = replay.json()["data"]
-    # 幂等保证没变：分数仍然是存下来的那一份
-    assert data["result"] == first.json()["data"]["result"]
-    # 但提交事实被补上了
+    assert data["result"] is not None
     assert data["submitted_at"] is not None
     assert data["duration_seconds"] is not None
 

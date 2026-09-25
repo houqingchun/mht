@@ -186,7 +186,9 @@ function reset() {
     <PrivacyNote/>
   </template>
   <div v-else-if="report" class="empty">当前条件下无班级数据</div>
-  <div v-else class="empty">请选择测评任务后点击查询</div>
+  <!-- 空态是一句关于数据的话：进这一页会自动加载最新可分析任务（FilterBar），
+       所以走到这里意味着真的没有可用任务。同 ReportExportPage.vue，§14。 -->
+  <div v-else class="empty">本学年还没有可用的测评任务</div>
 </template>
 
 <style scoped>

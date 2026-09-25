@@ -45,6 +45,7 @@ from app.services.export_labels import (
     participation_label,
     target_status_label,
 )
+from app.services.numbering import insert_with_unique_number
 from app.services.target_snapshot import target_snapshot
 
 
@@ -459,20 +460,33 @@ def create_school_assessment_task(
     )
     if not school or not scale:
         raise AppError("VALIDATION_ERROR", "缺少学校或已发布量表", 422)
+    # 单号：`TASK-<到秒的时间戳>-<序号>`，序号从「全库任务数 + 1」起。
+    #
+    # 那个基数是**一个起点，不是一个保证**——同一秒里两个请求会各自算到同一个基数，
+    # 而唯一键才是判据。所以插入走 `insert_with_unique_number`：撞了就往上试一个号
+    # （理由见那个模块的 docstring：重读一遍在 REPEATABLE-READ 下读到的是同一份快照，
+    # 加 `FOR UPDATE` 则会从「500 撞号」变成「1213 死锁」）。
+    stamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
     task_count = db.scalar(select(func.count(AssessmentTask.id))) or 0
-    task = AssessmentTask(
-        task_no=f"TASK-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{task_count + 1}",
-        name=name,
-        scale_id=scale.id,
-        school_id=school.id,
-        scope_type="SCHOOL",
-        start_at=parse_datetime(start_at),
-        end_at=parse_datetime(end_at),
-        status="ACTIVE",
-        created_by=user.id,
+
+    def build_task(task_no: str) -> AssessmentTask:
+        return AssessmentTask(
+            task_no=task_no,
+            name=name,
+            scale_id=scale.id,
+            school_id=school.id,
+            scope_type="SCHOOL",
+            start_at=parse_datetime(start_at),
+            end_at=parse_datetime(end_at),
+            status="ACTIVE",
+            created_by=user.id,
+        )
+
+    task = insert_with_unique_number(
+        db,
+        number_at=lambda offset: f"TASK-{stamp}-{task_count + 1 + offset}",
+        build=build_task,
     )
-    db.add(task)
-    db.flush()
     # 「当时是按什么范围发的」——与下面那批目标行（「实际发给了谁」）是**两张表、
     # 两个问题**（§16.2）。今天 scope_type 恒为 SCHOOL（这个端点还不收范围参数），
     # 但只留目标行的话，「这场普查当初打算测谁」就永远没有答案了：发放之后名册上

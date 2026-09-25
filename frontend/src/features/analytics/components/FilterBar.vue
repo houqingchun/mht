@@ -26,6 +26,7 @@ export interface FilterState {
 }
 
 const tasks = ref<AssessmentTaskItem[]>([])
+const tasksError = ref('')
 const stamp = ref('')
 const taskPicker = ref<HTMLDetailsElement | null>(null)
 const MIN_ANALYTICS_SAMPLE = 5
@@ -39,16 +40,28 @@ function defaultTask() {
   return analyzable[0] || tasks.value[0]
 }
 
+/**
+ * 拉任务列表。**失败与「一个任务都没有」必须分开**（§14）：此前这里是
+ * `catch { tasks.value = [] }`，两种原因落进同一个空数组，于是「暂无可分析任务」
+ * 这句话在一次网络故障时也照样出现——而它是关于数据的断言，不是关于这次读取的。
+ * 现在失败走 `tasksError`（带重试），空列表才走那句数据声明，查询按钮两种情况都置灰。
+ */
 async function loadTasks() {
   try {
     tasks.value = await getAssessmentTasks()
+    tasksError.value = ''
     const task = defaultTask()
     if (task) {
       filters.value.taskIds = [task.id]
       await nextTick()
       query(true)
+    } else {
+      stamp.value = '本学年还没有可用的测评任务'
     }
-  } catch { tasks.value = [] }
+  } catch (err) {
+    tasks.value = []
+    tasksError.value = err instanceof Error ? err.message : '测评任务列表加载失败'
+  }
 }
 
 const filters = ref<FilterState>({ taskIds: [], grade: 'all', cls: 'all', validity: 'ALL_CALCULATED', metric: 'rate' })
@@ -108,7 +121,11 @@ loadTasks()
             <input v-model="filters.taskIds" type="checkbox" :value="t.id"/>
             <span><b>{{ t.name }}</b><small>{{ t.source === 'IMPORTED' ? '外部导入' : '系统任务' }} · {{ t.completed_targets }}/{{ t.total_targets }} 已完成</small></span>
           </label>
-          <div v-if="!tasks.length" class="task-empty">暂无可分析任务</div>
+          <div v-if="tasksError" class="task-empty">
+            {{ tasksError }}
+            <button type="button" class="link-btn" @click="loadTasks">重试</button>
+          </div>
+          <div v-else-if="!tasks.length" class="task-empty">本学年还没有可用的测评任务</div>
         </div>
       </details>
     </div>
@@ -136,7 +153,7 @@ loadTasks()
         <option value="average">平均得分</option>
       </select>
     </label>
-    <button class="btn primary" @click="query()">⌕ 查询</button>
+    <button class="btn primary" :disabled="!tasks.length" :title="tasks.length ? '' : '还没有可查询的测评任务'" @click="query()">⌕ 查询</button>
     <button class="btn" @click="reset">↻ 重置</button>
     <span class="hint" role="status">{{ stamp }}</span>
   </div>
@@ -159,6 +176,7 @@ loadTasks()
 .task-option b { color: #183447; font-size: 13px; overflow-wrap: anywhere }
 .task-option small { color: var(--muted); font-size: var(--font-caption); font-weight: 400 }
 .task-empty { padding: 14px; color: var(--muted); text-align: center; font-size: var(--font-caption) }
+.link-btn { border: 0; padding: 0 2px; background: none; color: #0876d9; font: inherit; font-weight: 600; text-decoration: underline; cursor: pointer }
 .filters select { width: 100% }
 .filters select { min-height: 38px; padding: 0 34px 0 10px; border: 1px solid #cbd8e2; border-radius: 4px; background: #fff; color: #183447 }
 .hint { align-self: center }

@@ -20,12 +20,26 @@ from app.services.export_labels import (
     report_status_label,
     score_distribution_label,
 )
+from app.services.numbering import insert_with_unique_number
 
 
-def _number(db: Session) -> str:
+def _number_stem(db: Session) -> tuple[str, int]:
+    """今天这个号段的前缀与基数 —— 单号是 `RPT-<前缀>-<基数 + offset:04d>`。
+
+    基数是一个**起点，不是一个保证**：同一秒里两个请求会各自算到同一个基数，
+    而唯一键才是判据（详见 `services/numbering.py` 的 docstring）。所以这里只负责
+    「从哪儿数起」，撞号之后的出路归 `insert_with_unique_number`。
+
+    号段按天分（`report_no` 的形状里带着日期），所以计数也按前缀过滤——
+    这既让每天从头开始编号，也让重试只跟「今天这几行」打交道。
+    """
     today = datetime.now().strftime("%Y%m%d")
-    count = db.scalar(select(func.count(ProfessionalReport.id)).where(ProfessionalReport.report_no.like(f"RPT-{today}-%"))) or 0
-    return f"RPT-{today}-{count + 1:04d}"
+    count = db.scalar(
+        select(func.count(ProfessionalReport.id)).where(
+            ProfessionalReport.report_no.like(f"RPT-{today}-%")
+        )
+    ) or 0
+    return today, count + 1
 
 
 def _school_id(db: Session, user: UserAccount) -> int:
@@ -68,8 +82,16 @@ def serialize(db: Session, report: ProfessionalReport, *, include_versions: bool
 def create_report(db: Session, user: UserAccount, payload: ReportCreateRequest) -> ProfessionalReport:
     task_ids = list(dict.fromkeys(payload.task_ids))
     snapshot = jsonable_encoder(analytics_report(db, user, task_ids[0], payload.analysis_mode, task_ids))
-    report = ProfessionalReport(report_no=_number(db), school_id=_school_id(db, user), report_type="PROFESSIONAL", title=payload.title.strip(), status="DRAFT", task_scope_json={"task_ids": task_ids}, analysis_mode=payload.analysis_mode, statistics_snapshot_json=snapshot, current_version=1, created_by=user.id, updated_by=user.id)
-    db.add(report); db.flush()
+    today, base = _number_stem(db)
+
+    def build_report(report_no: str) -> ProfessionalReport:
+        return ProfessionalReport(report_no=report_no, school_id=_school_id(db, user), report_type="PROFESSIONAL", title=payload.title.strip(), status="DRAFT", task_scope_json={"task_ids": task_ids}, analysis_mode=payload.analysis_mode, statistics_snapshot_json=snapshot, current_version=1, created_by=user.id, updated_by=user.id)
+
+    report = insert_with_unique_number(
+        db,
+        number_at=lambda offset: f"RPT-{today}-{base + offset:04d}",
+        build=build_report,
+    )
     db.add(ProfessionalReportVersion(report_id=report.id, version_no=1, overall_summary=payload.overall_summary, dimension_interpretation=payload.dimension_interpretation, sample_validity_note=payload.sample_validity_note, support_plan=payload.support_plan, statistics_snapshot_json=snapshot, created_by=user.id))
     db.flush()
     return report
