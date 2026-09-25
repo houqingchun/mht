@@ -110,7 +110,7 @@ def test_the_label_drops_the_patch_segment():
     而界面上会冒出一个 `V1.1.2`。
     """
     assert VERSION_LABEL == "V" + ".".join(__version__.split(".")[:2])
-    assert VERSION_LABEL == "V1.1", f"标签变成了 {VERSION_LABEL!r}"
+    assert VERSION_LABEL == "V2.0", f"标签变成了 {VERSION_LABEL!r}"
 
 
 # --------------------------------------------------------------------------
