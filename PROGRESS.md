@@ -96,6 +96,13 @@ e2e 数不变是因为它这一轮只动了注释（唯一那次红与被测代�
 两条提交：`555674b`（升版本）+ `624d3d9`（五条落地）；**是否推送 `origin/V2.0.0`
 仍等你发话**（第一轮那条 `70e654e` 是你说「2 推送」之后推的）。
 
+**第三轮（2026-09-25）：规范符合性审计**（用户要求「再检查下这里的需求还有哪些没实现」）。
+逐条读完 1578 行规范再对源码，结论是 **P0-P1 六项全覆盖**；未实现的只有三处——
+`ARCHIVED` 档与 `LEADER_MANAGEMENT_SUMMARY` 是 §5.9 第 6 条裁决不做，第三处
+（`ClassPortraitPage.vue` 的 `localStorage` 笔记草稿 `qingxin-notes`）**待你裁决**。
+逐条落点表、该灰色地带的六条证据，以及顺手订正的一处文档矛盾（§5.1 那条与 §5.9 第 2 条
+互斥的陈旧条目），都在 §5.11。**本轮没有改任何生产代码。**
+
 ## 3. 下一步（最重要）
 
 1. ✅ **确认并建立 `V2.0.0` 分支基线**（2026-09-25 完成）
@@ -284,11 +291,16 @@ e2e 数不变是因为它这一轮只动了注释（唯一那次红与被测代�
 - [x] leader 任务统计排除 `VOIDED`
 - [x] 最新结果查询增加 `task.status != VOIDED` 防御性约束
 - [x] 学生当前状态不读取已作废任务结果
-- [ ] ~~学生本人历史默认不显示已作废任务记录~~ → **有意偏离规格**：改为「显示并标注」，
-      理由与下一条同源（那一场是他真实考过的一次，删掉一个点就是在抹掉一段发生过的事实；
-      缺的是知情权，不是那一行）。两个历史页各有一句「已作废，不参与当前判断」，
-      且**没有作废场次时整句不出现**（§14：空态是关于数据的一句话，不是格式）。
-      **这条偏离需要你确认**：若坚持规格原文，就改成默认过滤 + 一个「显示已作废」开关。
+- [x] 学生本人历史**不显示**已作废任务记录（§5.9 第 2 条裁决「完全隐藏」，即规格原文口径）。
+      学生的两个入口各断一次：`/student/tasks` 与 `/student/assessment-history`——
+      作废之前他看得见，作废之后两边都没有
+      （`test_task_governance.py::test_a_voided_task_disappears_from_the_students_own_pages`）。
+      同一条用例的反方向还断着「心理老师那一侧照常看得到并带着『已作废』」，所以它不是靠
+      「把 VOIDED 从全站抹掉」成立的。
+      **2026-09-25 订正**：本行原来写着「有意偏离规格 → 改为显示并标注 …**需要你确认**」，
+      两处与事实不符——「显示并标注」描述的是**下一行**（心理老师侧）那句标识，学生侧两个
+      入口一直带着 `active_task_predicate()`（零生产改动）；而那个方向本身也与裁决相反。
+      以裁决与用例为准。
 - [x] 心理老师历史查看可显示，但标识“已作废，不参与当前判断”
 
 #### 前端
@@ -1085,6 +1097,91 @@ $ git diff 08254dc HEAD -- backend/pyproject.toml deploy/requirements.lock.txt |
 
 **下一次联网出包时不必复刻这套**：它是这次网络不可达的绕行，不是新工序。要是哪天
 pin 清单真的变了，上面那条 `git diff` 会当场数出非零行数——**那就必须重新下载**。
+
+### 5.11 第三轮：规范符合性审计（2026-09-25）
+
+用户要求「再检查下这里的需求还有哪些没实现」。做法是**逐条读规范全文（1578 行）**，
+再拿源码事实逐条对：delete-check 的响应键、`active_task_predicate()` 的全部调用点、
+三张能力矩阵、`professional_report` 两张表与六个端点、`EXPORT_TYPE_PROFESSIONAL_REPORT`、
+五个报表页标题、`/auth/me/data-scope-summary`、以及 `window.print` / `Blob` /
+`localStorage` / `qingxin-report-draft` 的全仓残留扫描。
+
+**结论：P0-P1 六项（P0-01 / P0-02 / P1-01 / P1-02 / P1-03 / P1-04）规范条目全覆盖，
+逐条落点见下面那张表。未实现的只有三处，其中两处是裁决不做、一处是待裁决的灰色地带。**
+
+| 规范节 | 状态 | 落点 |
+|---|---|---|
+| §4.1–4.6 任务治理 | 已实现 | `task_service.delete_or_void_task` + `models/assessment.py` 的 `active_task_predicate()` |
+| §4.7 delete-check | 已实现 | `api/v1/tasks.py` 的 `GET …/delete-check`；响应键在 `task_service` 里逐字对齐（含 `deleteMode` / `canHardDelete` / 三个 `*Count` / `warning`） |
+| §4.8 删除 / 作废接口 | 已实现 | `@router.delete("/assessment-tasks/{task_id}")` + `{reason}`；**没有**另做一套 `POST …/delete`（规范允许二选一，不得同时实现两套） |
+| §4.9 权限表 | 已实现 | 心理老师写；leader / admin / student 403（`test_task_governance.py` 各一条，admin 那条按角色参数化） |
+| §4.10 审计 | 已实现 | 作废 / 删除各写一条，`detail` 记原因与计数 |
+| §4.11 列表行为 | 已实现 | 任务列表三支筛选（默认不含 VOIDED / `VOIDED` / `ALL`）+ `TasksPage.vue` 的筛选项与分岔空态 |
+| §4.12 七个入口排除 VOIDED | 已实现 | 同一个谓词在 analytics / care / export / assessment / assessment_import 五处共 15+ 个调用点 |
+| §4.13 工作台完成率 | 已实现 | `care_service` 走同一谓词 |
+| §4.14 防御性约束 | 已实现**且已变异验证** | `latest_result_subquery()` / `latest_session()` 上的 `task.status != VOIDED`；`test_a_voided_task_is_not_read_even_if_its_session_was_not_downgraded` 专钉「不依赖作废时更新得对」 |
+| §4.15 学生可见性 | 已实现 | `test_a_voided_task_disappears_from_the_students_own_pages`（两个学生入口 + 反方向断心理老师照常可见）；心理老师侧两处 `voidedCount` 标识 |
+| §4.16 IMPORTED 特别规则 | 已实现 | `test_void_imported_task_keeps_import_batches` |
+| §4.17 不自动合并 | 遵守 | 全仓没有任何自动合并 / 删除历史 IMPORTED task 的代码 |
+| §5.1–5.5 数据范围可见性 | 已实现 | `GET /auth/me/data-scope-summary` → `data_scope_summary()`；`test_data_scope_summary.py` 11 条（含「摘要与列表过滤器同源」那条） |
+| §5.4 页面标题 | 已实现 | `routes.ts`：筛查关注概览 / 八维度分析 |
+| §6.1–6.4 报告角色拆分 | 已实现 | `LeaderAnalyticsReportPage.vue`（学校心理工作分析摘要）；三张能力表逐格对齐默认矩阵；`test_reporting_api.py` 的 leader 403 编辑、只看已发布 |
+| §7.1–7.5 服务端持久化 | 已实现（灰色项见下） | `professional_report` / `professional_report_version` 两表（快照冻结）+ 六个端点 + `test_reporting_api.py` 18 条（含「快照不随实时数据漂移」与「发布不重算快照」） |
+| §8.1–8.5 正式报告走 Export Job | 已实现 | `EXPORT_TYPE_PROFESSIONAL_REPORT` + `POST /professional-reports/{id}/export-jobs`（支持按 `version_no` 选版本）；`window.print()` 与 `qingxin-report-draft` 全仓已无 |
+| §9 术语 | 已实现 | 前端扫描只命中注释 |
+| §10 迁移纪律 | 遵守 | 未新增 / 未改写历史迁移（本轮只用既有 `0020` 的 PRECHECKS，见 §5.8 item 4） |
+| §12 / §13 测试与 E2E | 已实现 | 规范点名的用例逐条有对应；`make e2e` 144 passed |
+| §15 DoD | 满足 | 五节逐条有落点 |
+
+#### 未实现的三处
+
+1. **`professional_report.status` 的 `ARCHIVED` 档**（§7.2）。**裁决不做**——§5.9 第 6 条
+   「两个都保持不做」。规范给的是三档状态机，实现只有 `DRAFT` / `PUBLISHED`。
+2. **`LEADER_MANAGEMENT_SUMMARY` 导出类型**（§8.2 的可选项）。同一条裁决不做。实现走的是
+   规范里并排给的另一条路：「一个类型 + `report_type` 区分」——即 `EXPORT_TYPE_PROFESSIONAL_REPORT`。
+3. **★ `ClassPortraitPage.vue` 的自由文本草稿存在浏览器 `localStorage`**（灰色地带，**待裁决**）。
+   位置：`frontend/src/features/analytics/views/ClassPortraitPage.vue` 的 `save()` 与紧随其后的
+   那一行初始化读取，键名 `qingxin-notes`，按钮回显「已保存（浏览器本地草稿）」。
+
+**第 3 条要单说，因为它是「规范原文与它点名的对象错位」那一种，不是一眼能判的。**
+规范 §7.1 列了五条问题（只存在浏览器 / 不区分用户 / 不区分任务 / 不可审计 / 不可版本化 /
+换电脑即丢失），而 §7 与 §11.4 **字面点名的是「专业报告」与 `qingxin-report-draft`**——
+后者（RPT-05 那一页的草稿）已经彻底移除，`ReportExportPage.vue` 现在走服务端：
+`createProfessionalReport` / `saveProfessionalReport` / `publishProfessionalReport`。
+而 RPT-04「班级心理维度画像」这一页上**还有一段**笔记 / 建议的自由文本，仍走 `localStorage`，
+于是那五条问题对它逐条成立：
+
+| §7.1 的问题 | 在 `qingxin-notes` 上 |
+|---|---|
+| 只存在浏览器 | 成立——`localStorage.setItem` |
+| 不区分用户 | 成立——同机同浏览器的两位老师共用一条键 |
+| 不区分任务 | 成立——键名里没有任何任务 / 班级维度，换一批统计口径读到的还是上一次那段字 |
+| 不可审计 | 成立——`audit_log` 里没有它的任何痕迹 |
+| 不可版本化 | 成立——只有一份，第二次保存覆盖第一次 |
+| 换电脑即丢失 | 成立 |
+
+**它是灰色地带而不是「漏了」，有两条依据：**
+
+- 规范 §7 的落点写的是「专业报告」（RPT-05 那条线的服务端持久化），RPT-04 这一段笔记
+  在规范里**没有被点名**；而 §8.5 禁的「window.print / 本地 Blob 作为正式导出」这一页
+  也没有触犯（它不导出任何文件）。
+- 但它属于同一族问题，且**界面上那句话（「已保存（浏览器本地草稿）」）自己说出来了**
+  ——这一点是有意的，不是隐瞒。所以问题的实质是产品裁断：这一段笔记**算不算**「专业报告」
+  的内容。若算，它应当并入 §7 的两张表（**需要一条 DDL**：新列或新表），
+  这就越过「P0-P1 不加表」的隐含边界；若不算，它应当被明说成「本机草稿」并加一句
+  「换电脑会丢」的提示，而这不加表。
+
+**未自行实施的理由**：按执行约束第 4 条，「不静默猜测」——这一条要么动表结构、要么改产品
+定位，两条都该由你裁。**在裁决之前，它保持现状（可用、但只在本机）。**
+
+#### 顺手订正的一处文档矛盾
+
+`§5.1` 里那条 `[ ] ~~学生本人历史默认不显示已作废任务记录~~ → 有意偏离规格：改为「显示并
+标注」…**这条偏离需要你确认**` 与 §5.9 第 2 条裁决（「完全隐藏」，2026-09-25）**互相矛盾**，
+已订正为 `[x]`。两处与事实不符：① 「显示并标注」描述的是**下一行**（心理老师侧）那句标识，
+学生侧的两个入口一直带着 `active_task_predicate()`（裁决时记的是「零生产改动」）；
+② 那个方向本身也与裁决相反。订正后指向守卫用例
+`test_task_governance.py::test_a_voided_task_disappears_from_the_students_own_pages`。
 
 ## 6. 关键文件
 
