@@ -2008,6 +2008,17 @@ dd {
   background: #fcfdfe;
 }
 
+/* 与出厂配置不同的一格（V2.0.0 §5.14.5）。
+   此前只有格子里那一枚 `.customised-mark` 小标在说这件事——而「按角色查看」把四列
+   收成一列时，找差异这件事从「横着扫四个人」变成「竖着扫八行」，小标在一个不显眼的
+   角落。底色整格铺开之后，差异是**扫一眼**看得见的。
+   颜色沿用 `.customised-mark` 的同一对（`--amber` / `--amberbg`）：同一件事在屏幕上
+   只有一种颜色，改一处不会让另一处落单。 */
+.perm-cell.customised {
+  border-color: var(--amber);
+  background: var(--amberbg);
+}
+
 .perm-cell-head {
   display: flex;
   align-items: center;
@@ -2371,6 +2382,15 @@ tbody tr:hover td {
   flex-wrap: wrap;
 }
 
+/* 账号操作菜单（V2.0.0 §5.14.5）。它挂在 `.toolbar` 上，所以那一套（flex、9px 间距）
+   本来就会生效——要的却是**三枚按钮各占一行**：编辑 / 重置密码 / 停用挤在同一行时，
+   危险的那一枚与另外两枚之间没有留白，而「哪个是危险的」正是这个菜单要回答的第一件事。
+   特异性写足两个类名（不是靠书写次序压过 `.toolbar`），免得哪天 `.toolbar` 挪到下面。 */
+.toolbar.action-menu {
+  display: grid;
+  gap: 8px;
+}
+
 .search-box {
   position: relative;
   flex: 1;
@@ -2437,6 +2457,24 @@ tbody tr:hover td {
 .detail-row > span:first-child {
   color: var(--muted);
   font-size: 0.83rem;
+}
+
+/* 临时密码那一格：密码与「复制」按钮同行（V2.0.0 §5.14.5）。
+   `.detail-row` 是 flex + `justify-content:space-between`，而这一行右边的内容是
+   `<b>` 里的一段文本加一枚按钮——`<b>` 默认是 inline，不铺开的话按钮会贴着文字，
+   复制按钮的点击区与密码本身分不开。所以这一格自己也变成一个 flex 行。
+   密码那一段用等宽字：临时密码是照抄给别人的，`l` 与 `1`、`O` 与 `0` 在比例字体里
+   看起来一样，而抄错的代价是那个人登不进来、并且他会拿到「账号或密码不正确」。 */
+.password-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.password-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 0.04em;
+  word-break: break-all;
 }
 
 /* 批次名称 / 测评日期：不是文件里的列，所以放在拖放框**外面**——

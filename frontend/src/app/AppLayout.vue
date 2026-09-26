@@ -70,6 +70,7 @@ const navConfig: Record<string, { name: string; avatar: string; nav: NavItem[] }
     name: '系统管理员',
     avatar: '管',
     nav: [
+      { key: 'admin/overview', label: '系统概览', icon: 'gauge', path: '/admin/overview' },
       { key: 'admin/system', label: '账号与权限', icon: 'settings', path: '/admin/system' },
       { key: 'organization', label: '组织学生', icon: 'user-plus', path: '/admin/organization' },
       { key: 'scale', label: '量表题库', icon: 'list', path: '/admin/scale' },

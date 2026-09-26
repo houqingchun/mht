@@ -540,6 +540,13 @@ test.describe('状态词汇：界面上不得出现后端编码', () => {
   test('管理员页面', async ({ page }) => {
     await loginAs(page, 'admin');
     await auditPages(page, 'admin', [
+      // 系统概览（V2.0.0 §5.14.5，管理员的落点）。**这一趟在枚举码上扫不到东西**：
+      // 这一页只渲染账号数、批次计数、量表版本号与系统版本号，没有任何一处会输出
+      // 后端枚举码——所以它是这一组里唯一一条**恒绿**的清单项，留着只是因为
+      // 「按角色走完全部页面」这条契约要求路径清单是完整的。
+      // 真正守这一页的是 `app.spec.ts` 的「管理员系统概览」那一组（数字下钻、
+      // 不可点的项不装作能点、复制临时密码）——别把这一行读成那几条的替代。
+      '/admin/overview',
       '/admin/system',
       '/admin/organization',
       '/admin/scale',
@@ -801,8 +808,21 @@ test.describe('状态词汇：界面上不得出现后端编码', () => {
    * 用「预览」而不是「提交」是有意的：预览落 `PREVIEW` 批次与逐行明细，但**不改任何
    * 名册字段**——共享库里「覆盖」会把 S001 挪出种子里的那个班，跑一次就让别的用例看到
    * 另一份名册（本文件上面那组 e2e 只跑「放弃」就是同一个理由）。文件内容固定，
-   * 于是同一个操作者重复预览会命中服务端的**复用规则**，这一条跑多少次都不会让批次表
-   * 越堆越长。
+   * 于是同一个操作者重复预览会命中服务端的**复用规则**，这一条自己跑多少次都不会让
+   * 批次表多一行。
+   *
+   * **但整张表仍然在涨，所以下面不许按文件名定位**（2026-09-27 撞的）。成因是两条叠在
+   * 一起：复用**不改 `id`**，所以这一批是单调地往下沉的；而 `app.spec.ts` 的「学生信息
+   * 导入」那条每次跑都**提交**一次，提交之后 `status` 不再是 `PREVIEW`、复用规则对它不
+   * 成立，于是每次全量 e2e 都新增一批。服务端只发**最近 20 批**（那一栏自己写着「最近
+   * 20 批，共 23 批」），总量一过 20 这一批就掉出窗口——实测它红了，而红的原因与代码
+   * 无关。
+   *
+   * 所以定位改成**最近一批**。这一屏真正要守的是「名册导入明细的每一格都不出裸枚举
+   * 码」，它**与哪一批无关**——明细里渲染的是服务端序列化的字段。把它绑在「我自己造的
+   * 那一批」上，换来的只是「这条用例的前提变成『库里的批次总量小于 20』」，而那是另一个
+   * spec 每天都在改的一个数（CLAUDE.md §32 那条「数据依赖的脆弱判据」同一族）。
+   * 上面那次预览仍然要传：它保证这一屏此刻**有**东西可扫。
    */
   test('组织学生的导入批次', async ({ page }) => {
     const csv = 'student_no,name,grade,class_name\nS001,e2e词表预演,初二,801\n';
@@ -830,15 +850,13 @@ test.describe('状态词汇：界面上不得出现后端编码', () => {
     const batches = page
       .locator('.card')
       .filter({ has: page.getByRole('heading', { name: '导入批次' }) });
-    await expect(batches.locator('tbody tr').first()).toBeVisible();
+    const firstBatch = batches.locator('tbody tr').first();
+    await expect(firstBatch).toBeVisible();
     expect(await leakedCodes(batches), '导入批次把后端编码原样显示了').toEqual([]);
 
     // 逐行明细在弹层里，只有点开才存在——同工作台档案弹层那条的理由。
-    await batches
-      .locator('tbody tr', { hasText: 'e2e-vocabulary.csv' })
-      .first()
-      .getByRole('button', { name: '查看明细' })
-      .click();
+    // 点的是**最近一批**而不是「我造的那一批」，理由见上面 docstring 里那一段。
+    await firstBatch.getByRole('button', { name: '查看明细' }).click();
     const modal = page.locator('.modal-panel').first();
     await expect(modal.locator('tbody tr').first()).toBeVisible();
     expect(await leakedCodes(modal), '导入明细把后端编码原样显示了').toEqual([]);

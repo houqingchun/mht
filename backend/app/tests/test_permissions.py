@@ -23,6 +23,7 @@ from app.security.permissions import (
     scope_allows,
 )
 from app.models.enums import RoleCode
+from app.models.organization import Student
 from app.tests.conftest import auth_headers
 from app.tests.test_assessment_api import create_student_session, save_answers
 
@@ -75,6 +76,47 @@ def test_leader_is_denied_case_detail_under_defaults(client):
     response = client.get("/api/v1/care-cases", headers=leader_headers)
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "ROLE_FORBIDDEN"
+
+
+def test_admin_is_denied_every_psych_detail_endpoint_under_defaults(client, db_session):
+    """系统管理权不等于心理数据查看权（CLAUDE.md §4）。
+
+    管理员在能力矩阵上是 `ORG_ACCOUNT: MANAGE` + `STUDENT_PSYCH_DETAIL: NONE`：
+    他管得住账号与配置，**看不见任何一名学生的测评内容**。V2.0.0 §5.14.5 把管理员
+    的落地页改成「系统概览」，正是为了让「他第一眼看到的东西」与「他真正有的权限」
+    一致——那一页上不出现任何学生数据，而这一条钉住的正是那个前提。
+
+    此前这一档只有**能力解析层**的断言（`test_defaults_match_existing_role_guards`
+    里那一行 `resolve_scope(...) == NONE`），而那一行答不了「有没有哪个端点忘了查
+    这一档」：解析层说 NONE、路由层少挂一个依赖，两边都自洽。所以这里逐个发出
+    **真实 HTTP 请求**。
+
+    逐个点名而不是抽查一个，是因为这几条路径的判据**来源不同**：`care-cases` 与
+    `students/*` 走 `PsychDetailScopedReader`、`key-questions` 走 `KeyQuestionReader`、
+    `students/results` 走两道门槛（`PsychDetailScopedReader` + `OrgAccountReader`）。
+    只试一个的话，另外两条上通着的旁路没有任何东西看得见。
+    """
+    create_risk_case(client)
+    student_id = db_session.scalar(select(Student.id))
+    admin_headers = auth_headers(client, "admin", "admin")
+
+    paths = [
+        "/api/v1/care-cases",
+        f"/api/v1/care-cases/{student_id}",
+        f"/api/v1/care-cases/{student_id}/comparison",
+        "/api/v1/students/results",
+        f"/api/v1/students/{student_id}/key-questions?purpose=排查",
+        f"/api/v1/students/{student_id}/assessment-records",
+    ]
+    for path in paths:
+        response = client.get(path, headers=admin_headers)
+        assert response.status_code == 403, path
+        assert response.json()["error"]["code"] == "ROLE_FORBIDDEN", path
+
+    # 反方向：管理员**该**够得着的那一页必须真的够得着。少了这一半，一个把管理员
+    # 所有请求都拒掉的实现也能让上面六条通过——而那不是权限收紧，是整个管理面瘫了。
+    assert client.get("/api/v1/admin/accounts", headers=admin_headers).status_code == 200
+    assert client.get("/api/v1/students", headers=admin_headers).status_code == 200
 
 
 # --- 2. Revoking a capability actually blocks the endpoint ---

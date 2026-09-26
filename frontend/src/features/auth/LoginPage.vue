@@ -28,7 +28,7 @@ const roleOptions: Array<{
   { value: 'student', roleLabel: '学生', fieldLabel: '学号', placeholder: '请输入学号', home: '/student/home' },
   { value: 'counselor', roleLabel: '心理老师', fieldLabel: '手机号', placeholder: '请输入手机号', home: '/counselor/workbench' },
   { value: 'leader', roleLabel: '德育领导', fieldLabel: '手机号', placeholder: '请输入手机号', home: '/leader/overview' },
-  { value: 'admin', roleLabel: '系统管理员', fieldLabel: '管理员账号', placeholder: '请输入管理员账号', home: '/admin/system' }
+  { value: 'admin', roleLabel: '系统管理员', fieldLabel: '管理员账号', placeholder: '请输入管理员账号', home: '/admin/overview' }
 ]
 
 const currentRole = computed(() => roleOptions.find((item) => item.value === role.value)!)

@@ -25,6 +25,7 @@
  * 什么」与「过期之前重下一次」。两处共用同一批 `export_job` 行。
  */
 import { computed, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import DataTable, { type Column } from '../../components/DataTable.vue'
 import ErrorState from '../../components/ErrorState.vue'
 import FormDialog from '../../components/FormDialog.vue'
@@ -62,6 +63,51 @@ const isAdmin = computed(() => me.value?.role_code === 'admin')
 
 const downloading = ref<number | null>(null)
 const revoking = ref<ExportJob | null>(null)
+
+const route = useRoute()
+
+/**
+ * 状态筛选，初值取自查询参数（V2.0.0 §5.14.5）。
+ *
+ * 管理员系统概览那一张「已过期的导出作业」卡片就是带着 `?status=EXPIRED` 点到
+ * 这里来的——卡片上的数与这个列表必须是**同一批作业**的两个子集（§11：指标卡上的
+ * 数必须与它点进去的那个列表同源），所以筛选条件是逐字对上的。
+ *
+ * **筛选只影响这一页显示哪几行，不改变取数**：`jobs` 始终是服务端按读者能力发回来
+ * 的那一批（管理员看到全部人的，心理老师只看到自己的），筛完剩下的行数因此不会
+ * 超过卡片上那句 foot 说的那个分母。
+ *
+ * 只读一次初值、不回写 URL：这一页的筛选是**看一眼就走**的（从卡片点进来、扫一眼
+ * 有没有过期的、离开），把每次切换都写进历史会让「后退」退不出这一页。这与审计页
+ * 那个服务端筛选不同——那边翻页要能分享链接，这边不需要。
+ *
+ * **认不出的值一律退回「全部」，所以这里必须是白名单而不是照单全收。** 判据是
+ * `EXPORT_JOB_STATUS_ORDER` 的键——也就是 `export_job.status` 那一列实际会出现的三个
+ * 大写码，与下面那个下拉框的取值是同一个集合。URL 是外部输入（从卡片点进来、或有人
+ * 手打一个 `?status=expired`），照单全收的话，一个取值对不上的参数会让下拉框空着、
+ * 列表也空着——而**「筛完没有数据」与「参数写错了」在屏幕上长得一模一样**，前者的
+ * 正确答案是「换个筛选」，后者是「这里本来就没有」。§11 那条在这里是多一层：卡片上
+ * 写着「已过期 3 份」，点进来却一条不剩，两个数就各说各话了。
+ * （`AdminSystemPage.vue` 的 `?account=` 与 `OrganizationPage.vue` 的 `?import=` 是
+ * 同一套写法，三处的参数都来自系统概览上那几张卡片。）
+ */
+const requestedStatus = String(route.query.status ?? '')
+const statusFilter = ref(
+  EXPORT_JOB_STATUS_ORDER.includes(requestedStatus) ? requestedStatus : 'all'
+)
+
+const filteredJobs = computed(() =>
+  statusFilter.value === 'all'
+    ? jobs.value
+    : jobs.value.filter((job) => job.status === statusFilter.value)
+)
+
+/** 空态按筛选分岔（§14）：空态是一句关于数据的话，不同的问题要说不同的话。 */
+const emptyText = computed(() =>
+  statusFilter.value === 'all'
+    ? '还没有导出记录。在重点关注学生、工作台或测评任务里点导出，这里就会出现一条。'
+    : `当前列出的作业里没有「${exportJobStatusLabel(statusFilter.value)}」的。`
+)
 
 async function load() {
   loading.value = true
@@ -199,6 +245,22 @@ onMounted(load)
     </div>
 
     <div class="card">
+      <!-- 状态筛选（V2.0.0 §5.14.5）。管理员系统概览那张「已过期的导出作业」卡片
+           就是带着 `?status=EXPIRED` 点到这里的，所以这个下拉的取值与那张卡片的
+           判据是同一个词。
+           选项按 `EXPORT_JOB_STATUS_ORDER` 生成，而不是在这里再抄一遍三个码——
+           它与「状态」那一列的排序用的是同一个序（可下载 → 已撤销 → 已过期），
+           抄一遍就会在加档时只改一处。 -->
+      <div v-if="!loading && !error" class="card-head">
+        <div class="toolbar">
+          <select v-model="statusFilter" class="select" aria-label="按状态筛选导出作业">
+            <option value="all">全部状态</option>
+            <option v-for="code in EXPORT_JOB_STATUS_ORDER" :key="code" :value="code">
+              {{ exportJobStatusLabel(code) }}
+            </option>
+          </select>
+        </div>
+      </div>
       <SkeletonBlock v-if="loading" variant="table" :rows="5" :columns="8" />
       <!-- 错误分支排在空态之前（§14）：一次读取失败不许留下「暂无导出记录」那句话，
            它会一直回答用户的问题，而正确答案是「刚才没读到」。 -->
@@ -206,10 +268,10 @@ onMounted(load)
       <DataTable
         v-else
         :columns="columns"
-        :rows="jobs"
+        :rows="filteredJobs"
         row-key="id"
         :page-size="20"
-        empty-text="还没有导出记录。在重点关注学生、工作台或测评任务里点导出，这里就会出现一条。"
+        :empty-text="emptyText"
       >
         <template #export_type="{ row }">{{ exportTypeLabel(row.export_type) }}</template>
 

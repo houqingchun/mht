@@ -9,6 +9,7 @@ import CareCaseDetailPage from '../features/care/CareCaseDetailPage.vue'
 import StudentRecordsPage from '../features/care/StudentRecordsPage.vue'
 import LeaderOverviewPage from '../features/leader/LeaderOverviewPage.vue'
 import ProgressPage from '../features/leader/ProgressPage.vue'
+import AdminOverviewPage from '../features/admin/AdminOverviewPage.vue'
 import AdminSystemPage from '../features/admin/AdminSystemPage.vue'
 import OrganizationPage from '../features/admin/OrganizationPage.vue'
 import ScalePage from '../features/admin/ScalePage.vue'
@@ -73,6 +74,10 @@ export const routes: RouteRecordRaw[] = [
       { path: 'leader/audit', component: AuditPage, meta: { role: 'leader', title: '审计日志' } },
 
       // Admin
+      // 「系统概览」是管理员的落地页（V2.0.0 §5.14.5）：那一页只回答「系统现在能不能
+      // 正常用」，一个学生的分数都不展示。此前落地页是「账号与权限」，于是管理员登录
+      // 后看到的第一屏是一张账号表——库里没有任何业务数据时它几乎是空的。
+      { path: 'admin/overview', component: AdminOverviewPage, meta: { role: 'admin', title: '系统概览' } },
       // 「系统管理」改名「账号与权限」（2026-09-17）：那一页只剩账号与权限矩阵两件事，
       // 而旧名字把「和系统有关的」都吸了过去——学生导入、题库导入、审计日志都曾在
       // 这一页里各留了一份副本。路径不动，改名只改标题。

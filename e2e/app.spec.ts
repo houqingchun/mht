@@ -77,10 +77,14 @@ test.describe('Authentication', () => {
 
   // 「系统管理」2026-09-17 改名「账号与权限」：那一页只剩账号与权限矩阵两件事，
   // 而旧名字把「和系统有关的」都吸了过去（学生导入、题库导入、审计各留了一份副本）。
-  test('admin logs in straight to 账号与权限', async ({ page }) => {
+  //
+  // 2026-09-27 落点再次前移（V2.0.0 §5.14.5）：管理员登进来第一件要知道的是
+  // 「这个系统现在能不能正常用」，而不是「有哪些账号」——账号与权限仍在侧栏，
+  // 只是不再是落点。这条用例断的就是那个落点，所以标题必须跟着改。
+  test('admin logs in straight to 系统概览', async ({ page }) => {
     await loginAs(page, 'admin');
-    await expect(page.getByRole('heading', { name: '账号与权限' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: '账号管理' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '系统概览' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '账号概况' })).toBeVisible();
   });
 
   test('wrong password shows error', async ({ page }) => {
@@ -121,6 +125,7 @@ test.describe('账号管理', () => {
    */
   test('admin creates a staff account, then disables it', async ({ page }) => {
     await loginAs(page, 'admin');
+    await page.goto('/admin/system');
     const account = `1${String(Date.now()).slice(-10)}`;
 
     await page.getByRole('button', { name: '新建账号' }).click();
@@ -157,11 +162,28 @@ test.describe('账号管理', () => {
     await expect(row.getByText('需改密')).toBeVisible();
     await expect(row.getByText('启用中')).toBeVisible();
 
-    await row.getByRole('button', { name: '停用' }).click();
-    // 弹层里那个确认按钮与行内那个同名，所以取最后一个。
-    await page.getByRole('button', { name: '停用' }).last().click();
+    // 三枚动作收进「操作」菜单（V2.0.0 §5.14.5）：行里只剩一枚按钮，「停用」这个
+    // 代价最高的动作因此不再与「编辑」长得一模一样地挤在同一列里。
+    await row.getByRole('button', { name: '操作' }).click();
+    await page
+      .getByRole('dialog', { name: /账号操作/ })
+      .getByRole('button', { name: '停用' })
+      .click();
+    // 点完之后菜单**先收起**、再开这句确认，所以此刻页面上只剩确认那一层。
+    // 按弹层标题定位，而不是像从前那样取 `.last()`：`.last()` 依赖两个弹层在 DOM 里
+    // 的先后，而那一层正好是这一页最容易动的部分（§22：视觉次序按**打开**次序算，
+    // 不按 DOM 次序算）——用 DOM 次序去定位一个按打开次序排序的东西，迟早会指错。
+    await page
+      .getByRole('dialog', { name: '停用账号' })
+      .getByRole('button', { name: '停用' })
+      .click();
     await expect(row.getByText('已停用')).toBeVisible();
-    await expect(row.getByRole('button', { name: '启用' })).toBeVisible();
+    // 「启用」只在菜单里，所以要先开菜单才看得见它——停用之后的出路仍在同一个地方，
+    // 这是那枚按钮存在的全部意义。
+    await row.getByRole('button', { name: '操作' }).click();
+    await expect(
+      page.getByRole('dialog', { name: /账号操作/ }).getByRole('button', { name: '启用' })
+    ).toBeVisible();
   });
 
   /**
@@ -178,6 +200,7 @@ test.describe('账号管理', () => {
    */
   test('the role column sorts by its Chinese order, not by code', async ({ page }) => {
     await loginAs(page, 'admin');
+    await page.goto('/admin/system');
     // 账号表外面是 `<section class="card pad">`，**没有** `.card-body` 那一层
     // （那一层是别的页面的写法）。
     const rows = page.locator('.card tbody tr');
@@ -2232,6 +2255,7 @@ test.describe('Admin System Management', () => {
    */
   test('每样东西只在一处，系统管理页不再重复别人', async ({ page }) => {
     await loginAs(page, 'admin');
+    await page.goto('/admin/system');
 
     await expect(page.getByRole('heading', { name: '账号与权限' })).toBeVisible();
     await expect(page.getByRole('heading', { name: '账号管理' })).toBeVisible();
@@ -2260,6 +2284,7 @@ test.describe('Admin System Management', () => {
 
   test('admin can see account list', async ({ page }) => {
     await loginAs(page, 'admin');
+    await page.goto('/admin/system');
     // 心理老师 appears twice per row (display name and role), so assert on rows.
     const accounts = page.locator('table', { hasText: '密码状态' });
     // 这里刻意不断言精确行数：seed_demo 会给每个演示学生建账号（共 31 个），
@@ -2298,6 +2323,278 @@ test.describe('Admin System Management', () => {
     await page.waitForLoadState('networkidle');
     await expect(page.getByRole('heading', { name: '测评任务' })).toHaveCount(0);
     await expect(page.getByRole('button', { name: '新建任务' })).toHaveCount(0);
+  });
+});
+
+// ========== 管理员系统概览（V2.0.0 §5.14.5） ==========
+
+/**
+ * 这一组守的是「管理员落地页 = 系统健康页」那四条验收，它们是四件不同的事：
+ *
+ *   ① 卡片上的数与它点进去那个列表说的是**同一个数**（§11「指标卡上的数必须与它
+ *      点进去的那个列表同源」）；
+ *   ② 不可点的项**不装作能点**，可点的项仍然点得动（§5.14.4.1 那条保证在管理员
+ *      页上的两个活体：学生账号、系统版本）；
+ *   ③ 库里没有任何业务数据时，这一页仍然说得出系统的状态（验收第 1 条）；
+ *   ④ 临时密码只出现一次，复制它**不留下第二份**（验收第 4 条）。
+ *
+ * 三条纪律在这组里都要遵守：
+ *
+ *   - **先证明有东西可扫**：概览页 `loading` 时渲染的是 `SkeletonBlock`，那一刻
+ *     一张卡片都不存在，任何断言在那时候都是恒绿的。所以每条用例动手之前先等
+ *     `.kpi-link` / `.check-row` 真的出现（§测试注意那一条，`auditModal` 的
+ *     docstring 记着同一个坑）。
+ *   - **不写死任何数字**：卡片上的数由 `accounts` 现算，演示库里它是几取决于此刻
+ *     有哪些账号（`admin creates a staff account` 那条用例每跑一次就多一个）。
+ *     断的是「两处相等」，不是某个具体值。
+ *   - **不改库里的数据**：这组只读；唯一会写的是第四条那个「新建账号」，
+ *     与既有的 `admin creates a staff account` 属同一类**已知且接受**的残留
+ *     （账号没有删除接口，§4「停用 ≠ 删除」）。
+ *
+ * 反过来也要说清：`vocabulary.spec.ts` 的 `/admin/overview` 那一条清单项是**恒绿**
+ * 的（这一页没有任何枚举码渲染点），真正守这一页的是下面这些用例——别把那一行
+ * 读成它们的替代。
+ */
+test.describe('管理员系统概览', () => {
+  /** 从「3 个」「3 个账号」这一类文案里取数。断的是两处相等，所以不写死数字。 */
+  async function numberOn(locator: Locator): Promise<number> {
+    return Number((await locator.innerText()).replace(/[^\d]/g, ''))
+  }
+
+  /** 等首屏数据到位：骨架屏那一帧 `.kpi-link` 一个都不存在。 */
+  async function overviewReady(page: Page) {
+    await page.goto('/admin/overview');
+    await expect(page.locator('.kpi-link').first()).toBeVisible();
+  }
+
+  test('每张卡片都点得进去，并且把筛选条件一起带过去', async ({ page }) => {
+    await loginAs(page, 'admin');
+
+    // 卡片 → 目标页那个只读一次 URL 初值的下拉。**URL 与控件的值都要断**：
+    // 只断 URL 的话，一个参数写错、目标页却照旧显示「全部」的实现照样绿——
+    // 而那正是「点进去看到的不是卡片说的那一批」这个故障的样子。
+    const drills = [
+      {
+        card: '.kpi-link', label: '未配置数据范围的账号',
+        url: /\/admin\/system\?account=unconfigured$/,
+        aria: '按账号状态筛选', value: 'unconfigured',
+      },
+      {
+        card: '.kpi-link', label: '需修改密码的账号',
+        url: /\/admin\/system\?account=must_change$/,
+        aria: '按账号状态筛选', value: 'must_change',
+      },
+      {
+        card: '.kpi-link', label: '名册导入含错误的批次',
+        url: /\/admin\/organization\?import=errors$/,
+        aria: '筛选导入批次', value: 'errors',
+      },
+      {
+        card: '.kpi-link', label: '已过期的导出作业',
+        url: /\/admin\/exports\?status=EXPIRED$/,
+        aria: '按状态筛选导出作业', value: 'EXPIRED',
+      },
+      // 「已停用账号」不是 KPI 卡，是「账号概况」里的一行检查项——它同样带筛选，
+      // 所以同样要能点到那个列表。漏掉它，这一条就只覆盖了四张卡里的三张。
+      {
+        card: '.check-row', label: '已停用账号',
+        url: /\/admin\/system\?account=inactive$/,
+        aria: '按账号状态筛选', value: 'inactive',
+      },
+    ] as const;
+
+    for (const drill of drills) {
+      await overviewReady(page);
+      await page.locator(drill.card, { hasText: drill.label }).click();
+      await expect(page).toHaveURL(drill.url);
+      await expect(page.getByLabel(drill.aria)).toHaveValue(drill.value);
+    }
+  });
+
+  test('卡片上的数与它点进去那个列表说的是同一个数', async ({ page }) => {
+    await loginAs(page, 'admin');
+
+    const accountCards = [
+      { label: '未配置数据范围的账号', filter: 'unconfigured' },
+      { label: '需修改密码的账号', filter: 'must_change' },
+    ];
+    for (const { label, filter } of accountCards) {
+      await overviewReady(page);
+      const card = page.locator('.kpi-link', { hasText: label });
+      const shown = await numberOn(card.locator('.kpi-value'));
+      await card.click();
+      await expect(page).toHaveURL(new RegExp(`account=${filter}$`));
+      await expect(page.getByLabel('按账号状态筛选')).toHaveValue(filter);
+      // `exact: true` 是必须的：`10 个账号` 里含着子串 `0 个账号`，不写的话
+      // 「卡片说 0、列表说 10」这种最该被抓到的分岔会**通过**（§测试注意那条
+      // 「断言两者相等才有意义」的同一处：判据要能真的分开这两句话）。
+      await expect(page.getByText(`${shown} 个账号`, { exact: true })).toBeVisible();
+    }
+
+    // 「已停用账号」那一行：卡片上是 `N 个`，列表上仍是 `N 个账号`。
+    await overviewReady(page);
+    const inactive = await numberOn(
+      page.locator('.check-row', { hasText: '已停用账号' }).locator('strong')
+    );
+    await page.locator('.check-row', { hasText: '已停用账号' }).click();
+    await expect(page).toHaveURL(/account=inactive$/);
+    await expect(page.getByText(`${inactive} 个账号`, { exact: true })).toBeVisible();
+
+    // 名册批次那一张：判据是 `error_rows > 0`，与目标页那个「只看含错误的」筛选
+    // 是同一条——两处都按这个谓词走，所以「卡片说 N 批」与筛选之后剩下的行数
+    // 必须相等。
+    await overviewReady(page);
+    const errored = await numberOn(
+      page.locator('.kpi-link', { hasText: '名册导入含错误的批次' }).locator('.kpi-value')
+    );
+    await page.locator('.kpi-link', { hasText: '名册导入含错误的批次' }).click();
+    await expect(page).toHaveURL(/import=errors$/);
+    await expect(page.getByLabel('筛选导入批次')).toHaveValue('errors');
+    // 只数**批次那张表**的行。这一页上还有一张学生表（`DataTable` 渲染出来的也是
+    // `table/tbody/tr`），裸的 `page.locator('table tbody tr')` 会数到那一张去——
+    // 它分页 10 行，于是断言收到 10，而「卡片说 0、列表说 10」这条最该被抓到的分岔
+    // 恰好被那 10 行盖住了。
+    const batchCard = page
+      .locator('.card')
+      .filter({ has: page.getByRole('heading', { name: '导入批次' }) });
+    if (errored === 0) {
+      // 0 的时候那张表整个不渲染（空态是一句关于数据的话，§14），所以「0 行」这件事
+      // 得由那句话来证明——只断 `tbody tr` 计数的话，「表格是空的」与「表格根本没
+      // 渲染」都是绿的（§29：一条恒绿的守卫比没有更糟）。反过来，若筛选没生效，
+      // 这句话就不出现，一样会红。
+      await expect(batchCard.getByText('最近这几批里没有含错误的批次。')).toBeVisible();
+    } else {
+      await expect(batchCard.locator('tbody tr')).toHaveCount(errored);
+    }
+  });
+
+  test('不可点的项不装作能点，可点的项仍然点得动', async ({ page }) => {
+    await loginAs(page, 'admin');
+    await overviewReady(page);
+    await expect(page.locator('.check-row').first()).toBeVisible();
+
+    // 两个活体：学生账号（这一页没有按账号类型筛选的入口，学生也不在这里建）、
+    // 系统版本（它不是一件可以去「处理」的事）。判据**三处一起断**——只看光标的话，
+    // 一个 `<button disabled>` 也过得了；只看标签名的话，一个 `<div @click>` 也过得了。
+    for (const label of ['学生账号', '系统版本']) {
+      const row = page.locator('.check-row', { hasText: label });
+      await expect(row).toBeVisible();
+      const facts = await row.evaluate((el) => ({
+        tag: el.tagName,
+        role: el.getAttribute('role'),
+        cursor: getComputedStyle(el).cursor,
+      }));
+      expect(facts.tag).toBe('DIV');
+      expect(facts.role).toBeNull();
+      expect(facts.cursor).not.toBe('pointer');
+    }
+
+    // 反方向：可点的那几行仍然带 `role="button"` 与手型光标。少了这一半，一个
+    // 「把所有 check-row 都做成 div」的一致退化也能让上面那三条通过——那会同时
+    // 把「能点」这件事静默弄丢，而屏幕上什么都不会变。
+    for (const label of ['员工账号', '已停用账号', '当前量表版本']) {
+      const row = page.locator('.check-row', { hasText: label });
+      await expect(row).toHaveAttribute('role', 'button');
+      expect(await row.evaluate((el) => getComputedStyle(el).cursor)).toBe('pointer');
+    }
+  });
+
+  test('库里没有任何业务数据时，这一页仍然说得出系统的状态', async ({ page }) => {
+    // 「无业务数据」在共享演示库上只有一种造法：把这一页要的那几个列表接口换成空。
+    // 真去清库会把同一次运行里别的用例一起弄坏（「跑 e2e 不许改掉库里的东西」）。
+    // 量表那一份也置空，于是「还没有已发布的量表版本」那条上线配置会被真的列出来
+    // ——空库上本来就该是它。
+    const emptyEnvelope = (data: unknown) => ({
+      success: true,
+      data,
+      request_id: 'e2e-empty-probe',
+      error: null,
+    });
+    const blanks: Array<[string, unknown]> = [
+      ['/api/v1/admin/accounts', { items: [] }],
+      ['/api/v1/student-roster/import/batches', { items: [], total: 0, truncated: false }],
+      ['/api/v1/export-jobs', { items: [] }],
+      ['/api/v1/scales/versions', { items: [] }],
+    ];
+    for (const [path, data] of blanks) {
+      await page.route(
+        (url) => url.pathname === path,
+        (route) => route.fulfill({ json: emptyEnvelope(data) })
+      );
+    }
+
+    await loginAs(page, 'admin');
+    await overviewReady(page);
+
+    // 四张卡片都在，而且各自说的是一个数——不是一片空白，也不是一处报错。
+    for (const label of [
+      '未配置数据范围的账号',
+      '需修改密码的账号',
+      '名册导入含错误的批次',
+      '已过期的导出作业',
+    ]) {
+      await expect(
+        page.locator('.kpi-link', { hasText: label }).locator('.kpi-value')
+      ).toHaveText('0');
+    }
+    // 不可点的那两格仍然在：空库上它们说的是「没有这个东西」，而不是整格消失。
+    await expect(page.locator('.check-row', { hasText: '学生账号' })).toBeVisible();
+    await expect(page.locator('.check-row', { hasText: '系统版本' })).toBeVisible();
+    // 量表为空 → 那一条上线配置必须真的列出来（这是「只列能从真实配置判定的项目」
+    // 那句话的活体：它判的正是 `scales` 里有没有已发布版本）。
+    await expect(
+      page.locator('.check-row', { hasText: '还没有已发布的量表版本' })
+    ).toBeVisible();
+    // 一个错误态都不该出现：空数据不是读取失败（§14 三态要长得不一样）。
+    await expect(page.getByText('系统概览加载失败')).toHaveCount(0);
+  });
+
+  test('临时密码可以复制，关掉之后就再也找不回来', async ({ page, context }) => {
+    // 剪贴板要显式授权，否则 `navigator.clipboard.readText()` 在 headless 里
+    // 拿不到东西——而「读回来比对」正是这一条唯一的强断言。
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    const consoleLines: string[] = [];
+    page.on('console', (msg) => consoleLines.push(msg.text()));
+
+    await loginAs(page, 'admin');
+    await page.goto('/admin/system');
+
+    // 账号用时间戳（账号是唯一约束，写死一串第二次跑就撞）；范围选「全校」——
+    // 选年级或班级会在 `user_scope` 里留下一条指着**演示**年级/班级的行，而
+    // `make purge-demo` 遇到仍被引用的班级会跳过不删，跑一次 e2e 就给那次清理
+    // 留下一块擦不掉的残渣（与既有那条用例同一条理由）。
+    const account = `1${String(Date.now()).slice(-10)}`;
+    const password = 'e2e-copy-pass';
+    await page.getByRole('button', { name: '新建账号' }).click();
+    const form = page.getByRole('dialog');
+    await form.getByLabel('角色').selectOption('counselor');
+    await form.getByLabel('姓名').fill('复制验收老师');
+    await form.getByLabel('登录账号').fill(account);
+    await form.getByLabel('临时密码').fill(password);
+    await form.getByLabel('数据范围').selectOption({ index: 1 });
+    await form.getByRole('button', { name: '创建账号' }).click();
+
+    const result = page.getByRole('dialog', { name: /账号已创建/ });
+    await expect(result.getByText(password, { exact: true })).toBeVisible();
+
+    await result.getByRole('button', { name: '复制' }).click();
+    // **读回来比对**，不是看「已复制」那两个字：后者在一个复制了空串的实现上
+    // 照样出现（`legacyCopy` 的注释记着 `execCommand('copy')` 就是这么骗人的）。
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(password);
+    await expect(result.getByText('已复制到剪贴板')).toBeVisible();
+
+    await result.getByRole('button', { name: '我已记录' }).click();
+    await expect(result).toHaveCount(0);
+    // 关掉之后三处残留各断一次：屏幕上、DOM 里、控制台里。
+    await expect(page.getByText(password)).toHaveCount(0);
+    expect(await page.evaluate((p) => document.body.innerHTML.includes(p), password)).toBe(false);
+    // 非安全上下文那条路会在 body 上挂一个 textarea（`legacyCopy`）。它必须在
+    // `finally` 里被摘掉——这一条在 Chromium 上是**兜底**（那条路今天走不到），
+    // 但留着它是因为「摘不摘」只有真跑过 fallback 才知道，而写下来的判据不会忘。
+    expect(await page.evaluate(() => document.querySelectorAll('body > textarea').length)).toBe(0);
+    expect(consoleLines.filter((line) => line.includes(password))).toEqual([]);
+    // 审计的 `detail` 里有没有它，在这一层**验不了**：`GET /audit-logs` 不发
+    // `detail`（§8）。那一半由后端用例守（`test_account_admin_api.py` 的断言）。
   });
 });
 
@@ -2416,6 +2713,7 @@ test.describe('Mobile Responsiveness', () => {
 test.describe('权限矩阵', () => {
   test('admin can open the role permission matrix', async ({ page }) => {
     await loginAs(page, 'admin');
+    await page.goto('/admin/system');
     await page.getByRole('button', { name: '配置权限' }).click();
 
     await expect(page.getByRole('heading', { name: '角色权限矩阵' })).toBeVisible();
@@ -2440,6 +2738,7 @@ test.describe('权限矩阵', () => {
 
   test('matrix reflects the backend defaults', async ({ page }) => {
     await loginAs(page, 'admin');
+    await page.goto('/admin/system');
     await page.getByRole('button', { name: '配置权限' }).click();
 
     const block = page.locator('.perm-block', { hasText: '聚合统计' });
@@ -2456,6 +2755,7 @@ test.describe('权限矩阵', () => {
    */
   test('每个格子只列出这项能力真正接受的等级', async ({ page }) => {
     await loginAs(page, 'admin');
+    await page.goto('/admin/system');
     await page.getByRole('button', { name: '配置权限' }).click();
 
     // 同步函数，不是 async：`await optionsOf(x).allInnerTexts()` 里 `.` 先于 `await` 结合，
@@ -2481,6 +2781,7 @@ test.describe('权限矩阵', () => {
 
   test('选中的等级下面写着它意味着什么', async ({ page }) => {
     await loginAs(page, 'admin');
+    await page.goto('/admin/system');
     await page.getByRole('button', { name: '配置权限' }).click();
 
     const cell = page.locator('.perm-block', { hasText: '学生心理详情' }).locator('.perm-cell').nth(1);
@@ -2491,6 +2792,7 @@ test.describe('权限矩阵', () => {
 
   test('只提交动过的格子，改动清单写在保存按钮上方', async ({ page }) => {
     await loginAs(page, 'admin');
+    await page.goto('/admin/system');
     await page.getByRole('button', { name: '配置权限' }).click();
 
     // 打开即「没有改动」——旧版一按保存就会把全部 20 格整批写进库，
@@ -2519,13 +2821,23 @@ test.describe('权限矩阵', () => {
 
   test('恢复默认把草稿写回出厂配置，同样要保存才生效', async ({ page }) => {
     await loginAs(page, 'admin');
+    await page.goto('/admin/system');
     await page.getByRole('button', { name: '配置权限' }).click();
 
     const cell = page.locator('.perm-block', { hasText: '聚合统计' }).locator('.perm-cell').nth(1);
     await cell.locator('select').selectOption('NONE');
     await expect(cell.locator('.customised-mark')).toBeVisible();
 
+    // 「恢复默认」2026-09-27 多了一道二次确认（V2.0.0 §5.14.5）。这里要断**两件事**：
+    // 确认之前草稿一个字都没动（按钮旁边那句「这不会立刻写入任何配置」说的就是这个），
+    // 确认之后才回到出厂配置。
     await page.getByRole('button', { name: '恢复默认' }).click();
+    const restoreConfirm = page.getByRole('dialog', { name: '恢复出厂配置' });
+    await expect(restoreConfirm).toBeVisible();
+    await expect(cell.locator('select')).toHaveValue('NONE');
+    // 触发按钮与确认按钮**同名**，两者此刻同在 DOM 里（一个在矩阵 footer、一个在弹层），
+    // 直接按名字取会撞上严格模式——所以按弹层标题定位。
+    await restoreConfirm.getByRole('button', { name: '恢复默认' }).click();
     await expect(cell.locator('select')).toHaveValue('SCHOOL');
     // 恢复默认只是改草稿：按钮回到「没有改动」，什么都没写进库。
     await expect(page.getByRole('button', { name: '没有改动' })).toBeDisabled();
@@ -2534,6 +2846,7 @@ test.describe('权限矩阵', () => {
 
   test('越权的等级组合根本选不出来（学生拿不到「管理」）', async ({ page }) => {
     await loginAs(page, 'admin');
+    await page.goto('/admin/system');
     await page.getByRole('button', { name: '配置权限' }).click();
 
     // 旧界面这一格有全部 12 个等级，「管理」就在里面——存进去不报错，
@@ -3652,7 +3965,20 @@ test.describe('缺陷回归', () => {
 
   test('reset-password does not pre-fill a credential', async ({ page }) => {
     await loginAs(page, 'admin');
-    await page.getByRole('button', { name: '重置密码' }).first().click();
+    await page.goto('/admin/system');
+    // 「重置密码」2026-09-27 收进统一操作菜单（V2.0.0 §5.14.5）：行里只剩一枚「操作」，
+    // 所以先开菜单再点它。两处都按名字定位，不用 `.first()` / `.last()`——弹层的视觉
+    // 次序按**打开**次序算（§22），而 DOM 次序是另一回事，按它取元素迟早指错一层。
+    await page
+      .locator('table', { hasText: '密码状态' })
+      .locator('tbody tr')
+      .first()
+      .getByRole('button', { name: '操作' })
+      .click();
+    await page
+      .getByRole('dialog', { name: /账号操作/ })
+      .getByRole('button', { name: '重置密码' })
+      .click();
     await expect(page.getByPlaceholder('请设置临时密码（至少 6 位）')).toHaveValue('');
   });
 
@@ -4323,7 +4649,8 @@ test.describe('系统配置', () => {
     await page.getByRole('textbox', { name: /管理员账号/ }).fill('admin');
     await page.getByRole('textbox', { name: /密码/i }).fill('123456');
     await page.getByRole('button', { name: '登录' }).click();
-    await page.waitForURL('/admin/system');
+    // 管理员落点 2026-09-27 前移到「系统概览」（V2.0.0 §5.14.5）。
+    await page.waitForURL('/admin/overview');
     snapshot ??= await readOrgSettings(page);
     await resetOrgSettings(page);
   });
@@ -4579,7 +4906,8 @@ test.describe('量表评分规则', () => {
     await page.getByRole('textbox', { name: /管理员账号/ }).fill('admin');
     await page.getByRole('textbox', { name: /密码/i }).fill('123456');
     await page.getByRole('button', { name: '登录' }).click();
-    await page.waitForURL('/admin/system');
+    // 管理员落点 2026-09-27 前移到「系统概览」（V2.0.0 §5.14.5）。
+    await page.waitForURL('/admin/overview');
   });
 
   test('rule panel shows the thresholds that drive scoring', async ({ page }) => {

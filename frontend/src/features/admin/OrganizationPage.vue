@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import SkeletonBlock from '../../components/SkeletonBlock.vue'
 import ErrorState from '../../components/ErrorState.vue'
 import DataTable, { type Column } from '../../components/DataTable.vue'
@@ -85,6 +85,28 @@ const batches = ref<RosterImportBatch[]>([])
 const batchesTotal = ref(0)
 const batchesLoading = ref(true)
 const batchesError = ref('')
+
+const route = useRoute()
+
+/**
+ * 批次筛选，初值取自查询参数（V2.0.0 §5.14.5）。管理员系统概览那一张「名册导入含
+ * 错误的批次」卡片就是带着 `?import=errors` 点到这里的。
+ *
+ * **判据是 `error_rows > 0`，不是 `status`**：两条导入链路的批次状态只有
+ * `PREVIEW` / `COMMITTED`（CLAUDE.md §3 的词表），从来没有一个 `FAILED`——按状态
+ * 去筛会恒空，而那是一个看起来像「这次导入没有问题」的 0。这与卡片上那个 filter
+ * 逐字相同，两处说的是同一件事（§11）。
+ *
+ * 筛选**只影响这一页显示哪几行**，`batches` 仍然是服务端发回来的那一窗口；所以
+ * 下面那句「最近 N 批」说的是窗口，筛选说的是窗口里的一个子集，两句话不冲突。
+ */
+const importFilter = ref(String(route.query.import ?? '') === 'errors' ? 'errors' : 'all')
+
+const filteredBatches = computed(() =>
+  importFilter.value === 'errors'
+    ? batches.value.filter((batch) => batch.error_rows > 0)
+    : batches.value
+)
 
 const showBatchDetail = ref(false)
 const batchDetail = ref<RosterImportBatch | null>(null)
@@ -355,18 +377,31 @@ onMounted(load)
       <section class="card" style="margin-top:17px">
         <div class="card-head">
           <h2>导入批次</h2>
-          <span class="muted tiny">
-            最近 {{ batches.length }} 批<template v-if="batchesTotal > batches.length"
-              >，共 {{ batchesTotal }} 批</template
-            >
-          </span>
+          <div class="toolbar">
+            <!-- 筛选（V2.0.0 §5.14.5）：管理员系统概览那张「名册导入含错误的批次」
+                 卡片带着 `?import=errors` 点到这里。判据是 `error_rows > 0`——
+                 与那张卡片、与下面那一列标红的条件都是同一条。 -->
+            <select v-model="importFilter" class="select" aria-label="筛选导入批次">
+              <option value="all">全部批次</option>
+              <option value="errors">只看含错误的</option>
+            </select>
+            <span class="muted tiny">
+              最近 {{ batches.length }} 批<template v-if="batchesTotal > batches.length"
+                >，共 {{ batchesTotal }} 批</template
+              >
+            </span>
+          </div>
         </div>
         <div class="card-body">
           <!-- 三态分开（§14）：错误分支排在空态**之前**——一次读取失败时落下
                「暂无导入批次」，会让操作员以为自己从没导过。 -->
           <SkeletonBlock v-if="batchesLoading" variant="table" :rows="3" />
           <ErrorState v-else-if="batchesError" :message="batchesError" :on-retry="loadBatches" />
-          <p v-else-if="!batches.length" class="muted tiny">暂无导入批次</p>
+          <!-- 空态按筛选分岔（§14）：空态是一句关于数据的话，而「这批人里没有含错误的」
+               与「你从来没导过」是两个不同的问题。 -->
+          <p v-else-if="!filteredBatches.length" class="muted tiny">
+            {{ importFilter === 'errors' ? '最近这几批里没有含错误的批次。' : '暂无导入批次' }}
+          </p>
           <div v-else class="table-wrap">
             <table>
               <thead>
@@ -376,7 +411,7 @@ onMounted(load)
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="batch in batches" :key="batch.id">
+                <tr v-for="batch in filteredBatches" :key="batch.id">
                   <td>{{ batch.batch_no }}</td>
                   <td>{{ batch.file_name }}</td>
                   <td>

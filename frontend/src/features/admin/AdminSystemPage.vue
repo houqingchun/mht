@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import Modal from '../../components/Modal.vue'
 import ConfirmDialog from '../../components/ConfirmDialog.vue'
 import FormDialog, { type FormField } from '../../components/FormDialog.vue'
@@ -37,6 +37,7 @@ import {
  * 测评任务是学校业务，同理不在这里（见 docs/phase0_rule_freeze.md §7）。
  */
 const router = useRouter()
+const route = useRoute()
 
 const accountColumns: Column[] = [
   { key: 'display_name', label: '姓名', sortable: true },
@@ -67,13 +68,83 @@ const error = ref('')
  * 按 姓名 / 账号 两列匹配（角色与范围是编码与数组，用中文搜它们得先想清楚搜的是什么）。
  */
 const accountQuery = ref('')
+
+/**
+ * 「哪一类账号」这一档筛选（V2.0.0 §5.14.5）。
+ *
+ * 管理员系统概览上那三张卡片（未配置数据范围 / 需修改密码 / 已停用）就是带着
+ * `?account=unconfigured` 之类点到这一页来的，所以 **`ACCOUNT_FILTER_PREDICATES`
+ * 里的判据与那三张卡片的计算属性必须逐字相同**——§11：指标卡上的数必须与它点进去
+ * 的那个列表同源。卡片数的是「`scopes` 为空的账号」，这里筛的就得是同一个谓词；
+ * 写宽一个字（比如改成按「范围里没有某一段」去数），两个数就会在某一天各说各话，
+ * 而屏幕上两边看起来都对。
+ *
+ * 它与搜索框是**叠加**关系，不是替代：搜索问「哪个人」，这一档问「哪一类账号」，
+ * 两个问题可以同时问。
+ *
+ * 初值**走白名单**，认不出就当没筛：查询参数是用户敲得出来的
+ * （`?account=随便什么`），直接拿它当筛选值会落到一个谁都不认识的键上，而那一支的
+ * 谓词是空——列表整片变空，看起来像「一个账号都没有」。宁可显示全部，不要显示一个
+ * 假装是「空」的页面（§9：取不到就不猜；这里猜得出用户想要什么，只是他不该因此
+ * 拿到一张空表）。
+ *
+ * 只读一次初值、切换时**不回写 URL**：这一页的筛选是「看一眼就走」的（从卡片点进来、
+ * 处理完那几个人、离开），把每次切换都写进历史会让「后退」退不出这一页。审计页那个
+ * 服务端筛选不同——那边翻页要能分享链接。
+ */
+type AccountFilter = 'all' | 'unconfigured' | 'must_change' | 'inactive'
+
+const ACCOUNT_FILTERS: Array<{ value: AccountFilter; label: string }> = [
+  { value: 'all', label: '全部账号' },
+  { value: 'unconfigured', label: '未配置数据范围' },
+  { value: 'must_change', label: '需修改密码' },
+  { value: 'inactive', label: '已停用' }
+]
+
+/** 筛选码 → 谓词。下拉框与列表都从这里取，所以「筛的是什么」只有一处定义。 */
+const ACCOUNT_FILTER_PREDICATES: Record<AccountFilter, (a: AccountItem) => boolean> = {
+  all: () => true,
+  unconfigured: (a) => !a.scopes?.length,
+  must_change: (a) => a.must_change_password,
+  inactive: (a) => !a.active
+}
+
+const initialAccountFilter = (): AccountFilter => {
+  const wanted = String(route.query.account ?? '')
+  return ACCOUNT_FILTERS.find((f) => f.value === wanted)?.value ?? 'all'
+}
+
+const accountFilter = ref<AccountFilter>(initialAccountFilter())
+
 const filteredAccounts = computed(() => {
   const q = accountQuery.value.trim().toLowerCase()
-  if (!q) return accounts.value
-  return accounts.value.filter(
-    (a) => a.display_name.toLowerCase().includes(q) || a.account.toLowerCase().includes(q)
-  )
+  const matchesFilter = ACCOUNT_FILTER_PREDICATES[accountFilter.value]
+  return accounts.value.filter((a) => {
+    if (!matchesFilter(a)) return false
+    if (!q) return true
+    return a.display_name.toLowerCase().includes(q) || a.account.toLowerCase().includes(q)
+  })
 })
+
+/**
+ * 空态按「用户在问什么」分岔（§14）。
+ *
+ * 「暂无账号」与「没有未配置数据范围的账号」回答的是两个不同的问题，而后者其实是个
+ * **好消息**（说明每个账号都配了范围）——两者共用一句「暂无账号」时，管理员会去查
+ * 是不是哪里坏了。
+ */
+const accountsEmptyText = computed(() => {
+  if (accountQuery.value.trim()) return '没有匹配的账号'
+  const label = ACCOUNT_FILTERS.find((f) => f.value === accountFilter.value)?.label
+  return accountFilter.value === 'all' ? '暂无账号' : `没有「${label}」的账号。`
+})
+
+/** 筛选是否偏离「全部」——用于决定要不要显示「清除筛选」。 */
+const accountFilterActive = computed(() => accountFilter.value !== 'all')
+
+function clearAccountFilter() {
+  accountFilter.value = 'all'
+}
 
 const showForm = ref(false)
 const formTitle = ref('')
@@ -123,6 +194,80 @@ const showPasswordResult = ref(false)
  * 而他会以为是系统坏了。新建账号没有这一句（那个人还没有任何会话）。
  */
 const resetResult = ref<{ title: string; name: string; password: string; note?: string } | null>(null)
+
+/**
+ * 复制临时密码（V2.0.0 §5.14.5）。
+ *
+ * 密码是一串系统生成的随机字符，**手抄一遍就是一次抄错的机会**，而抄错的代价是
+ * 「登录不上」——用户会一直重打密码。所以这一格旁边要有一个复制按钮。
+ *
+ * **两条路，因为部署现场多半是 http。** `navigator.clipboard` 只在安全上下文里存在
+ * （https 或 localhost），而局域网用法下操作员打开的是 `http://内网IP:<端口>`
+ * （`部署说明.txt` 里给老师念的就是这个地址）——那时 `navigator.clipboard` 是
+ * `undefined`，直接调它会抛 `Cannot read properties of undefined`，而那句话对用户
+ * 毫无意义。所以有一条回退。
+ *
+ * 反馈用 `copiedPassword` 这个 ref 而**不是定时器**：定时器要在组件卸载时清掉，
+ * 而这一层被卸载的路径（弹层关闭、切页）恰恰是最容易漏的那一条（§15 那条
+ * 「面板在打开状态下被卸载也要解锁」是同一个坑）。这个 ref 由 `closePasswordResult`
+ * 一并归零，与密码本身同寿。
+ */
+const copiedPassword = ref(false)
+
+/**
+ * 非安全上下文下的复制。
+ *
+ * 那个 textarea **不能**用 `display:none` / `visibility:hidden`：那样 `select()`
+ * 选不中内容，而 `document.execCommand('copy')` **照样返回 `true`**——复制到的是
+ * 空串，屏幕上却说「已复制」，用户去粘贴时拿到一片空白。所以是挪到视口外面。
+ *
+ * 用完在 `finally` 里摘掉：DOM 上不留副本（§5.14.5 验收第 4 条点名了「DOM 持久
+ * 残留」）。它也不进控制台、不进审计——`detail` 是会被导出的文本，密码一律不进去。
+ */
+function legacyCopy(text: string): boolean {
+  const area = document.createElement('textarea')
+  area.value = text
+  area.setAttribute('readonly', '')
+  area.style.position = 'fixed'
+  area.style.top = '-1000px'
+  document.body.appendChild(area)
+  try {
+    area.select()
+    return document.execCommand('copy')
+  } finally {
+    document.body.removeChild(area)
+  }
+}
+
+async function copyPassword() {
+  const password = resetResult.value?.password
+  if (!password) return
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(password)
+    } else if (!legacyCopy(password)) {
+      throw new Error('copy unavailable')
+    }
+    copiedPassword.value = true
+  } catch {
+    // 复制失败**不是一次操作的失败**：密码还在屏幕上，手选一样能复制。所以是一句
+    // 指路的 toast，不是错误状态、更不是把弹层关掉。
+    showToast('error', '复制失败，请手动选中密码后复制')
+  }
+}
+
+/**
+ * 关闭弹层 = 这一次展示结束。
+ *
+ * `v-if` 已经把 DOM 摘掉了，但 `resetResult` 这个 ref 里**还留着那串密码**，直到
+ * 下一次创建/重置把它覆盖。§5.14.5 的验收第 4 条点名的是「DOM 持久残留」，而在内存
+ * 里多留一份是同一件事的另一半——顺手清掉它，代价是一个赋值。
+ */
+function closePasswordResult() {
+  showPasswordResult.value = false
+  resetResult.value = null
+  copiedPassword.value = false
+}
 
 async function resetPassword(account: AccountItem) {
   const values = await showFormDialog(
@@ -207,12 +352,23 @@ function scopeOptionLabel(option: { scope_type: string; name: string }) {
   return `${accountScopeLabel(option.scope_type)} · ${option.name}`
 }
 
+/**
+ * 一段范围 → 一枚标签上的字（V2.0.0 §5.14.5）。
+ *
+ * 抽出来是为了**一处定义、两个读者**：列表那一格（多枚标签）与下面拼句那一个
+ * （编辑弹层的提示语）。此前只有拼句那一个读者，所以判断逻辑写在它体内；现在列表
+ * 要逐段渲染，各写一份必然漂——而漂出来的样子是「列表显示『全校』、提示语显示
+ * 『全校 · 青禾实验学校』」，两句话说的是同一段范围。
+ */
+function scopeTagLabel(scope: NonNullable<AccountItem['scopes']>[number]): string {
+  return scope.name
+    ? scopeOptionLabel({ scope_type: scope.scope_type, name: scope.name })
+    : accountScopeLabel(scope.scope_type)
+}
+
 /** 一个账号的全部范围拼成一句。多段是并列（谓词用 `or_` 合并，§9）。 */
 function accountScopeText(account: AccountItem): string {
-  const scopes = account.scopes ?? []
-  return scopes
-    .map((scope) => (scope.name ? scopeOptionLabel({ scope_type: scope.scope_type, name: scope.name }) : accountScopeLabel(scope.scope_type)))
-    .join('、')
+  return (account.scopes ?? []).map(scopeTagLabel).join('、')
 }
 
 async function scopeChoices(): Promise<FormField['options']> {
@@ -346,6 +502,42 @@ function toggleActive(account: AccountItem) {
   showActiveConfirm.value = true
 }
 
+/**
+ * 行内操作收进一个统一菜单（V2.0.0 §5.14.5）。
+ *
+ * 此前三枚按钮（编辑 / 重置密码 / 停用·启用）直接铺在「操作」那一列里，于是同一行
+ * 里既有普通动作又有**危险动作**，而屏幕上没有任何东西把「停用」的后果说出来——
+ * 那句话住在一个只有点下去才出现的弹层里（「停用后…无法登录，已登录的会话下一个
+ * 请求就会失效」）。收进菜单之后，危险动作不再与普通动作用同一种外观挤在一行。
+ *
+ * **做成弹层，不做行内下拉**：表格外层是 `overflow: auto` 的 `.table-wrap`，一个
+ * 绝对定位的下拉会被裁掉（滚到下半页的行尤其明显——菜单出现在表格上边缘之外）。
+ * 弹层还自带焦点陷阱、`aria-modal` 与 Esc（§15），行内下拉要另写一整套键盘模型。
+ *
+ * 三枚按钮各自**先收起菜单再开下一层**：两层弹层叠着虽然能被 §22 那套次序排对，
+ * 但「上一层的按钮还看得见」会让用户以为点错了、再点一次。
+ */
+const actionsTarget = ref<AccountItem | null>(null)
+
+function openActions(account: AccountItem) {
+  actionsTarget.value = account
+}
+
+function actionsEdit(account: AccountItem) {
+  actionsTarget.value = null
+  void editAccount(account)
+}
+
+function actionsResetPassword(account: AccountItem) {
+  actionsTarget.value = null
+  void resetPassword(account)
+}
+
+function actionsToggleActive(account: AccountItem) {
+  actionsTarget.value = null
+  toggleActive(account)
+}
+
 async function commitActiveToggle() {
   const account = activeTarget.value
   if (!account) return
@@ -388,6 +580,38 @@ const ROLES: Array<{ code: string; label: string }> = [
   { code: 'admin', label: '系统管理员' },
   { code: 'student', label: '学生' }
 ]
+
+/**
+ * 按角色查看（V2.0.0 §5.14.5）。
+ *
+ * **默认必须是「全部」**，这不是审美偏好：一屏看完四个角色本来就是这张矩阵的做法
+ * （四项能力各自四个格并排，缺一格就看不出「这一项谁有谁没有」），而收起是给
+ * 「我只想确认某一位老师有没有多出什么」准备的。全站也有两条 e2e 按四列同屏断言
+ * （`admin can open the role permission matrix` 数 `.perm-cell` 恰好 4 个、
+ * `matrix reflects the backend defaults` 依次读第 0..3 个下拉框），默认改成单角色
+ * 会一起红——而它们红得对：那两条断的正是「四个角色同屏可读」。
+ *
+ * 单角色时**只渲染那一列**（`.perm-cell` 恰好 1 个），不是把另外三列藏起来——
+ * 藏起来的格子仍然在 DOM 里，读屏软件会念到三组「这个角色看不到的内容」。
+ */
+const permissionRoleFilter = ref<string>('all')
+
+const visibleRoles = computed(() =>
+  permissionRoleFilter.value === 'all'
+    ? ROLES
+    : ROLES.filter((r) => r.code === permissionRoleFilter.value)
+)
+
+/** 视图里当前有「已改」的格子吗——用于给「恢复默认」一个不至于白按的提示。 */
+const customisedCount = computed(() => {
+  let n = 0
+  for (const row of permissionRows.value) {
+    for (const role of ROLES) {
+      if (isCustomised(row.capability_key, role.code)) n += 1
+    }
+  }
+  return n
+})
 
 function cellKey(capability: string, role: string) {
   return `${capability}::${role}`
@@ -474,6 +698,40 @@ function restoreDefaults() {
     }
   }
   permissionDraft.value = draft
+}
+
+/**
+ * 「恢复默认」的二次确认（V2.0.0 §5.14.5）。
+ *
+ * 它**不是**一个破坏性动作：`restoreDefaults` 只改草稿，真正的写入仍然要按「保存
+ * 配置」并写审计（全站只有 `PUT /admin/permissions` 一个写入口，没有独立的 reset
+ * 端点）。所以这句确认的措辞必须说清这一点——否则用户以为按下去就已经生效，关掉
+ * 弹层走人，而什么也没保存。
+ *
+ * 那为什么还要确认：它会把**用户手上所有未保存的改动**一起冲掉（包括他刚刚一小格
+ * 一小格调出来的那些），而屏幕上唯一的痕迹是那个「保存配置（N 项）」上的数字变小。
+ * 第一次点击表达的是意图（我要回到出厂值），这一次表达的是代价。
+ */
+const showRestoreConfirm = ref(false)
+
+const restoreConfirmMessage = computed(() => {
+  const changed = dirtyCells.value.length
+  return changed
+    ? `上面 ${changed} 处尚未保存的改动会被丢弃，草稿回到出厂配置。这不会立刻写入任何配置——还要再点一次「保存配置」才生效。`
+    : '草稿会回到出厂配置。这不会立刻写入任何配置——还要再点一次「保存配置」才生效。'
+})
+
+/**
+ * 打开二次确认。真正的改写发生在 `commitRestoreDefaults` 里——**确认之后才发生**，
+ * 所以这一枚按钮按下去只是问一句，草稿此刻一个字没动。
+ */
+function askRestoreDefaults() {
+  showRestoreConfirm.value = true
+}
+
+function commitRestoreDefaults() {
+  restoreDefaults()
+  showRestoreConfirm.value = false
 }
 
 async function openPermissions() {
@@ -583,23 +841,58 @@ onMounted(loadVersionLabel)
           <div class="search-box">
             <input v-model="accountQuery" placeholder="搜索姓名或账号" />
           </div>
-          <!-- 只在搜索时出数字：不搜索时这个数就是「共 N 条」那一句，重复一遍没有信息。 -->
-          <span v-if="accountQuery.trim()" class="muted tiny">{{ filteredAccounts.length }} 个账号</span>
+          <!-- 「哪一类账号」这一档（V2.0.0 §5.14.5）。系统概览上那三张卡片就是带着
+               `?account=…` 点到这一页来的，所以选项文字与那三张卡片的标题逐字一致
+               ——用户在卡片上看到「未配置数据范围」，落到这里必须还是那几个字。
+               与搜索框是**叠加**关系：搜索问「哪个人」，这一档问「哪一类账号」。 -->
+          <select v-model="accountFilter" class="select" aria-label="按账号状态筛选">
+            <option v-for="option in ACCOUNT_FILTERS" :key="option.value" :value="option.value">
+              {{ option.label }}
+            </option>
+          </select>
+          <!-- 筛选偏离「全部」时给一条退路：从卡片点进来的人处理完那几个人之后，
+               未必记得自己是怎么走到这张表上的，而屏幕上只剩下一个变短了的列表。 -->
+          <button v-if="accountFilterActive" class="btn small" type="button" @click="clearAccountFilter">
+            清除筛选
+          </button>
+          <!-- 只在筛选或搜索生效时出数字：都不生效时这个数就是「共 N 条」那一句，
+               重复一遍没有信息。 -->
+          <span v-if="accountQuery.trim() || accountFilterActive" class="muted tiny">
+            {{ filteredAccounts.length }} 个账号
+          </span>
         </div>
         <DataTable
           :columns="accountColumns"
           :rows="filteredAccounts"
           row-key="id"
           :page-size="10"
-          :empty-text="accountQuery.trim() ? '没有匹配的账号' : '暂无账号'"
+          :empty-text="accountsEmptyText"
         >
           <template #role_code="{ row }">{{ ROLE_LABELS[row.role_code] || row.role_code }}</template>
           <template #scopes="{ row }">
             <!-- 没有范围的账号不是「少填一项」，是**一个看不到任何学生的账号**：
                  谓词在「用户没有范围行」时恒假（§9）。所以它出琥珀色的警告，
-                 而不是一个和别的行长得一模一样的 `—`。 -->
-            <span v-if="!row.scopes?.length" class="pill amber">未配置 · 看不到任何学生</span>
-            <span v-else>{{ accountScopeText(row) }}</span>
+                 而不是一个和别的行长得一模一样的 `—`。
+                 V2.0.0 §5.14.5 起这一格**不只警告，还给出口**：一枚「配置范围」直接
+                 打开这个账号的编辑弹层（那里范围那一项是必填的，§9 记着为什么）。 -->
+            <template v-if="!row.scopes?.length">
+              <span class="pill amber">未配置 · 看不到任何学生</span>
+              <button class="btn small" type="button" style="margin-left:6px" @click="editAccount(row)">
+                配置范围
+              </button>
+            </template>
+            <!-- 有范围时逐段一枚标签：一个账号可以有多段范围（谓词用 `or_` 合并，是
+                 并集，§9）。此前它们拼成一句「初一 · 1班、初二 · 2班」，读到第三个
+                 就要自己数哪一段到哪一段为止——标签把边界画出来。文字一个字没变，
+                 变的只是它被包在几枚标签里。 -->
+            <span
+              v-for="(scope, index) in row.scopes"
+              :key="index"
+              class="pill gray"
+              style="margin-right:4px"
+            >
+              {{ scopeTagLabel(scope) }}
+            </span>
           </template>
           <template #must_change_password="{ row }">
             <span :class="['pill', row.must_change_password ? 'amber' : 'green']">
@@ -610,13 +903,13 @@ onMounted(loadVersionLabel)
             <span :class="['pill', row.active ? 'green' : 'gray']">{{ row.active ? '启用中' : '已停用' }}</span>
           </template>
           <template #actions="{ row }">
-            <button class="btn small" @click="editAccount(row)">编辑</button>
-            <button class="btn small" style="margin-left:6px" @click="resetPassword(row)">重置密码</button>
-            <!-- 账号没有删除接口：停用是这条路（`get_current_user` 每次请求都查
-                 `active`，所以它立即生效，不等 token 过期）。 -->
-            <button class="btn small" style="margin-left:6px" @click="toggleActive(row)">
-              {{ row.active ? '停用' : '启用' }}
-            </button>
+            <!-- 三枚按钮收进一个菜单（V2.0.0 §5.14.5）。此前它们平铺在同一列里、
+                 一样重——而「停用」是代价最高的那一个（账号没有删除接口，停用就是
+                 那条路，且它立即生效），却与「编辑」长得一模一样。收进菜单之后
+                 危险动作单独用危险色，并且仍然走原来那句确认说明。
+                 按钮的**名字**不变（编辑 / 重置密码 / 停用），所以照着名字找它的人
+                 只是多点一下。 -->
+            <button class="btn small" type="button" @click="openActions(row)">操作</button>
           </template>
         </DataTable>
       </section>
@@ -645,7 +938,7 @@ onMounted(loadVersionLabel)
     <Modal
       :model-value="showPasswordResult"
       :title="resetResult?.title || '临时密码'"
-      @update:model-value="showPasswordResult = $event"
+      @update:model-value="$event ? (showPasswordResult = true) : closePasswordResult()"
     >
       <div v-if="resetResult" class="form-grid">
         <div class="notice warn">
@@ -654,11 +947,28 @@ onMounted(loadVersionLabel)
         <div class="notice" v-if="resetResult.note" style="margin-top:10px">{{ resetResult.note }}</div>
         <div class="detail-grid" style="margin-top:14px">
           <div class="detail-row"><span>账号</span><b>{{ resetResult.name }}</b></div>
-          <div class="detail-row"><span>临时密码</span><b>{{ resetResult.password }}</b></div>
+          <div class="detail-row">
+            <span>临时密码</span>
+            <b class="password-line">
+              <span class="password-value">{{ resetResult.password }}</span>
+              <!-- 复制按钮（V2.0.0 §5.14.5）。此前只能靠人眼抄一遍——而密码是
+                   一次性展示的，抄错一位的代价是「那个人登不进来」，且他看到的
+                   是「账号或密码不正确」，两个人会一起往错的方向查。
+                   成功反馈用 ref 而不是定时器：定时器要在卸载时清掉，而这条
+                   被卸载的路径（关弹层、切页）恰是最容易漏的那一条（§15 那条）。 -->
+              <button class="btn small" type="button" @click="copyPassword">
+                {{ copiedPassword ? '已复制' : '复制' }}
+              </button>
+            </b>
+          </div>
         </div>
+        <!-- 成功反馈同时也是一句**下一步**：复制成功不等于交代完了。 -->
+        <p v-if="copiedPassword" class="muted tiny" style="margin-top:8px">
+          已复制到剪贴板。请通过安全渠道发给本人——它只在这里出现这一次。
+        </p>
       </div>
       <template #footer>
-        <button class="btn primary" @click="showPasswordResult = false">我已记录</button>
+        <button class="btn primary" @click="closePasswordResult">我已记录</button>
       </template>
     </Modal>
 
@@ -674,6 +984,39 @@ onMounted(loadVersionLabel)
       @update:open="showActiveConfirm = $event"
     />
 
+    <!-- 统一操作菜单（V2.0.0 §5.14.5）。做成弹层而不是行内下拉：`.table-wrap` 的
+         `overflow` 会把绝对定位的下拉裁掉一半，而弹层自带焦点陷阱、`aria-modal`
+         与 Esc（§15）。三枚动作都**先把菜单收起再开下一层**——否则停用确认弹层会
+         盖在菜单上面，关掉它之后菜单还开着，看起来像点了一次没反应。 -->
+    <Modal
+      :model-value="actionsTarget !== null"
+      :title="actionsTarget ? `账号操作 · ${actionsTarget.display_name}` : '账号操作'"
+      size="sm"
+      @update:model-value="!$event && (actionsTarget = null)"
+    >
+      <div v-if="actionsTarget" class="toolbar action-menu">
+        <button class="btn" type="button" @click="actionsEdit(actionsTarget)">编辑</button>
+        <button class="btn" type="button" @click="actionsResetPassword(actionsTarget)">重置密码</button>
+        <!-- 危险色只标在一个方向：**停用**。启用不是危险动作，所以这两支分开写，
+             而不是同一枚按钮换文案——那样「危险色」会跟着文案一起变，而它本该
+             只属于停用。停用的那句代价说明仍然由既有的确认弹层给出，一个字没改。 -->
+        <button
+          v-if="actionsTarget.active"
+          class="btn danger"
+          type="button"
+          @click="actionsToggleActive(actionsTarget)"
+        >
+          停用
+        </button>
+        <button v-else class="btn" type="button" @click="actionsToggleActive(actionsTarget)">
+          启用
+        </button>
+      </div>
+      <p v-if="actionsTarget?.active" class="muted tiny" style="margin-top:12px">
+        停用后该账号将无法登录，已登录的会话下一个请求就会失效。历史记录不受影响，账号随时可以重新启用。
+      </p>
+    </Modal>
+
     <Modal
       :model-value="showPermissions"
       title="角色权限矩阵"
@@ -683,10 +1026,41 @@ onMounted(loadVersionLabel)
       <SkeletonBlock v-if="!permissionLoaded" variant="table" :rows="5" />
 
       <template v-else>
+        <!-- 按角色查看（V2.0.0 §5.14.5）。默认必须是「全部角色」——四列同屏是这一页
+             原本的样子，而「只看一列」是一个**视图**，不是默认。两条既有 e2e 正断着
+             默认视图（`.perm-block` 恰好 8 块、每块恰好 4 格），所以默认值是这里唯一
+             不能选错的一处。
+             切换**只改视图、不动草稿**：被筛掉的那几列如果有未保存的改动，下面「待保存
+             的改动」清单照样列着它们（那一块读 `dirtyCells`，与视图无关）——看不见不等于
+             没改，把这一点交给渲染之外的那一份数据，比写成一句提示语可靠。
+             用下拉而不是一排角色按钮：这一页已有的筛选就是下拉（账号筛选），保持一种
+             形状；而且「心理老师」这类名字在登录页是页签，多一排同名按钮会让那些按名字
+             定位的用例在多一层的地方命中。 -->
+        <div class="toolbar perm-scope">
+          <label class="muted tiny" for="permission-role-view">查看</label>
+          <select id="permission-role-view" v-model="permissionRoleFilter" class="select">
+            <option value="all">全部角色（{{ ROLES.length }} 列）</option>
+            <option v-for="role in ROLES" :key="role.code" :value="role.code">
+              只看「{{ role.label }}」
+            </option>
+          </select>
+          <span v-if="customisedCount" class="muted tiny">
+            当前有 {{ customisedCount }} 格与出厂配置不同
+          </span>
+        </div>
+
         <div v-for="row in permissionRows" :key="row.capability_key" class="perm-block">
           <h3>{{ row.label }}</h3>
           <div class="perm-grid">
-            <div v-for="role in ROLES" :key="role.code" class="perm-cell">
+            <!-- `customised` 是**差异高亮**：与出厂配置不同的格子给一圈琥珀色边。
+                 它读的是 `isCustomised`（比的是**出厂值**），与上面那枚「已改」小标
+                 同源；而「待保存的改动」清单读的是 `isDirty`（比的是**本次打开时的
+                 基线**）——两个问题，两个判据，别把它们合成一个。 -->
+            <div
+              v-for="role in visibleRoles"
+              :key="role.code"
+              :class="['perm-cell', { customised: isCustomised(row.capability_key, role.code) }]"
+            >
               <div class="perm-cell-head">
                 <span>{{ role.label }}</span>
                 <span
@@ -743,7 +1117,10 @@ onMounted(loadVersionLabel)
       </template>
 
       <template #footer>
-        <button class="btn" :disabled="!permissionLoaded" @click="restoreDefaults">恢复默认</button>
+        <!-- 「恢复默认」只是一个**草稿**动作（它不写任何配置），但它会连带冲掉用户
+             手上所有未保存的改动——所以按之前问一次，问的是那件事的代价，不是
+             「你确定吗」。 -->
+        <button class="btn" :disabled="!permissionLoaded" @click="askRestoreDefaults">恢复默认</button>
         <button class="btn" @click="showPermissions = false">取消</button>
         <button
           class="btn primary"
@@ -754,6 +1131,18 @@ onMounted(loadVersionLabel)
         </button>
       </template>
     </Modal>
+
+    <!-- 「恢复默认」的二次确认。它排在权限弹层**之后**声明，但视觉次序由
+         `composables/modalStack` 按**打开**次序算（§22）——所以后开的这一层在上面，
+         不靠模板位置。 -->
+    <ConfirmDialog
+      :open="showRestoreConfirm"
+      title="恢复出厂配置"
+      :message="restoreConfirmMessage"
+      confirm-text="恢复默认"
+      @confirm="commitRestoreDefaults"
+      @update:open="showRestoreConfirm = $event"
+    />
 
   </div>
 </template>

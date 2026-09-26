@@ -11,7 +11,12 @@ export const ROLES = {
   student: { account: 'S001', password: '123456', home: '/student/home' },
   counselor: { account: '13800000001', password: '123456', home: '/counselor/workbench' },
   leader: { account: '13800000002', password: '123456', home: '/leader/overview' },
-  admin: { account: 'admin', password: '123456', home: '/admin/system' },
+  // 管理员的落点 2026-09-27 前移到「系统概览」（V2.0.0 §5.14.5）：登进来第一件要知道的
+  // 是「这个系统现在能不能正常用」，而不是「有哪些账号」。账号与权限仍在侧栏里。
+  // 连带后果写在 `app.spec.ts` 那些用例上：凡是要动账号表或权限矩阵的，都得自己
+  // `goto('/admin/system')`——用例的前置条件不该依赖「默认落点恰好是这一页」这个
+  // 外部事实，何况它刚刚变过一次。
+  admin: { account: 'admin', password: '123456', home: '/admin/overview' },
 } as const;
 
 export type RoleName = keyof typeof ROLES;
