@@ -20,7 +20,7 @@ from app.services.export_labels import (
     report_status_label,
     score_distribution_label,
 )
-from app.services.numbering import insert_with_unique_number
+from app.services.numbering import insert_with_unique_number, run_until_not_deadlocked
 
 
 def _number_stem(db: Session) -> tuple[str, int]:
@@ -49,37 +49,175 @@ def _school_id(db: Session, user: UserAccount) -> int:
     return next(iter(school_ids))
 
 
-def _version(db: Session, report: ProfessionalReport, version_no: int | None = None) -> ProfessionalReportVersion:
-    no = version_no or report.current_version
-    row = db.scalar(select(ProfessionalReportVersion).where(ProfessionalReportVersion.report_id == report.id, ProfessionalReportVersion.version_no == no))
+def _latest_published(db: Session, report: ProfessionalReport) -> ProfessionalReportVersion | None:
+    """这一份报告**最新发布出去的那一版**（没有就返回 `None`）。
+
+    它是德育领导那一侧的可见性判据（2026-09-25 修，§5.13 缺口 1 之二）。此前那个判据
+    是**报告头**的 `status`，而报告头回答的是「**当前版本**发布了吗」——于是
+    `new_version()` 把报告头改回 `DRAFT` 之后，已经发布出去的 V1 对领导端**消失**了：
+    一所学校正在改第二版，领导端就读不到第一版，屏幕上只表现为列表里少了一行。
+
+    判据换成「这份报告**有没有**已发布的版本」之后，V2 草稿期间领导读到的仍然是 V1
+    ——正是那条状态机（`未创建 → DRAFT V1 → PUBLISHED V1 →（新建版本）→ DRAFT V2`）
+    里写的「V2 草稿期间 V1 仍可见 / 可导出」。
+    """
+    return db.scalar(
+        select(ProfessionalReportVersion)
+        .where(ProfessionalReportVersion.report_id == report.id, ProfessionalReportVersion.status == "PUBLISHED")
+        .order_by(ProfessionalReportVersion.version_no.desc())
+        .limit(1)
+    )
+
+
+def _version(db: Session, report: ProfessionalReport, version_no: int | None = None, *, viewer: UserAccount | None = None) -> ProfessionalReportVersion:
+    """取这份报告的一个版本行。
+
+    **读者不同，「不传 version_no」的含义就不同**（2026-09-25 修，§5.13 缺口 1 之一）：
+
+    - 心理老师（不传 `viewer`，或作者本人读自己那一份）：不传 = **当前版本**——
+      他手上正在编辑的那一版就是当前版本；
+    - 德育领导：不传 = **最新已发布版本**。他的可见性按版本级 `PUBLISHED` 走
+      （`_latest_published`），而「当前版本」在 V2 草稿期间恰好是**他不该看见**的那一行。
+
+    领导显式点名一个仍在草稿的版本号时回 404，措辞与「这一版不存在」逐字相同：
+    **「不属于你」与「不存在」在响应上必须不可分辨**（CLAUDE.md §24），否则版本号
+    就成了一个可以逐个试出来的枚举。
+    """
+    if viewer is not None and viewer.role_code is RoleCode.LEADER:
+        if version_no is None:
+            row = _latest_published(db, report)
+        else:
+            row = db.scalar(
+                select(ProfessionalReportVersion).where(
+                    ProfessionalReportVersion.report_id == report.id,
+                    ProfessionalReportVersion.version_no == version_no,
+                    ProfessionalReportVersion.status == "PUBLISHED",
+                )
+            )
+    else:
+        no = version_no or report.current_version
+        row = db.scalar(select(ProfessionalReportVersion).where(ProfessionalReportVersion.report_id == report.id, ProfessionalReportVersion.version_no == no))
     if row is None:
         raise AppError("NOT_FOUND", "报告版本不存在", 404)
     return row
+
+
+def _actor_names(db: Session, ids) -> dict[int, str]:
+    """一批账号 id → 显示名，**一次查完**，不是逐行查。
+
+    `created_by_name` / `published_by_name` 要回答的是「谁写的 / 谁发布的」——与审计页
+    「操作人」那一列是同一条（`api/v1/audit.py` 的批查，CLAUDE.md §8）。**取不到就不编**
+    （`dict.get` 回 `None`，界面显示 `—`）：`published_by` 在那份 0023 的回填里允许是 NULL
+    （历史行查不出发布人，编一个比留空更糟）。
+    """
+    wanted = {int(i) for i in ids if i is not None}
+    if not wanted:
+        return {}
+    rows = db.execute(select(UserAccount.id, UserAccount.display_name).where(UserAccount.id.in_(wanted))).all()
+    return {row[0]: row[1] for row in rows}
 
 
 def _visible(db: Session, user: UserAccount, report_id: int) -> ProfessionalReport:
     report = db.get(ProfessionalReport, report_id)
     if report is None or report.school_id != _school_id(db, user):
         raise AppError("NOT_FOUND", "专业报告不存在", 404)
-    if user.role_code is RoleCode.LEADER and report.status != "PUBLISHED":
+    if user.role_code is RoleCode.LEADER and _latest_published(db, report) is None:
         raise AppError("NOT_FOUND", "专业报告不存在", 404)
     if user.role_code is RoleCode.COUNSELOR and report.created_by != user.id:
         raise AppError("NOT_FOUND", "专业报告不存在", 404)
     return report
 
 
-def serialize(db: Session, report: ProfessionalReport, *, include_versions: bool = False) -> dict:
-    data = {"id": report.id, "report_no": report.report_no, "title": report.title, "report_type": report.report_type, "status": report.status, "task_scope": report.task_scope_json, "analysis_mode": report.analysis_mode, "statistics_snapshot": report.statistics_snapshot_json, "current_version": report.current_version, "created_by": report.created_by, "created_at": report.created_at, "updated_at": report.updated_at, "published_at": report.published_at}
+def _content_payload(version: ProfessionalReportVersion, names: dict[int, str]) -> dict:
+    """一个版本的**正文与它自己的发布元数据**（详情、版本详情、`versions[]` 三处共用一份形状）。
+
+    `status` / `published_at` / `published_by` 取的是**版本行自己**那三列，不是报告头
+    ——V2 草稿期间领导读到的是 V1 那一行，它的状态必须是 `PUBLISHED`（报告头那时是
+    `DRAFT`）。报告头那三个字段仍然照发（`serialize` 里），它们回答的是另一个问题：
+    「这份报告的**当前版本**是什么状态、最近一次发布是什么时候」。
+    """
+    return {
+        "version_no": version.version_no,
+        "status": version.status,
+        "created_by": version.created_by,
+        "created_by_name": names.get(version.created_by),
+        "created_at": version.created_at,
+        "published_at": version.published_at,
+        "published_by": version.published_by,
+        "published_by_name": names.get(version.published_by) if version.published_by else None,
+        "overall_summary": version.overall_summary,
+        "dimension_interpretation": version.dimension_interpretation,
+        "sample_validity_note": version.sample_validity_note,
+        "support_plan": version.support_plan,
+    }
+
+
+def serialize(db: Session, report: ProfessionalReport, *, include_versions: bool = False, viewer: UserAccount | None = None) -> dict:
+    """一份报告在列表 / 详情里的形状。
+
+    **`viewer` 决定 `content` 是哪一版的、以及 `versions[]` 里能看到哪些**
+    （2026-09-25 修，§5.13 缺口 1 之一 · 之二 · 之三）：
+
+    - 心理老师（不传 `viewer`）→ `content` 是**当前版本**（他正在编辑的那一版），
+      `versions[]` 是**全部版本**——版本时间线（`ProfessionalReportVersions.vue`）靠它渲染；
+    - 德育领导 → `content` 是**最新已发布版本**（他读到的正文与数字都必须是发布出去那一份，
+      而报告头那两样在 V2 草稿期间已经指向 V2 了），`versions[]` 里**只有已发布的那些**。
+
+    最后那一条（`versions[]` 的过滤）是 `GET …/versions/{n}` 那道门的同一条口径：那边领导
+    点名要一个草稿版本号回 404，而这边 `include_versions=True` 从前把**每一版**的
+    `_content_payload` 都发了出去——同一份草稿正文于是有两条路，其中一条是敞开的，
+    而两条路各说各话在这份响应里看不出来（CLAUDE.md §4：受控导出不能成为绕过心理详情的
+    旁路，这是同一个形状）。
+    """
     versions = db.scalars(select(ProfessionalReportVersion).where(ProfessionalReportVersion.report_id == report.id).order_by(ProfessionalReportVersion.version_no.desc())).all()
-    selected = next((v for v in versions if v.version_no == report.current_version), None)
+    latest_published = next((v for v in versions if v.status == "PUBLISHED"), None)
+    leader = viewer is not None and viewer.role_code is RoleCode.LEADER
+    if leader:
+        selected = latest_published
+    else:
+        selected = next((v for v in versions if v.version_no == report.current_version), None)
+    names = _actor_names(db, [report.created_by, report.updated_by, report.published_by, *(v.created_by for v in versions), *(v.published_by for v in versions)])
+    data = {
+        "id": report.id, "report_no": report.report_no, "title": report.title, "report_type": report.report_type,
+        # 报告头这三项 = **当前版本**的镜像（`publish` / `new_version` 两处一起写），
+        # 所以 V2 草稿期间它们是 DRAFT / V2；领导读到的那一份在上面 `content` 里。
+        "status": report.status,
+        "task_scope": report.task_scope_json, "analysis_mode": report.analysis_mode,
+        "statistics_snapshot": _snapshot_of(report, selected) if selected else (report.statistics_snapshot_json or {}),
+        "current_version": report.current_version,
+        "current_version_status": next((v.status for v in versions if v.version_no == report.current_version), None),
+        "created_by": report.created_by, "created_by_name": names.get(report.created_by),
+        "created_at": report.created_at, "updated_at": report.updated_at,
+        "published_at": report.published_at, "published_by": report.published_by,
+        # 「最新已发布版本」的三个数单独发一份：界面上「已发布 · V1」那一格读的是它，
+        # 而不是报告头那一列——报告头在 V2 草稿期间已经是 DRAFT 了（§5.13 A 的状态口径）。
+        "latest_published_version": latest_published.version_no if latest_published else None,
+        "latest_published_at": latest_published.published_at if latest_published else None,
+        "latest_published_by": latest_published.published_by if latest_published else None,
+        "latest_published_by_name": names.get(latest_published.published_by) if latest_published and latest_published.published_by else None,
+        "content_version": selected.version_no if selected else None,
+    }
     if selected:
-        data["content"] = {"version_no": selected.version_no, "overall_summary": selected.overall_summary, "dimension_interpretation": selected.dimension_interpretation, "sample_validity_note": selected.sample_validity_note, "support_plan": selected.support_plan}
+        data["content"] = _content_payload(selected, names)
     if include_versions:
-        data["versions"] = [{"version_no": v.version_no, "created_at": v.created_at, "created_by": v.created_by} for v in versions]
+        # 领导只看已发布的那些（理由见 docstring 末段）：`versions[]` 里含的是**正文**，
+        # 与 `GET …/versions/{n}` 那边拦住他的是同一份东西，两处必须是同一条口径。
+        data["versions"] = [_content_payload(v, names) for v in versions if not leader or v.status == "PUBLISHED"]
     return data
 
 
 def create_report(db: Session, user: UserAccount, payload: ReportCreateRequest) -> ProfessionalReport:
+    """建一份报告（头 + V1 草稿），**整段可重跑**。
+
+    `run_until_not_deadlocked` 那一层是为 1213 加的（CLAUDE.md §33）：并发下
+    `insert_with_unique_number` 会在页尾撞出 InnoDB 死锁，而它回滚的是**整个事务**，
+    所以只能在「整个操作」这一层重跑。这里满足那条契约——进门只有读（`analytics_report`
+    与 `_number_stem`），第一个写入就是那次插入，而提交归路由。
+    """
+    return run_until_not_deadlocked(db, lambda: _create_report(db, user, payload))
+
+
+def _create_report(db: Session, user: UserAccount, payload: ReportCreateRequest) -> ProfessionalReport:
     task_ids = list(dict.fromkeys(payload.task_ids))
     snapshot = jsonable_encoder(analytics_report(db, user, task_ids[0], payload.analysis_mode, task_ids))
     today, base = _number_stem(db)
@@ -92,19 +230,61 @@ def create_report(db: Session, user: UserAccount, payload: ReportCreateRequest) 
         number_at=lambda offset: f"RPT-{today}-{base + offset:04d}",
         build=build_report,
     )
-    db.add(ProfessionalReportVersion(report_id=report.id, version_no=1, overall_summary=payload.overall_summary, dimension_interpretation=payload.dimension_interpretation, sample_validity_note=payload.sample_validity_note, support_plan=payload.support_plan, statistics_snapshot_json=snapshot, created_by=user.id))
+    db.add(ProfessionalReportVersion(report_id=report.id, version_no=1, overall_summary=payload.overall_summary, dimension_interpretation=payload.dimension_interpretation, sample_validity_note=payload.sample_validity_note, support_plan=payload.support_plan, statistics_snapshot_json=snapshot, status="DRAFT", created_by=user.id))
     db.flush()
     return report
 
 
 def list_reports(db: Session, user: UserAccount) -> list[dict]:
+    """这一页给谁看什么，按角色分两支：
+
+    - **心理老师**：自己创建的报告（`created_by`），草稿与已发布都在列——他要能从列表
+      里回到自己那份草稿；
+    - **德育领导**：本校**有过已发布版本**的报告。判据是版本级的 `EXISTS`
+      （`_latest_published` 的集合形式），不是报告头那一列——理由见 `_latest_published`。
+    """
     statement = select(ProfessionalReport).where(ProfessionalReport.school_id == _school_id(db, user))
-    statement = statement.where(ProfessionalReport.status == "PUBLISHED") if user.role_code is RoleCode.LEADER else statement.where(ProfessionalReport.created_by == user.id)
-    return [serialize(db, x) for x in db.scalars(statement.order_by(ProfessionalReport.updated_at.desc())).all()]
+    if user.role_code is RoleCode.LEADER:
+        statement = statement.where(
+            select(ProfessionalReportVersion.id)
+            .where(ProfessionalReportVersion.report_id == ProfessionalReport.id, ProfessionalReportVersion.status == "PUBLISHED")
+            .exists()
+        )
+    else:
+        statement = statement.where(ProfessionalReport.created_by == user.id)
+    return [serialize(db, x, viewer=user) for x in db.scalars(statement.order_by(ProfessionalReport.updated_at.desc())).all()]
 
 
 def get_report(db: Session, user: UserAccount, report_id: int) -> dict:
-    return serialize(db, _visible(db, user, report_id), include_versions=True)
+    return serialize(db, _visible(db, user, report_id), include_versions=True, viewer=user)
+
+
+def get_version(db: Session, user: UserAccount, report_id: int, version_no: int) -> dict:
+    """某一个**版本**的正文与它冻结的那份统计快照（§5.13 缺口 1 之一的那个 API）。
+
+    在此之前 `serialize` 只发当前版本的正文，`versions[]` 里只有版本号 / 创建时间 /
+    创建人——**历史版本的正文不可读**。于是「打开某一版看看当时写了什么」在界面上没有
+    出路，而「导出历史版本」导的却是另一份东西（那条路读得到版本行，这条读不到，
+    两个读者一个看得到、一个看不到，正是 CLAUDE.md §3 那条「表在而没人从那儿取」的反面）。
+
+    **一点统计都不重算**：正文与快照都从这一版自己那一行读（`_snapshot_of` 是纯读的），
+    所以打开历史版本不会因为「此刻的数据变了」而让屏幕上的数跟着动——与
+    `report_document` 同一条：那份文件是「那一版发布时写了什么」的副本。
+
+    领导读一份仍在草稿的版本 → 404（`_version` 的 `viewer` 分支），措辞与「不存在」同一句。
+    """
+    report = _visible(db, user, report_id)
+    version = _version(db, report, version_no, viewer=user)
+    names = _actor_names(db, [version.created_by, version.published_by, report.created_by])
+    return {
+        "report_id": report.id,
+        "report_no": report.report_no,
+        "title": report.title,
+        "task_scope": report.task_scope_json,
+        "analysis_mode": report.analysis_mode,
+        "statistics_snapshot": _snapshot_of(report, version),
+        "content": _content_payload(version, names),
+    }
 
 
 def save_draft(db: Session, user: UserAccount, report_id: int, payload: ReportDraftRequest) -> ProfessionalReport:
@@ -144,6 +324,15 @@ def new_version(db: Session, user: UserAccount, report_id: int) -> ProfessionalR
 
     取数失败时**整段不落**（异常会让这次请求的事务回滚），不会留下一个「文本是新版、
     数字没更新」的半成品版本。
+
+    ## 报告头回到 DRAFT，而**上一版那一行一个字不动**
+
+    这条是 2026-09-25 补的（§5.13 缺口 1 之二）。报告头的 `status` 在这里从
+    `PUBLISHED` 改回 `DRAFT`，而**它回答的只是「当前版本是不是草稿」**——发布状态下沉到
+    版本级之后，上一版那一行的 `status` / `published_at` / `published_by` 仍然是它发布
+    时的样子，所以 V2 编辑期间德育领导读到的还是那一份（`_latest_published`）。
+    此前领导可见性读的是报告头，于是这一步**把已经发布出去的 V1 从领导端下架了**——
+    一个「新建版本」的动作产生了它不该有的对外效果。
     """
     report = _visible(db, user, report_id)
     if report.status != "PUBLISHED":
@@ -153,14 +342,30 @@ def new_version(db: Session, user: UserAccount, report_id: int) -> ProfessionalR
     snapshot = jsonable_encoder(analytics_report(db, user, task_ids[0] if task_ids else None, report.analysis_mode, task_ids or None))
     report.current_version += 1; report.status = "DRAFT"; report.updated_by = user.id
     report.statistics_snapshot_json = snapshot
-    db.add(ProfessionalReportVersion(report_id=report.id, version_no=report.current_version, overall_summary=old.overall_summary, dimension_interpretation=old.dimension_interpretation, sample_validity_note=old.sample_validity_note, support_plan=old.support_plan, statistics_snapshot_json=snapshot, created_by=user.id))
+    db.add(ProfessionalReportVersion(report_id=report.id, version_no=report.current_version, overall_summary=old.overall_summary, dimension_interpretation=old.dimension_interpretation, sample_validity_note=old.sample_validity_note, support_plan=old.support_plan, statistics_snapshot_json=snapshot, status="DRAFT", created_by=user.id))
     db.flush(); return report
 
 
 def publish(db: Session, user: UserAccount, report_id: int) -> ProfessionalReport:
+    """发布**当前那一版**：版本行与报告头各写一遍，用的是**同一个时刻**。
+
+    **两处都要写，而且不能只写一处**（2026-09-25，§5.13 缺口 1 之二）：
+
+    - 版本行那三列是**权威**——领导可见性、按版本导出、版本时间线都读它；
+    - 报告头那三列是**当前版本的镜像**（`new_version` 会把报告头改回 `DRAFT`，而版本行
+      不动），它回答「这份报告现在处于哪一步」。只写版本行的话，界面上「草稿 · V1 →
+      已发布 · V1」那一步永远不会发生（`report.status` 一直停在 `DRAFT`，
+      `save_draft` 也不会拒绝后续覆盖——已发布的正文还是能被改写，那是更糟的事）。
+
+    `now` 只取一次：两处要是各取一次 `datetime.now()`，同一件事会有两个时间戳，而它们在
+    界面上是相邻两行（「发布于」与版本时间线里的那一条）。
+    """
     report = _visible(db, user, report_id)
     if report.status != "DRAFT": raise AppError("VALIDATION_ERROR", "报告当前不可发布", 422)
-    report.status = "PUBLISHED"; report.published_by = user.id; report.published_at = datetime.now(); report.updated_by = user.id
+    now = datetime.now()
+    version = _version(db, report)
+    version.status = "PUBLISHED"; version.published_by = user.id; version.published_at = now
+    report.status = "PUBLISHED"; report.published_by = user.id; report.published_at = now; report.updated_by = user.id
     db.flush(); return report
 
 
@@ -303,7 +508,10 @@ def _document_rows(report: ProfessionalReport, version: ProfessionalReportVersio
         ("报告编号", report.report_no),
         ("报告标题", report.title),
         ("版本", str(version.version_no)),
-        ("状态", report_status_label(report.status)),
+        # **版本行自己的状态**，不是报告头那一列（2026-09-25）。两者在「没有新版本」时
+        # 同值，一旦 `new_version()` 跑过就分岔：领导导出 V1 时报告头写着 `DRAFT`，
+        # 而这份文件正是 V1 那一份——写成报告头会把一份已发布的文件标成「草稿」。
+        ("状态", report_status_label(version.status)),
         ("任务范围", _task_scope_text(snapshot)),
         ("样本数量", _sample_text(quality)),
         ("统计指标", _metric_text(quality)),
@@ -318,17 +526,23 @@ def _document_rows(report: ProfessionalReport, version: ProfessionalReportVersio
     ]
 
 
-def report_document(db: Session, user: UserAccount, report_id: int, version_no: int | None) -> tuple[ProfessionalReport, ExportDocument]:
+def report_document(db: Session, user: UserAccount, report_id: int, version_no: int | None) -> tuple[ProfessionalReport, ProfessionalReportVersion, ExportDocument]:
     """把一份报告（或其某个历史版本）渲染成可下载的 CSV。
 
     `row_count` **写 `len(rows)` 而不是一个字面量**：这一列在界面上是「导出 N 行」，
     而它此前硬编码 `8`——真正的行数取决于这一批快照里有几个维度，写死的那个数在
     维度缺失或多出时会静默说错（`ExportDocument.row_count` 不数表头那一行，这里也没有
     表头：这份文件是「项目 / 内容」两列的键值对）。
+
+    **把版本行一起返回**（2026-09-25）：路由要拿它写审计里的 `version=`，而「不传
+    `version_no` 时导出的是哪一版」对领导与心理老师**不是同一个答案**（`_version` 的
+    `viewer` 分支）。此前路由自己算 `payload.version_no or report.current_version`
+    ——领导在 V2 草稿期间导出的文件是 V1，而轨迹里写着 2（CLAUDE.md §8：轨迹要答得上
+    「导的是哪一份」）。
     """
-    report = _visible(db, user, report_id); version = _version(db, report, version_no)
+    report = _visible(db, user, report_id); version = _version(db, report, version_no, viewer=user)
     rows = _document_rows(report, version, _snapshot_of(report, version))
     output = io.StringIO(); writer = csv.writer(output)
     for item, content in rows:
         writer.writerow([item, content])
-    return report, ExportDocument(csv_text="\ufeff" + output.getvalue(), columns=("项目", "内容"), row_count=len(rows))
+    return report, version, ExportDocument(csv_text="\ufeff" + output.getvalue(), columns=("项目", "内容"), row_count=len(rows))

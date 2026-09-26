@@ -43,5 +43,12 @@ class ProfessionalReportVersion(Base):
     sample_validity_note: Mapped[str] = mapped_column(Text, nullable=False, default="")
     support_plan: Mapped[str] = mapped_column(Text, nullable=False, default="")
     statistics_snapshot_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    # 发布状态是**版本级**的，不是报告级的（0023 补，见 services/reporting_service.py
+    # 的 `_visible`）：报告头那一列只镜像「当前版本」的状态，而 V2 编辑期间
+    # 已发布的 V1 必须继续对德育领导可见、可导出。两者在「没有新版本」时总是同值，
+    # 一旦 `new_version()` 跑过就会分岔。
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="DRAFT")
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    published_by: Mapped[int | None] = mapped_column(ForeignKey("user_account.id", name="professional_report_version_fk_published_by"))
     created_by: Mapped[int] = mapped_column(ForeignKey("user_account.id", name="professional_report_version_fk_created_by"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

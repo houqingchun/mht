@@ -9,12 +9,17 @@
 ——`get_current_user` 每次请求都查 `active`，所以它不等到 token 过期。
 """
 
-from sqlalchemy import select
+import pytest
+from sqlalchemy import delete, select
+from sqlalchemy.orm import Session
 
+from app.core.errors import AppError
 from app.models.account import UserAccount, UserScope
 from app.models.audit import AuditLog
 from app.models.enums import RoleCode, ScopeType
 from app.models.organization import ClassGroup, Grade, School, Student
+from app.schemas.auth import AccountScopeInput
+from app.services.auth_service import create_account
 from app.tests.conftest import auth_headers
 
 ADMIN = ("admin", "admin")
@@ -508,3 +513,80 @@ def test_the_account_list_shows_the_role_and_the_range_of_every_row(client):
     assert by_account["13800000001"]["display_name"] == "心理老师"
     assert by_account["13800000001"]["scopes"][0]["name"] == "青禾实验学校"
     assert by_account["13900000021"]["role_code"] == RoleCode.COUNSELOR.value
+
+
+def test_two_requests_that_both_miss_the_lookup_get_one_readable_answer(seeded_engine):
+    """两个请求**同时**建同一个账号：第二个拿到的是「已经有一个员工账号在用了」，不是 500。
+
+    这是 `create_account` 里那段 `begin_nested()` + 重查的守卫，形状与
+    `care_service.open_or_reuse_care_case` 那条（`test_two_requests_that_both_find_no_case
+    _still_leave_exactly_one`）逐字同源：两条并发的读-然后-写各自 `exists` 查过一遍、
+    都查不到，于是两边都插，第二个撞 `uq_user_account_type`。
+    2026-09-26 的 e2e 上真抓到过一次（`Duplicate entry '10391777803-MOBILE'` → 500）。
+
+    **这里没有真起两个线程**（撞号那一瞬间没法在单进程里稳定摆出来），而是用两条
+    **独立的会话**把那个形状摆出来：`loser` 先读一次、把它的 RR 快照定在「那一行还不
+    存在」的那一刻，然后 `winner` 把那一行真建出来并提交，最后 `loser` 去建同一个账号。
+    它走的是线上那条路（`exists` 查不到 → 插入撞唯一键 → 恢复分支），不是一段替身。
+
+    ★ **两处不能省，两处都是这条用例唯一的牙：**
+
+    - **第一句那次读必须排在提交之前。** 默认隔离级别是 REPEATABLE-READ，事务快照在
+      **第一条语句**时定下；不先读一次的话，快照里就已经包含了那一行，`exists` 直接命中
+      并回 422——用例照样绿，而那段**恢复分支一次都没走到**，成了一条恒绿的假守卫。
+    - **用两条自己的会话，不借 `db_session`。** 恢复分支里那句 `.with_for_update()` 会
+      在**外层夹具事务**上留下一把行锁，一直持到用例收尾才放；而下面那次清理要删的正是
+      这一行，于是它撞 `1205 Lock wait timeout`（实测过，50 秒之后才报）。两条自己的
+      会话在 `with` 退出时就各自回滚了，锁也就放掉了——这也是这一条没有用 `db_session`
+      的原因。
+    """
+    account = "13900000777"
+    scope = [AccountScopeInput(scope_type="SCHOOL", scope_id=1)]
+    # 这两个 `with` 的次序是判据本身，见 docstring；反过来写就成了一条恒绿的假守卫。
+    try:
+        with Session(seeded_engine) as loser, Session(seeded_engine) as winner:
+            # ① 先钉住 `loser` 的快照：那一刻这一行还不存在。
+            assert loser.scalar(select(School.id).limit(1)) is not None
+            # ② `winner` 把这一行真的建出来并提交（对 ① 那份快照不可见）。
+            create_account(
+                winner,
+                role_code=RoleCode.COUNSELOR.value,
+                display_name="并发老师",
+                account=account,
+                temporary_password="abc123",
+                scopes=scope,
+            )
+            winner.commit()
+            # ③ `loser` 去建同一个账号：`exists` 查不到（旧快照），插入撞唯一键，
+            #    恢复分支把它折回一句 422。
+            with pytest.raises(AppError) as excinfo:
+                create_account(
+                    loser,
+                    role_code=RoleCode.COUNSELOR.value,
+                    display_name="并发老师",
+                    account=account,
+                    temporary_password="abc123",
+                    scopes=scope,
+                )
+            assert excinfo.value.status_code == 422
+            # 那句话是给用户看的（§2）：写明的正是撞上的是**手机号**那一个唯一键，
+            # 而不是一句 `IntegrityError` 的英文。
+            assert excinfo.value.message == (
+                f"手机号 {account} 已经有一个员工账号在用了（同一手机号只能有一个）"
+            )
+    finally:
+        # 那一行是**真提交**的，不在任何夹具事务里，所以要自己收拾干净——共享库上留一个
+        # `13900000777` 会让别的用例看到一份它没造过的账号。
+        #
+        # 两条 `delete()` 是**按次序各发一条**的，不是攒到提交时按 ORM 的次序发：
+        # `UserAccount` 与 `UserScope` 之间**没有 `relationship()`**，unit of work 看不到
+        # 那条依赖边，于是它会把父行的 DELETE 排在子行前面 → 1451（实测过）。
+        # 这与 CLAUDE.md §33 那条「顺序要由书写者保证，不能指望 unit of work」是同一件事。
+        with Session(seeded_engine) as cleanup:
+            user_id = cleanup.scalar(
+                select(UserAccount.id).where(UserAccount.account == account)
+            )
+            if user_id is not None:
+                cleanup.execute(delete(UserScope).where(UserScope.user_id == user_id))
+                cleanup.execute(delete(UserAccount).where(UserAccount.id == user_id))
+                cleanup.commit()

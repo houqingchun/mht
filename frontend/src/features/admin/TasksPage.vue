@@ -152,6 +152,33 @@ const detailLoading = ref(false)
  * toast 一飘而过，弹层里的那句话留下来回答用户的问题。
  */
 const detailError = ref('')
+/**
+ * 「查看明细」弹层的全屏状态（2026-09-25）。
+ *
+ * 与 `DataCenterPage` 的 `detailFullscreen` 是同一件事、同一套机制（`Modal` 的
+ * `expandable` + `.modal-fullscreen`）：明细表一行一人、几十行起，而常规态那张表被
+ * 夹在 340px 里，读者要在一屏里来回滚。
+ *
+ * **状态住在这一页、不在 `Modal` 里**，而且只在**打开**这个弹层时复位（`taskDetail`）
+ * ——「下一次打开时是什么样」本来就该由打开这个动作决定，去 `Modal` 的卸载路径上
+ * emit 复位是另一类边界情况。
+ */
+const detailFullscreen = ref(false)
+/**
+ * 明细表外层那个 `table-wrap` 的样式，**两态之别只有 `max-height` 一处**。
+ *
+ * 为什么必须从模板挪进这里：全屏那一支要松开的就是这个上限，而**行内样式压过任何
+ * 全局规则**——`.modal-fullscreen .table-wrap` 那条写在 `styles.css` 里也够不着它。
+ * 这是 `DataCenterPage.vue` 同名 computed 那条教训的第二次。
+ *
+ * **只松开上限，不给 `flex`、不给 `min-height`**：`min-height` 会让「表格铺开了没有」
+ * 这条断言变成恒真——它量的会是我们写死的那个数，而不是表格真的长了多少。
+ */
+const detailTableStyle = computed(() => (
+  detailFullscreen.value
+    ? { marginTop: '14px', maxHeight: 'none' }
+    : { marginTop: '14px', maxHeight: '340px' }
+))
 
 /**
  * 参与口径六个数（§18.10，V1.2 第 8 期）。
@@ -431,6 +458,8 @@ async function taskDetail(task: AssessmentTaskItem) {
   detailError.value = ''
   participation.value = null
   participationError.value = ''
+  // 全屏状态逐次复位：上一次是不是全屏看的、看到哪一页，都不该影响这一次打开。
+  detailFullscreen.value = false
   // 三个页签一起取。切页签时不再发请求，也就不会出现「切过去一秒钟空白」——
   // 这三个读各自独立，谁也不挡谁（见 `latestTargets` 的说明）。
   void loadTargets(task)
@@ -947,6 +976,9 @@ onMounted(load)
       :model-value="showDetail"
       :title="detailTask ? `测评完成明细 · ${detailTask.name}` : '测评完成明细'"
       size="lg"
+      expandable
+      :expanded="detailFullscreen"
+      @update:expanded="detailFullscreen = $event"
       @update:model-value="showDetail = $event"
     >
       <template v-if="detailTask">
@@ -1078,7 +1110,7 @@ onMounted(load)
             >
               没有匹配「{{ targetQuery }}」的记录，共 {{ targetRows.length }} 条。
             </p>
-            <div class="table-wrap" style="margin-top:14px;max-height:340px">
+            <div class="table-wrap" :style="detailTableStyle">
               <table>
                 <thead>
                   <tr>
@@ -1184,7 +1216,7 @@ onMounted(load)
           <p v-if="detailQuery && !filteredDetailRows.length" class="muted tiny" style="margin-top:8px">
             没有匹配「{{ detailQuery }}」的记录，共 {{ detailRows.length }} 条。
           </p>
-          <div class="table-wrap" style="margin-top:14px;max-height:340px">
+          <div class="table-wrap" :style="detailTableStyle">
             <table>
               <thead>
                 <tr>
@@ -1305,7 +1337,7 @@ onMounted(load)
             >
               没有匹配「{{ unmatchedQuery }}」的记录，共 {{ unmatchedRows.length }} 行。
             </p>
-            <div class="table-wrap" style="margin-top:14px;max-height:340px">
+            <div class="table-wrap" :style="detailTableStyle">
               <table>
                 <thead>
                   <tr>

@@ -1,4 +1,4 @@
-import { test, expect, type Locator, type Page } from '@playwright/test';
+import { test, expect, type APIResponse, type Locator, type Page, type Route } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { loginAs } from './helpers';
 
@@ -690,6 +690,287 @@ test.describe('Analytics', () => {
   });
 });
 
+/* ---------- 专业报告（§5.13）的公共动作 ---------- */
+
+/**
+ * 走界面保存一份**新草稿**，返回服务端发的报告编号。
+ *
+ * **点「保存草稿」这一下在这个函数里**，调用方只管把正文填好。它的前四个调用点各自
+ * 漏了这一下（写完 `fill` 就直接进来等回执），表现是「等了 20 秒什么都没有」——
+ * 看起来像保存坏了，实际是从来没有人按过那一枚按钮。动作与它等的结果放在一处，
+ * 下一次加调用点时不会再漏。
+ *
+ * 编号从回执里读、不写死：它按天编号（`RPT-20260926-0001`，序号补零到 4 位——
+ * `insert_with_unique_number` 的 `{base + offset:04d}`），写死会在某一天红在一个与
+ * 功能无关的地方。
+ *
+ * **「继续编辑现有草稿」那一支必须处理**：同一组任务再存一次时页面会先问一句
+ * 「已经有一份同样范围的草稿」（`save()` 的 `findSameScopeDraft` 分支，共享演示库上
+ * 跑过几次之后它一定会出现），而这一支**不会**发「草稿已保存至服务器」那句回执
+ * （`save()` 在 `return true` 处早退）。这条用例要的是一份**新的**报告，所以一律点
+ * 「仍然新建一份」——那是 `askConfirm(title, message, confirmText, danger, cancelText)`
+ * 的第 5 个参数，也就是 `ConfirmDialog` 的 `.btn-cancel`（`取消` 那一枚的位置，
+ * 文案被换成了「仍然新建一份」）。
+ */
+async function saveNewDraft(page: Page): Promise<string> {
+  const saved = page.getByRole('status').filter({ hasText: '草稿已保存至服务器（RPT-' })
+  const reuse = page.getByRole('button', { name: '继续编辑现有草稿' })
+  await page.getByRole('button', { name: '保存草稿' }).click()
+  // `.first()` 是必需的：`.or()` 在两边都匹配时会被严格模式拒绝，而上一轮保存留下的
+  // 那句回执确实可能还挂在同一页的状态行上。
+  await expect(reuse.or(saved).first()).toBeVisible({ timeout: 20000 })
+  if (await reuse.isVisible()) {
+    await page.getByRole('button', { name: '仍然新建一份' }).click()
+  }
+  await expect(saved).toBeVisible({ timeout: 20000 })
+  const reportNo = (await saved.innerText()).match(/RPT-[\d-]+/)?.[0]
+  expect(reportNo, '服务端回执里必须带着报告编号').toBeTruthy()
+  return reportNo as string
+}
+
+/**
+ * 「我的报告」里那一行。行上的副标题里带着报告编号（`报告编号 · 任务范围`）。
+ *
+ * **`filter({ hasText })` 是子串匹配，而编号按天递增**：`RPT-20260926-1` 会同时命中
+ * `RPT-20260926-12`（共享演示库上跑几次之后必然出现），于是这个定位器撞上严格模式。
+ * 负向先行断言把编号收成整串——编号后面不许再接数字。
+ */
+function reportRow(page: Page, reportNo: string) {
+  return page.locator('.report-list .row').filter({ hasText: new RegExp(`${reportNo}(?!\\d)`) })
+}
+
+/** 「版本时间线」里那一行。`.ver` 的内容恰好是 `Vn`，用整串匹配避免 V1 命中 V10。 */
+function versionRow(page: Page, no: number) {
+  return page
+    .locator('.versions .row')
+    .filter({ has: page.locator('.ver', { hasText: new RegExp(`^V${no}$`) }) })
+}
+
+/* ---------- §5.13.8 十条 e2e 的公共常量与动作 ---------- */
+
+/**
+ * 两份正文常量。**不含半角逗号**是有意的：`report_document` 用 `csv.writer` 拼 CSV，
+ * 含逗号 / 引号 / 换行的字段会被加引号，于是「`整体情况说明,<正文>` 这一串在文件里」
+ * 这条子串断言就要先算引号。两份正文还要能互相区分——导出 V1 时断「不含 V2 正文」，
+ * 那才是「导出的确实是那一版」的判据（§5.13.8 ③）。
+ */
+const PUBLISHED_TEXT = 'e2e-V1：从统计事实出发形成的整体情况说明。'
+const DRAFT_TEXT = 'e2e-V2：还在编辑、尚未发布的那一版说明。'
+
+/** ① 与 ⑩ 追加在正文末尾的那一句（追加而不是覆盖，所以那两处断的是 `toContain`）。 */
+const RECOVER_TEXT = '（e2e 续写）'
+
+/**
+ * 这一页自己的**状态行**（`ReportExportPage.vue` 的 `p.hint[role="status"]`）。
+ *
+ * **必须收在 `p[role="status"]` 上**：同一页的 `FilterBar` 也有一个 `role="status"`
+ * （`<span class="hint">{{ stamp }}</span>`，写着「已自动加载最新可分析任务」），
+ * `page.getByRole('status')` 会同时命中两个。上面既有的那条用例能直接用
+ * `getByRole('status')` 是因为它每次都配了 `filter({ hasText })`。
+ *
+ * 两个子页签各有一个、且**互斥**（`v-if` / `v-else`），所以这一页上恒为 1 个：
+ * 「专业解读」那个说保存与发布的结果，「报表导出」那个说导出的结果。
+ */
+function pageNotice(page: Page): Locator {
+  return page.locator('p[role="status"]')
+}
+
+/**
+ * 用接口造出「V1 已发布 + V2 草稿（未发布）」这个状态，返回报告编号。
+ *
+ * **为什么走接口而不是走界面**：这是 §5.13.8 ③（leader 在 V2 草稿期间仍看得到并导出
+ * V1、看不到 V2 草稿）与 ④（在 V2 页面上选 V1 导出）的**前提状态**。用界面一步步搭出来
+ * 要多点七八次、每次都要等两轮往返；前置动作一长，用例红的时候就分不清坏的是它还是
+ * 这条链。接口只负责造态，判据全留在界面上。
+ *
+ * 可见任务不足时**抛**而不是静默退化（§5.13.8 的逐字要求）：先跑 `make seed-demo`，
+ * 不许为了让测试变绿而放宽真实产品断言。
+ */
+
+/**
+ * 前置接口失败时**把服务端那一句原话带出来**（§2：统一响应封装的 `error.message`
+ * 本来就是写给用户看的）。
+ *
+ * `expect(resp.ok(), '接口创建报告失败').toBeTruthy()` 只说了一句「失败」，而原因在响应体
+ * 里。2026-09-26 全量并行下这条前置真失败过一次，报告里只有那六个字——要查出是 409 撞号
+ * 用尽还是别的，得再复现一次并发。状态码与响应体一起带出来，下次不必再造。
+ *
+ * 只在失败分支读 `text()`：成功时调用方紧接着要 `json()`，先读一遍文本不影响它。
+ */
+async function expectOk(resp: APIResponse, what: string) {
+  if (resp.ok()) return
+  const body = await resp
+    .text()
+    .then(text => text.slice(0, 300))
+    .catch(() => '(响应体读不出来)')
+  throw new Error(`${what}（HTTP ${resp.status()}）：${body}`)
+}
+
+async function reportWithDraftOverPublished(page: Page): Promise<string> {
+  const login = await page.request.post('/api/v1/auth/login', {
+    data: { account: '13800000001', password: '123456', role: 'counselor' }
+  })
+  const headers = { Authorization: `Bearer ${(await login.json()).data.access_token}` }
+
+  const tasksResp = await page.request.get('/api/v1/assessment-tasks', { headers })
+  await expectOk(tasksResp, '这一条失去了取数的手段：GET /assessment-tasks')
+  const tasks = (await tasksResp.json()).data.items as Array<{
+    id: number
+    completed_targets: number
+    start_at: string | null
+  }>
+  expect(
+    tasks.length,
+    '共享演示库可见任务不足，请先运行 make seed-demo（§5.13.8）'
+  ).toBeGreaterThan(0)
+
+  // 挑哪一个任务，必须与**页面自己会挑的那一个**同源（`FilterBar.defaultTask()`：
+  // 先滤掉「已完成目标数不足隐私门槛」的，再按施测开始时间取最新）。理由有两条：
+  //  · `create_report` 内部会拿 `task_ids[0]` 去算一次 `analytics_report`——那要求这个
+  //    任务**真的可分析**。取 `tasks[0]`（接口的原始次序）时可能撞上演示库里那场
+  //    「还没开始」的复测（目标行 0 人完成），于是一条与「版本发布」毫无关系的前置失败
+  //    会在这里把用例拦下，而报出来的是「接口创建报告失败」；
+  //  · 这一条后面要用界面打开这一份报告，而界面默认选中的正是 `defaultTask()` 那一个。
+  //    两者不同的任务集意味着报告的 `task_scope` 与页面上选中的任务对不上，
+  //    `onQuery` 那一支会顺手把报告关掉。
+  const analyzable = tasks
+    .filter(task => task.completed_targets >= 5)
+    .sort((a, b) => Date.parse(b.start_at || '') - Date.parse(a.start_at || ''))
+  const task = analyzable[0] || tasks[0]
+
+  const createResp = await page.request.post('/api/v1/professional-reports', {
+    headers,
+    data: {
+      // 标题带上时间戳：共享演示库里跑过几次之后会有多份同名报告，撞在一起会让
+      // 「按标题找那一行」变成一条与功能无关的断言。
+      title: `e2e 版本发布核对 ${Date.now()}`,
+      task_ids: [task.id],
+      overall_summary: PUBLISHED_TEXT
+    }
+  })
+  await expectOk(createResp, '接口创建报告失败：POST /professional-reports')
+  const created = (await createResp.json()).data as { id: number; report_no: string }
+
+  const publishResp = await page.request.post(`/api/v1/professional-reports/${created.id}/publish`, { headers })
+  await expectOk(publishResp, '接口发布 V1 失败：POST …/publish')
+
+  const newVersionResp = await page.request.post(`/api/v1/professional-reports/${created.id}/new-version`, { headers })
+  await expectOk(newVersionResp, '接口新建 V2 失败：POST …/new-version')
+
+  const draftResp = await page.request.put(`/api/v1/professional-reports/${created.id}/draft`, {
+    headers,
+    data: { overall_summary: DRAFT_TEXT }
+  })
+  await expectOk(draftResp, '接口写 V2 草稿失败：PUT …/draft')
+
+  return created.report_no
+}
+
+/**
+ * 页面不许出现横向溢出（§5.13.8 ⑨，375 / 768 两档）。
+ *
+ * 判据是 `documentElement` 的 `scrollWidth > clientWidth`——它在溢出发生时立刻为真，
+ * 而「某个元素被挤出视口」要逐个元素比对，会把本来就该横向滚动的表格一起报进来。
+ * 两个数都写进失败消息：只说「溢出了」的话，下一个人还得回去自己量。
+ */
+async function expectNoHorizontalOverflow(page: Page, label: string) {
+  const { scrollWidth, clientWidth } = await page.evaluate(() => ({
+    scrollWidth: document.documentElement.scrollWidth,
+    clientWidth: document.documentElement.clientWidth
+  }))
+  expect(
+    scrollWidth,
+    `${label} 出现横向溢出（scrollWidth ${scrollWidth} > clientWidth ${clientWidth}）`
+  ).toBeLessThanOrEqual(clientWidth)
+}
+
+/**
+ * 底部导航必须落在视口里（§5.13.8 ⑨，375 / 768 两档）。
+ *
+ * `AppLayout.vue` 的 `.sidebar` 在 `@media (max-width: 780px)` 里变成
+ * `position: fixed; left: 0; right: 0; bottom: 0`（`styles.css`），所以这两档都要断它
+ * 整块落在视口内。**判据是几何量而不是类名**：类名写对了而 `bottom: 0` 被别处的
+ * `height` / `transform` 顶出屏幕，屏幕上看不出、类名断言也看不出。
+ */
+async function expectBottomNavInViewport(page: Page, label: string) {
+  const nav = page.locator('.sidebar')
+  await expect(nav, `${label}：底部导航不在 DOM 里`).toHaveCount(1)
+  const box = await nav.boundingBox()
+  const size = page.viewportSize()
+  expect(box, `${label}：底部导航量不到尺寸`).toBeTruthy()
+  expect(size, `${label}：量不到视口尺寸`).toBeTruthy()
+  const b = box as { x: number; y: number; width: number; height: number }
+  const v = size as { width: number; height: number }
+  // 允许 1px 的取整误差；两个方向都断——横着跑出右边与竖着沉到屏幕底下是两种不同的坏法。
+  expect(b.x, `${label}：底部导航左边跑出视口（x=${b.x}）`).toBeGreaterThanOrEqual(-1)
+  expect(b.x + b.width, `${label}：底部导航右边跑出视口`).toBeLessThanOrEqual(v.width + 1)
+  expect(b.y + b.height, `${label}：底部导航沉到视口下方`).toBeLessThanOrEqual(v.height + 1)
+}
+
+/**
+ * 一直按 `Tab` 直到焦点落到某个元素上（§5.13.8 ⑩）。
+ *
+ * **不数按了几次 Tab。** 整页的 Tab 次序会随任何一个组件的增删而变（这一页上有筛选栏、
+ * 报告列表、四段 textarea、版本时间线、若干按钮），写死次数会让这条用例在某次无关的
+ * 排版改动之后红在一个与键盘可达性无关的地方。`limit` 只是「跑满就抛」的上限——抛出来
+ * 说明那个元素**根本不在 Tab 次序里**，那正是这条用例要说的事。
+ *
+ * 判据用 `tagName` + `innerText` 而不是选择器：这里问的是「键盘此刻站在哪」，而
+ * `document.activeElement` 是唯一回答它的东西。
+ */
+async function tabUntil(
+  page: Page,
+  match: (el: { tag: string; text: string; label: string }) => boolean,
+  label: string,
+  limit = 160
+): Promise<{ tag: string; text: string; label: string }> {
+  for (let i = 0; i < limit; i++) {
+    await page.keyboard.press('Tab')
+    const focused = await page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null
+      return {
+        tag: el?.tagName ?? '',
+        text: (el?.innerText ?? '').replace(/\s+/g, ' ').trim().slice(0, 200),
+        // 表单控件的名字来自包着它的 `<label>`（`FormDialog` 就是这种形状）。少了这一项，
+        // 两个 `<select>` 在 `text` 上长得一样（`innerText` 只给出**选中的那一项**），
+        // 于是「Tab 到了导出用途，还是导出哪一版」这个问题答不出来。非表单控件没有
+        // `labels`，回空串。
+        label: Array.from((el as HTMLInputElement | null)?.labels ?? [])
+          .map(node => (node.innerText ?? '').replace(/\s+/g, ' ').trim())
+          .join(' ')
+          .slice(0, 120)
+      }
+    })
+    if (match(focused)) return focused
+  }
+  throw new Error(`按了 ${limit} 次 Tab 仍没有到达「${label}」`)
+}
+
+/**
+ * 等弹层的**打开动画**结束再量尺寸。
+ *
+ * `Modal.vue` 的 `<Transition name="modal">` 在打开那一刻给 `.modal-backdrop` 挂上
+ * `modal-enter-from`，而 `styles.css` 有一条 `.modal-enter-from .modal-panel {
+ * transform: scale(0.95) translateY(10px) }`。`getBoundingClientRect()` 量到的是
+ * **变换之后**的盒子，所以在那一帧里：
+ *
+ *   - 940×612 的面板 → 893×581（`0.95` 倍）
+ *   - 被夹在 `max-height: 340px` 的表格 → **323**（`0.95` 倍）
+ *
+ * 而 `getComputedStyle(wrap).maxHeight` 一如既往地回 `340px`——样式值不受变换影响。
+ * 2026-09-26 实测撞到过：`toBe(340)` 红在 `323` 上，看起来像「CSS 被改了」或
+ * 「内容不够高」，实际两样都不是，`.modal-body` 的 `clientHeight` 是 474（真实的
+ * 布局值，`clientHeight` 不随 transform 变），内容 `scrollHeight` 是 1900。
+ *
+ * **判据是 `transform` 回到 `none`**（动画结束后面板上没有任何变换），不写死等待
+ * 时长：`toHaveCSS` 自己轮询，无论那一段是 0.25 秒还是只有一帧都能等到。
+ * 凡是**在弹层刚打开时读几何量**的用例都要先走这一句——写死一个 `waitForTimeout`
+ * 会在慢机器上重新变红，而红的原因与用例要证明的事无关。
+ */
+async function waitForModalSettled(panel: Locator) {
+  await expect(panel).toHaveCSS('transform', 'none')
+}
+
 test.describe('Analytics report functions', () => {
   test.beforeEach(async ({ page }) => {
     await loginAs(page, 'counselor');
@@ -926,29 +1207,491 @@ test.describe('Analytics report functions', () => {
       page.getByRole('status').filter({ hasText: '草稿已保存至服务器（RPT-' })
     ).toBeVisible();
 
-    // ⑤ 导出：用途是 `window.prompt` 取的，所以先挂上对话框的应答再点。
+    // ⑤ 导出：用途与版本走的是 `FormDialog` 弹层（§5.13 Phase B 把这两项从
+    //    `window.prompt` 换成了两格带必填校验的控件），所以先开弹层再填。
     await page.getByRole('button', { name: '进入导出设置' }).click();
-    page.on('dialog', (dialog) => dialog.accept('e2e：核对正式报告导出链路'));
     await page.getByRole('button', { name: '生成报告' }).click();
+
+    // 版本那一格默认停在**最新已发布的那一版**（此刻还没发布，于是回落到当前版本 1）。
+    await expect(page.getByLabel(/导出哪一版/)).toHaveValue('1');
+
+    // 用途留空点提交，会被必填校验挡在弹层里——**证明这一道门在**，而不是先点一次
+    // 成功的路径再断言回执（那样摘掉 `required` 也不会有任何东西红）。
+    await page.getByLabel(/导出用途/).selectOption('');
+    await page.getByRole('button', { name: '生成并下载' }).click();
+    await expect(page.getByText('导出用途不能为空')).toBeVisible();
+
+    await page.getByLabel(/导出用途/).selectOption({ index: 1 });
+    await page.getByRole('button', { name: '生成并下载' }).click();
     await expect(
-      page.getByRole('status').filter({ hasText: '正式报告已通过导出中心生成并下载' })
+      page.getByRole('status').filter({ hasText: '已下载，可在导出中心查看（EXPORT-' })
     ).toBeVisible();
-    // 导出记录那一行只在导出成功之后才渲染（`lastExportAt`），所以先证明它在。
+    // 那一行只在导出成功之后才渲染（`lastExport`），所以先证明它在。
     await expect(page.locator('.audit-section tbody tr')).toHaveCount(1);
 
     // ⑥ 发布：当前版本被锁定。先回「专业解读」那一页签。
     await page.getByRole('button', { name: '专业解读' }).click();
-    await page.getByRole('button', { name: '确认并发布' }).click();
+    // `exact: true` 是必须的：Playwright 的 `name` 默认按**子串**匹配，而弹层打开之后
+    // 那一枚「确认发布 V1」也含「发布 V1」，严格模式会同时收到两个。
+    await page.getByRole('button', { name: '发布 V1', exact: true }).click();
+    await page.getByRole('button', { name: '确认发布 V1' }).click();
     await expect(
-      page.getByRole('status').filter({ hasText: '报告已发布，当前版本已锁定' })
+      page.getByRole('status').filter({ hasText: 'V1 已发布，当前版本已锁定' })
     ).toBeVisible();
 
-    // ⑦ 已发布不可覆盖（§5.4 的核心验收）：再点一次保存，服务端回 409
-    //    `REPORT_IMMUTABLE`，界面把**服务端那句话**放到状态行上。
-    await page.getByRole('button', { name: '保存草稿' }).click();
+    // ⑦ 已发布不可覆盖（§5.4 的核心验收）：界面这一半是**正文只读 + 保存按钮置灰**，
+    //    而**服务端那一半**（`REPORT_IMMUTABLE` 409）由 `test_reporting_api.py` 守——
+    //    §5.13 Phase A 之后界面上不再有「先发一次请求再挨一句 409」那条路，
+    //    所以这一条断的是「入口已经不在了」，不是「按钮点了会失败」。
+    await expect(page.getByLabel('1. 整体情况说明')).toHaveAttribute('readonly', '');
+    await expect(page.getByRole('button', { name: '保存草稿' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: '保存草稿' })).toHaveAttribute(
+      'title',
+      '当前版本只读；要继续修改请先新建版本'
+    );
+  });
+});
+
+// ========== 专业报告工作台（V2.0.0 §5.13.8 十条）==========
+
+/**
+ * 打开「专业分析报告」并等它**真的可用**。
+ *
+ * 判据取 `FilterBar` 那句「已自动加载最新可分析任务」而不是「页面渲染完了」：这句话
+ * 只在 `query(true)` 跑完之后才出现，而下面每一条都要在它之后才能动筛选或保存。
+ * 等一个自己挑的 DOM 标志（比如「保存草稿」按钮）会漏掉这一条——那一枚按钮在任务
+ * 加载完之前就已经在页面上了（它按 `canCreate` 置灰）。
+ */
+async function openReportPage(page: Page) {
+  await page.goto('/counselor/analytics/report')
+  await expect(page.getByRole('heading', { name: '专业分析报告' })).toBeVisible()
+  await expect(
+    page.getByRole('status').filter({ hasText: '已自动加载最新可分析任务' })
+  ).toBeVisible()
+}
+
+/**
+ * 这一次写入会不会**留在共享演示库**里？会——每跑一次就多几份报告。
+ *
+ * 这是 §5.13.8 的固有代价（报告是「新建」出来的，没有删除接口，与 `export_job`
+ * 那条残留同类），不是可以顺手绕开的东西。三件事因此写在这里：
+ *  · **不写死份数与编号**：报告编号按天递增（`RPT-YYYYMMDD-NNNN`），份数每跑一次都变，
+ *    写死它等于给下一个人埋一条与功能无关的红；
+ *  · **不改操作员自己配的东西**：这一组只新建报告，不碰系统配置与权限矩阵；
+ *  · **每一处都先证明有东西可扫**：`.prose` 有内容、`tbody tr` 有一行、
+ *    弹层真的开出来了，然后才断言它干净——§测试注意里那条的第六、七例。
+ */
+test.describe('专业报告工作台', () => {
+  test('草稿保存后刷新页面，能从我的报告里重新打开并接着编辑', async ({ page }) => {
+    await loginAs(page, 'counselor')
+    await openReportPage(page)
+
+    const body = 'e2e 恢复核对：这一段的正文在刷新之后必须原样回来。'
+    await page.getByLabel('1. 整体情况说明').fill(body)
+    const reportNo = await saveNewDraft(page)
+
+    // ① 保存之后它出现在「我的报告」里，状态是**草稿 · V1**（版本号来自版本行自己）。
+    const row = reportRow(page, reportNo)
+    await expect(row).toBeVisible()
+    await expect(row).toContainText('草稿 · V1')
+
+    // ② 刷新 —— 这就是「刷新一次内存里那份就没了」那条老毛病的可执行形式。
+    await page.reload()
+    await expect(page.getByRole('heading', { name: '专业分析报告' })).toBeVisible()
+    await expect(reportRow(page, reportNo)).toBeVisible()
+
+    // ③ 从列表里点开它，正文原样回来。
+    await reportRow(page, reportNo).click()
+    await expect(page.getByLabel('1. 整体情况说明')).toHaveValue(body)
+
+    // ④ 接着编辑并保存：回执里必须还是**同一个编号**（接着写，不是又新建了一份）。
+    await page.getByLabel('1. 整体情况说明').fill(body + RECOVER_TEXT)
+    await page.getByRole('button', { name: '保存草稿' }).click()
+    await expect(pageNotice(page)).toContainText(`草稿已保存至服务器（${reportNo}）`)
+    await expect(page.getByLabel('1. 整体情况说明')).toHaveValue(body + RECOVER_TEXT)
+  });
+
+  test('发布 V1 之后当前版本只读，新建 V2 可以继续编辑并发布', async ({ page }) => {
+    await loginAs(page, 'counselor')
+    await openReportPage(page)
+
+    await page.getByLabel('1. 整体情况说明').fill(PUBLISHED_TEXT)
+    const reportNo = await saveNewDraft(page)
+    await expect(reportRow(page, reportNo)).toBeVisible()
+
+    // ① 发布 V1 —— 弹层背后的页面上立着一枚同名按钮，所以确认那一枚必须 `exact`。
+    await page.getByRole('button', { name: '发布 V1', exact: true }).click()
+    await page.getByRole('button', { name: '确认发布 V1' }).click()
+    await expect(pageNotice(page)).toContainText('V1 已发布，当前版本已锁定')
+
+    // ② 锁定的判据是**输入框与按钮两处**：只断按钮置灰的话，一个「按钮灰了但输入框
+    //    还能改」的实现照样绿，而用户会在锁定的版本上打一整段字然后丢掉。
+    await expect(page.getByLabel('1. 整体情况说明')).toHaveAttribute('readonly', '')
+    await expect(page.getByRole('button', { name: '保存草稿' })).toBeDisabled()
+
+    // ③ 新建 V2 草稿：V1 不被改动，而正文可以接着改。
+    await page.getByRole('button', { name: '基于当前版本继续编辑' }).click()
+    await page.getByRole('button', { name: '新建版本' }).click()
+    await expect(pageNotice(page)).toContainText('已创建 V2 草稿，可以继续编辑')
+    await expect(page.getByLabel('1. 整体情况说明')).not.toHaveAttribute('readonly', '')
+    await page.getByLabel('1. 整体情况说明').fill(DRAFT_TEXT)
+    await page.getByRole('button', { name: '保存草稿' }).click()
+    await expect(pageNotice(page)).toContainText(`草稿已保存至服务器（${reportNo}）`)
+
+    // ④ 发布 V2 —— 两条版本行都在，V1 没有被覆盖掉。
+    await page.getByRole('button', { name: '发布 V2', exact: true }).click()
+    await page.getByRole('button', { name: '确认发布 V2' }).click()
+    await expect(pageNotice(page)).toContainText('V2 已发布，当前版本已锁定')
+    await expect(versionRow(page, 1)).toBeVisible()
+    await expect(versionRow(page, 2)).toBeVisible()
+    await expect(versionRow(page, 1)).toContainText('已发布')
+    await expect(versionRow(page, 2)).toContainText('已发布')
+  });
+
+  test('V2 草稿期间，领导读到的仍是 V1 且看不到 V2 草稿', async ({ page }) => {
+    const reportNo = await reportWithDraftOverPublished(page)
+
+    await loginAs(page, 'leader')
+    await page.goto('/leader/analytics/report')
+    const item = page.locator('.report-item').filter({ hasText: new RegExp(`${reportNo}(?!\\d)`) })
+    await expect(item).toBeVisible()
+    await item.click()
+
+    const detail = page.locator('.report-detail')
+    // 先证明有东西可看：正文四段里第一段必须是**已发布的 V1**那一句。
+    await expect(detail.locator('.prose').first()).toHaveText(PUBLISHED_TEXT)
+    // 版本号读的是 `content_version`（V1），不是报告头的 `current_version`（V2）。
+    await expect(detail.locator('.meta')).toContainText('已发布 · V1')
+    // 草稿的正文一个字都不许出现在领导这一侧。
+    await expect(detail).not.toContainText(DRAFT_TEXT)
+
+    // 领导导出的就是这一版（`selectedVersion` 取自 `content`），回执里带着作业编号。
+    await page.getByRole('button', { name: '导出这一版' }).click()
+    await page.getByLabel(/导出用途/).selectOption({ index: 1 })
+    await page.getByRole('button', { name: '生成并下载' }).click()
+    // 领导这一页的状态行是 `<span role="status">`，心理老师那一页是 `<p role="status">`
+    // ——而 `pageNotice` 收在 `p` 上（那一页上另有一个 `span` 是筛选栏的提示）。
+    // 所以这里按文本找那一句，不借那个 helper。
     await expect(
-      page.getByRole('status').filter({ hasText: '已发布版本不可覆盖' })
-    ).toBeVisible();
+      page.getByRole('status').filter({ hasText: '已下载，可在导出中心查看（EXPORT-' })
+    ).toBeVisible()
+  });
+
+  test('在 V2 页面上选择导出 V1，导出中心留下那一版的记录', async ({ page }) => {
+    const reportNo = await reportWithDraftOverPublished(page)
+
+    await loginAs(page, 'counselor')
+    await openReportPage(page)
+    await reportRow(page, reportNo).click()
+    // 当前版本是 V2 草稿，所以正文是草稿那一句——**先证明打开的是这一份**，
+    // 否则下面「导出 V1」可能是在另一份报告上做的。
+    await expect(page.getByLabel('1. 整体情况说明')).toHaveValue(DRAFT_TEXT)
+
+    await page.getByRole('button', { name: '进入导出设置' }).click()
+    await page.getByRole('button', { name: '生成报告' }).click()
+    await page.getByLabel(/导出哪一版/).selectOption('1')
+    await page.getByLabel(/导出用途/).selectOption({ index: 1 })
+    await page.getByRole('button', { name: '生成并下载' }).click()
+    const notice = pageNotice(page)
+    await expect(notice).toContainText('已下载，可在导出中心查看（EXPORT-')
+
+    // 「本次操作结果」那一行说的是**哪一版**：这一格就是「导出的确实是 V1」的判据。
+    const row = page.locator('.audit-section tbody tr')
+    await expect(row).toHaveCount(1)
+    await expect(row.locator('td').nth(2)).toHaveText('V1')
+
+    // 同一个作业在导出中心查得到（编号从回执里现取，不写死）。
+    const jobNo = (await notice.innerText()).match(/EXPORT-[\d-]+/)?.[0]
+    expect(jobNo, '导出回执里必须带着作业编号').toBeTruthy()
+    await page.goto('/counselor/exports')
+    await expect(page.locator('tbody tr', { hasText: jobNo as string })).toHaveCount(1)
+  });
+
+  test('有未保存改动时四处都拦一下，保存之后不再拦', async ({ page }) => {
+    // 先用接口造**另一份**报告，好让「打开其他报告」那一条有得点。
+    const otherNo = await reportWithDraftOverPublished(page)
+
+    await loginAs(page, 'counselor')
+    await openReportPage(page)
+    await page.getByLabel('1. 整体情况说明').fill(PUBLISHED_TEXT)
+    const reportNo = await saveNewDraft(page)
+    await expect(reportRow(page, reportNo)).toBeVisible()
+
+    // 弄脏：这一段**没有**保存。
+    await page.getByLabel('1. 整体情况说明').fill(PUBLISHED_TEXT + '（未保存的改动）')
+    const confirmTitle = page.getByText('放弃未保存的修改？')
+    const cancel = page.getByRole('button', { name: '取消' })
+
+    // ① 切换筛选条件：`FilterBar` 的 `beforeChange` 排在「有没有选任务」**之前**，
+    //    所以点「查询」就够，不必真的换一个任务集（换了会把这次的分析范围改掉）。
+    //    选择器收在筛选卡里：那一枚按钮的可见文字是 `⌕ 查询`，而不收窄的话
+    //    「查询」这两个字在别处出现时 `getByRole` 的子串匹配会撞上严格模式。
+    const filters = page.locator('.card.filters')
+    await filters.getByRole('button', { name: /查询/ }).click()
+    await expect(confirmTitle).toBeVisible()
+    await cancel.click()
+    await expect(confirmTitle).toHaveCount(0)
+
+    // ② 打开「我的报告」里的另一份。
+    await reportRow(page, otherNo).click()
+    await expect(confirmTitle).toBeVisible()
+    await cancel.click()
+    await expect(confirmTitle).toHaveCount(0)
+    // 取消之后**还停在原来那一份上**（不能只断弹层消失）。
+    await expect(page.getByLabel('1. 整体情况说明')).toHaveValue(PUBLISHED_TEXT + '（未保存的改动）')
+
+    // ③ 重置。
+    await filters.getByRole('button', { name: /重置/ }).click()
+    await expect(confirmTitle).toBeVisible()
+    await cancel.click()
+    await expect(confirmTitle).toHaveCount(0)
+
+    // ④ 离开这一页。必须走**客户端路由**：`page.goto` 是整页刷新，`onBeforeRouteLeave`
+    //    根本不会触发，那样这条会永远绿。
+    await page.locator('.sidebar').getByRole('link', { name: /工作台/ }).first().click()
+    await expect(confirmTitle).toBeVisible()
+    await cancel.click()
+    await expect(confirmTitle).toHaveCount(0)
+    await expect(page).toHaveURL(/\/counselor\/analytics\/report$/)
+
+    // ⑤ 保存之后同一处不再拦，「查询」直接走过去。
+    await page.getByRole('button', { name: '保存草稿' }).click()
+    await expect(pageNotice(page)).toContainText(`草稿已保存至服务器（${reportNo}）`)
+    await filters.getByRole('button', { name: /查询/ }).click()
+    await expect(confirmTitle).toHaveCount(0)
+    await expect(page.getByRole('status').filter({ hasText: '已刷新' })).toBeVisible()
+  });
+
+  test('导出弹层的必填、取消与失败保留', async ({ page }) => {
+    await loginAs(page, 'counselor')
+    await openReportPage(page)
+    await page.getByLabel('1. 整体情况说明').fill(PUBLISHED_TEXT)
+    await saveNewDraft(page)
+
+    await page.getByRole('button', { name: '进入导出设置' }).click()
+    await page.getByRole('button', { name: '生成报告' }).click()
+    const dialog = page.locator('.modal-panel')
+    await waitForModalSettled(dialog)
+
+    // ① 必填：先把用途清回占位那一项，再提交——**这一清是必需的**：那个下拉的默认值是
+    //    用途表里的第一项（`defaultValue: purposes.includes(lastPurpose) ? lastPurpose
+    //    : purposes[0]`），不清就是有值的，直接点提交会真的发出去一个请求，
+    //    而这条要证明的正是「没选用途时不发请求」。
+    await page.getByLabel(/导出用途/).selectOption('')
+    await page.getByRole('button', { name: '生成并下载' }).click()
+    await expect(page.getByText('导出用途不能为空')).toBeVisible()
+    await expect(dialog).toBeVisible()
+
+    // ② 取消：弹层关掉，页面上不留任何「已下载」的痕迹。
+    await page.getByRole('button', { name: '取消' }).click()
+    await expect(dialog).toHaveCount(0)
+    await expect(pageNotice(page)).not.toContainText('已下载')
+
+    // ③ 失败保留用途。桩要能撤（`unroute` 要同一枚 handler 引用），所以写成具名函数；
+    //    匹配用判定函数而不是通配串——这一条路径里带 id，串通配会顺手把版本查询也拦掉。
+    const exportPath = /\/api\/v1\/professional-reports\/\d+\/export-jobs$/
+    const failing = (route: Route) =>
+      route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          success: false,
+          data: null,
+          request_id: 'e2e-export-fail',
+          error: { code: 'INTERNAL', message: 'e2e 桩：导出文件生成失败' }
+        })
+      })
+    await page.route(exportPath, failing)
+
+    await page.getByRole('button', { name: '生成报告' }).click()
+    await waitForModalSettled(dialog)
+    const purpose = page.getByLabel(/导出用途/)
+    await purpose.selectOption({ index: 1 })
+    const chosen = await purpose.inputValue()
+    expect(chosen, '用途下拉里必须有可选项').toBeTruthy()
+    await page.getByRole('button', { name: '生成并下载' }).click()
+    // 提交之后弹层**立刻**关掉（`settleForm` 里就关了），结果由页面上的状态行说，
+    // 所以失败那句话说在页面上、而不是弹层里。
+    await expect(pageNotice(page)).toContainText('e2e 桩：导出文件生成失败')
+
+    // ④ 重新打开：上一次填的用途还在（`lastPurpose` 在发请求之前就写了）。
+    await page.getByRole('button', { name: '生成报告' }).click()
+    await waitForModalSettled(dialog)
+    await expect(page.getByLabel(/导出用途/)).toHaveValue(chosen)
+    await page.getByRole('button', { name: '取消' }).click()
+    await expect(dialog).toHaveCount(0)
+
+    // ⑤ 撤掉桩之后同一条路走得通。
+    await page.unroute(exportPath, failing)
+    await page.getByRole('button', { name: '生成报告' }).click()
+    await waitForModalSettled(dialog)
+    await expect(page.getByLabel(/导出用途/)).toHaveValue(chosen)
+    await page.getByRole('button', { name: '生成并下载' }).click()
+    await expect(pageNotice(page)).toContainText('已下载，可在导出中心查看（EXPORT-')
+  });
+
+  test('领导页默认打开最新那一份，且没有任何编辑控件', async ({ page }) => {
+    // 先保证库里真的有已发布的报告——否则下面断的是「一个空的只读页」，
+    // 而空页上当然没有编辑控件（那是「先证明有东西可扫」的反面）。
+    await reportWithDraftOverPublished(page)
+
+    await loginAs(page, 'leader')
+    await page.goto('/leader/analytics/report')
+    const items = page.locator('.report-item')
+    await expect(items.first()).toBeVisible()
+    // 「默认打开最新那一份」的可执行形式：第一行就是被选中的那一行。不去断是哪一份
+    // （那取决于共享库此刻有什么），只断「进来就已经选中了」，与列表的排序口径无关。
+    await expect(items.first()).toHaveAttribute('aria-pressed', 'true')
+
+    const detail = page.locator('.report-detail')
+    await expect(detail).toBeVisible()
+    await expect(detail.locator('.prose').first()).not.toBeEmpty()
+
+    // 只读页的判据是**没有任何编辑控件**，不是「按钮置灰」——一枚灰着的输入框仍然
+    // 会让人以为差一个权限就能改。
+    await expect(page.locator('textarea')).toHaveCount(0)
+    // 判据按**整串控件名**来，不用 `/保存|发布|新建版本|继续编辑/` 这种子串组合：
+    // 领导页每一行报告卡的正文里就有「发布于 …」（那是发布时间），一条子串正则把这
+    // 十几行一起数进来，于是它断的成了「列表此刻有几行」——实测就是这条：期望 0、
+    // 收到 16，而页面上一个编辑控件都没有。
+    await expect(page.getByRole('button', { name: '保存草稿', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /^发布 V\d+$/ })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: '基于当前版本继续编辑', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: '新建版本', exact: true })).toHaveCount(0)
+    // 而「导出这一版」在——只读不等于不能拿走（§5.13.5）。
+    await expect(page.getByRole('button', { name: '导出这一版' })).toBeVisible()
+  });
+
+  test('领导页两类空态分得开', async ({ page }) => {
+    // 「学校尚未发布报告」这一支在真机上随后就不可达了（同一组前一条用例会造出已发布的
+    // 报告），所以这里用桩把它逼出来。桩只挡**列表**那一个路径：`/professional-reports/{id}`
+    // 与导出都不经过它，写成通配串会顺手把别的请求也拦掉。
+    //
+    // 先造一份已发布的报告：后半段（撤桩之后）断的是「有报告但筛不到」，而演示库本身
+    // **不种**专业报告，靠同组别的用例并行跑出来的是不能依赖的（`fullyParallel`）。
+    await reportWithDraftOverPublished(page)
+    await loginAs(page, 'leader')
+    const listPath = /\/api\/v1\/professional-reports$/
+    const empty = (route: Route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          success: true,
+          data: { items: [] },
+          request_id: 'e2e-empty-reports',
+          error: null
+        })
+      })
+    await page.route(listPath, empty)
+    await page.goto('/leader/analytics/report')
+    await expect(page.getByText('学校尚未发布报告')).toBeVisible()
+    await expect(page.getByText('当前筛选无匹配报告')).toHaveCount(0)
+    await page.unroute(listPath, empty)
+
+    // 撤桩之后是「有报告但筛不到」——这是另一句话，两者不能互相顶替。
+    await page.reload()
+    await expect(page.locator('.report-item').first()).toBeVisible()
+    await page.getByPlaceholder('按标题或报告编号筛选').fill(`zzz-不存在的报告-${Date.now()}`)
+    await expect(page.getByText('当前筛选无匹配报告')).toBeVisible()
+    await expect(page.getByText('学校尚未发布报告')).toHaveCount(0)
+  });
+
+  test('375px 与 768px 下报告页不横向溢出，底部导航仍在视口里', async ({ page }) => {
+    const reportNo = await reportWithDraftOverPublished(page)
+    await loginAs(page, 'counselor')
+    await openReportPage(page)
+    await reportRow(page, reportNo).click()
+    // 版本时间线要真的渲染出来（`v-if="opened"`）——否则这一条漏扫了整块。
+    await expect(page.locator('.versions .row').first()).toBeVisible()
+
+    for (const [width, height] of [
+      [375, 812],
+      [768, 1024]
+    ] as const) {
+      const label = `${width}px 的报告页`
+      await page.setViewportSize({ width, height })
+      await expectNoHorizontalOverflow(page, label)
+      await expectBottomNavInViewport(page, label)
+
+      // 确认弹层也要量一次：它有自己的一层定位与宽度，页面不溢出不代表弹层不溢出。
+      // 先弄脏，再点「重置」把弹层叫出来。
+      await page.getByLabel('1. 整体情况说明').fill(`${DRAFT_TEXT}${label}`)
+      await page.getByRole('button', { name: /重置/ }).click()
+      const confirmDialog = page.locator('.modal-panel')
+      await expect(page.getByText('放弃未保存的修改？')).toBeVisible()
+      await waitForModalSettled(confirmDialog)
+      await expectNoHorizontalOverflow(page, `${label}的确认弹层`)
+      await page.getByRole('button', { name: '取消' }).click()
+      await expect(confirmDialog).toHaveCount(0)
+    }
+  });
+
+  test('键盘可以走完选报告、续写、保存、发布与导出', async ({ page }) => {
+    const reportNo = await reportWithDraftOverPublished(page)
+    await loginAs(page, 'counselor')
+    await openReportPage(page)
+    // **先等列表真的加载完再按 Tab。** `openReportPage` 只等到筛选栏那句「已自动加载
+    // 最新可分析任务」，而报告列表是**另一次**请求，它排在那条很重的分析查询后面
+    // （单进程后端上实测会排在后面好几秒）。不等它就开始按 Tab，那 160 次会全部空转
+    // 在「正在加载报告…」那一帧上——红的原因与键盘可达性毫无关系。
+    await expect(reportRow(page, reportNo)).toBeVisible({ timeout: 30000 })
+
+    // ① 选中「我的报告」里那一行（Enter 就是按钮的默认激活键）。
+    await tabUntil(page, el => el.text.includes(reportNo), '我的报告里那一行')
+    await page.keyboard.press('Enter')
+    await expect(page.getByLabel('1. 整体情况说明')).toHaveValue(DRAFT_TEXT)
+
+    // ② 走到正文输入框里续写。
+    await tabUntil(page, el => el.tag === 'TEXTAREA', '正文输入框')
+    await page.keyboard.press('End')
+    await page.keyboard.type(RECOVER_TEXT)
+    await expect(page.getByLabel('1. 整体情况说明')).toHaveValue(DRAFT_TEXT + RECOVER_TEXT)
+
+    // ③ 保存。
+    await tabUntil(page, el => el.text.includes('保存草稿'), '保存草稿按钮')
+    await page.keyboard.press('Enter')
+    await expect(pageNotice(page)).toContainText(`草稿已保存至服务器（${reportNo}）`)
+
+    // ④ 发布：确认那一枚在弹层里，`tabUntil` 从当前位置往后找得到它。
+    await tabUntil(page, el => el.text.includes('发布 V2'), '发布按钮')
+    await page.keyboard.press('Enter')
+    await tabUntil(page, el => el.text.includes('确认发布 V2'), '确认发布按钮')
+    await page.keyboard.press('Enter')
+    await expect(pageNotice(page)).toContainText('V2 已发布，当前版本已锁定')
+
+    // ⑤ 进入导出设置并打开弹层。
+    await tabUntil(page, el => el.text.includes('进入导出设置'), '进入导出设置按钮')
+    await page.keyboard.press('Enter')
+    await tabUntil(page, el => el.text.includes('生成报告'), '生成报告按钮')
+    await page.keyboard.press('Enter')
+    await waitForModalSettled(page.locator('.modal-panel'))
+
+    // ⑥ 导出用途：Tab 走得到那一格，且**焦点真的落在它上面**。
+    //
+    //    「再用键盘把它的**值**改掉」这一半**在本环境里证不了，所以不写那条断言**——
+    //    写下去它会红，而红的是浏览器行为、不是这一页能不能用键盘。实测（本仓库的
+    //    Chromium 153 / macOS / 无头，探针跑在仓库根）：
+    //      · `ArrowDown` / `ArrowUp` / `Home` / `End` **确实到达了 `<select>`**
+    //        （挂 keydown 监听数得到），但值一个都不变——macOS 上原生 select 要先展开
+    //        弹层才认方向键；
+    //      · 展开用的空格与 `Alt+ArrowDown` 在无头环境里弹不出那个列表，随后按 `Enter`
+    //        什么都不会发生（`Space,ArrowDown,Enter` 与 `Alt+ArrowDown,ArrowDown,Enter`
+    //        都试过，值不动）；
+    //      · type-ahead 是唯一真的改得动它的键盘交互（`keyboard.type('b')` 命中 `"B"`），
+    //        而 `keyboard.type` 对非 ASCII 字符走 `insertText`、不产生 type-ahead——
+    //        用途是中文的、且由操作员配置，打不出对应的键。
+    //    所以这一条守的是**这一页自己那一半**：那一格在 Tab 次序里、拿得到焦点
+    //    （`label` 判据见 `tabUntil`）。真实用户手上「能不能用它选出一项」是浏览器原生
+    //    行为（空格展开、方向键移动、回车确认），本环境无从复现——PROGRESS §5.13.8 ⑩
+    //    记着这一半，**别把它当成已经验过**。
+    await tabUntil(page, el => el.tag === 'SELECT' && el.label.includes('导出用途'), '导出用途')
+    await expect(page.getByLabel(/导出用途/)).toBeFocused()
+
+    // ⑦ 提交。弹层里那一枚按钮的文案是 `submit-text`；Enter 在弹层里是提交。
+    await tabUntil(page, el => el.text.includes('生成并下载'), '生成并下载按钮')
+    await page.keyboard.press('Enter')
+    await expect(pageNotice(page)).toContainText('已下载，可在导出中心查看（EXPORT-')
   });
 });
 
@@ -2757,6 +3500,8 @@ test.describe('布局完整性', () => {
     const panel = page.locator('.modal-panel').first();
     // 先证明有东西可量：十二行明细真的渲染出来了（扫一个空表格的尺寸也是「绿」的）。
     await expect(panel.locator('tbody tr')).toHaveCount(12);
+    // 再等打开动画结束——不然量到的是 `scale(0.95)` 那一帧的中间态（见 helper 的注释）。
+    await waitForModalSettled(panel);
 
     const expand = panel.locator('.modal-expand');
     const viewport = page.viewportSize()!;
@@ -2773,16 +3518,19 @@ test.describe('布局完整性', () => {
         fullscreen: el.classList.contains('modal-fullscreen'),
         tableMaxHeight: getComputedStyle(wrap).maxHeight,
         tableHeight: Math.round(wrap.getBoundingClientRect().height),
+        tableScrollHeight: Math.round(wrap.scrollHeight),
       };
     });
 
-    // 常规态：面板是那一档 lg（940px）+ 85vh，表格被页面压在 340px 里，而四行内容比它高。
+    // 常规态：面板是那一档 lg（940px）+ 85vh，表格被页面压在 340px 里，而十二行内容比它高。
     const normal = await measure();
     expect(normal.fullscreen, '常规态就挂着全屏类名，下面的尺寸断言证明不了任何事').toBe(false);
     expect(normal.width, '常规态的面板不该铺满视口').toBeLessThan(viewport.width);
     expect(normal.tableMaxHeight, '常规态表格的高度上限该是那一页写的那一档').toBe('340px');
     // 常规态是**被夹住**的。不断这一条的话，下面那句「全屏之后越过 340」就没有对照——
     // 一个两边都没夹住的实现（内容本来就高）也能让它通过。
+    // （上面那句 `waitForModalSettled` 是这一条成立的前提：`getBoundingClientRect()`
+    //   量的是变换后的盒子，`scale(0.95)` 那一帧里 340 会被量成 323。）
     expect(normal.tableHeight, '常规态表格没有被 340 夹住，下面那条对照就没有意义').toBe(340);
 
     await expand.click();
@@ -2802,6 +3550,185 @@ test.describe('布局完整性', () => {
     // 摘掉 `flex` 也照样绿，见上面那段注释）。
     expect(full.tableHeight, '全屏之后表格没有越过常规态那条上限')
       .toBeGreaterThan(340);
+
+    // 再点一次逐项复原：这个按钮是两个方向共用的那一个。
+    await expand.click();
+
+    await expect(panel).not.toHaveClass(/modal-fullscreen/);
+    await expect(expand).toHaveAttribute('aria-pressed', 'false');
+
+    const restored = await measure();
+    expect(restored.width).toBe(normal.width);
+    expect(restored.tableMaxHeight).toBe('340px');
+    expect(restored.tableHeight, '退出全屏之后表格该回到被夹住的那一档').toBe(340);
+  });
+
+  /**
+   * 「测评完成明细」弹层的全屏展示（2026-09-25 加，用户报的「测评任务中的查看明细
+   * 按钮弹出时，也需要有全屏展示的能力」）。
+   *
+   * 与上面那条（导入明细）是**同一套机制**（`Modal` 的 `expandable` +
+   * `.modal-fullscreen`），量的也是同一组计算值，所以那些「为什么必须量计算值」的
+   * 理由不再重复。这一条存在的理由是**这个弹层独有的一处接缝**：它有三个页签，
+   * 而三个页签各有一个 `table-wrap`，高度上限此前是**写死的行内样式**
+   * （`max-height:340px`）——只给 `Modal` 加一个 `expandable` 而没把那三处抽成
+   * `detailTableStyle` 的话，按钮、类名、面板尺寸**全对**，而表格仍然被夹在 340px 里，
+   * 下面留一大片空白。所以「表格越过 340」这条是主题，不是上一条的重复。
+   *
+   * **三个页签逐个量 `maxHeight`**：那三处在模板里是三次独立的编辑，只改一处时另外
+   * 两个页签仍然被夹住——而只量默认页签的话，那种半成品是全绿的。`tableHeight > 340`
+   * 只在「目标学生」那一屏上量：它是唯一**行数不依赖学生交没交卷**的一屏（目标行是
+   * 发放时一次生成的）；另两屏在演示库上可能是空的，而空表格的高度天然小于 340，
+   * 拿它当「常规态被夹住」的对照会变成一个与功能无关的数据依赖。
+   *
+   * **任务从接口现取，且只在第一页那 10 行里挑**：写死哪一场会在演示数据变一次之后
+   * 红在一个与功能无关的地方（§测试注意），而翻页去找一场更靠后的任务会让这一条多一条
+   * 与主题无关的依赖（任务列表是 `:page-size="10"` 的客户端分页）。挑目标人数最多的
+   * 那一场，是为了让「常规态恰被夹在 340」这句有对照（与上一条十二行同一条理由）。
+   *
+   * 定位那一行用**子串 + `.first()`**，不用 `toHaveCount(1)`：V2.0.0 的编号重试会给
+   * 重名任务加后缀（`…-2`），唯一性断言会红在一个数据问题上。
+   *
+   * 变异验证（四条，每条都 `cp -p` 落盘备份、改完逐字节 `cmp` 还原——本机没有别的办法
+   * 证明复原，§18）：①`TasksPage.vue` 的 `detailTableStyle` 全屏那一支改回
+   * `maxHeight: '340px'` → 红在 `tableMaxHeight === 'none'`；②只把三处行内样式里的
+   * **一处**留着（「未匹配行」那一处改回 `style="…max-height:340px"`）→ 红在那个页签的
+   * `maxHeight` 上，而**默认页签那一条仍然绿**——这正是「三个页签逐个量」存在的理由；
+   * ③摘掉 `Modal` 的 `expandable` → 红在 `.modal-expand` 上（定位器一个都命中不到）；
+   * ④全屏那一支写成等价形态（`maxHeight: 'none'` 配一个行内 `height: '340px'`）→ 红在
+   * `tableHeight > 340`（收到 340）。
+   */
+  test('测评完成明细弹层可以铺满视口展示', async ({ page }) => {
+    const login = await page.request.post('/api/v1/auth/login', {
+      data: { account: '13800000001', password: '123456', role: 'counselor' },
+    });
+    const headers = { Authorization: `Bearer ${(await login.json()).data.access_token}` };
+    const listResp = await page.request.get('/api/v1/assessment-tasks', { headers });
+    expect(listResp.ok(), '任务列表没读到，这一条失去了取数的手段').toBeTruthy();
+    const all = (await listResp.json()).data.items as Array<{
+      name: string
+      total_targets: number
+    }>;
+    // 只在前 10 行里挑：页面是 `:page-size="10"` 的客户端分页，而接口的次序与它一致
+    // （都是 `GET /assessment-tasks`，且页面默认筛「全部」）。
+    const page1 = all.slice(0, 10);
+    const biggest = page1.reduce(
+      (best, t) => (t.total_targets > best.total_targets ? t : best),
+      page1[0] ?? { name: '', total_targets: 0 },
+    );
+    // **行数是判据的一部分**（与上一条的十二行同一条理由）：常规态那条「恰被夹在 340」
+    // 只有在这一屏真的比 340 高时才有意义——内容本来就矮时它自己就会红，而那是对的。
+    expect(
+      biggest.total_targets,
+      '第一页里没有一场任务发够 12 个人，表格撑不到 340 以上，这一条的对照就没了——先跑 make seed-demo',
+    ).toBeGreaterThan(11);
+
+    await loginAs(page, 'counselor');
+    await page.goto('/counselor/tasks');
+    await page.waitForLoadState('networkidle');
+
+    const row = page.locator('tbody tr').filter({ hasText: biggest.name }).first();
+    await expect(row, '这一场任务不在列表第一页，这一条失去了对象').toBeVisible();
+    await row.getByRole('button', { name: '查看明细' }).click();
+
+    // 用 `.modal-expand` 认这一个弹层，不用 `.first()`：这一页上还挂着别的弹层
+    // （`FormDialog` 声明在它**前面**），换一种写法取到的可能是别人。
+    const panel = page.locator('.modal-panel').filter({ has: page.locator('.modal-expand') });
+    const expand = panel.locator('.modal-expand');
+    const viewport = page.viewportSize()!;
+
+    // 先证明那个按钮在：`Modal` 少一个 `expandable` 时它整个**不渲染**，而那时的失败会
+    // 落在 `measure()` 里一句 `null.closest` 上——离真正的原因（没接上那个 prop）很远。
+    await expect(expand, '这个弹层上没长出全屏按钮（`Modal` 的 `expandable` 没接上）')
+      .toBeVisible();
+
+    const measure = () => page.evaluate(() => {
+      const btn = document.querySelector('.modal-expand') as HTMLElement;
+      const el = btn.closest('.modal-panel') as HTMLElement;
+      const box = el.getBoundingClientRect();
+      const wrap = el.querySelector('.table-wrap') as HTMLElement;
+      return {
+        x: Math.round(box.x),
+        y: Math.round(box.y),
+        width: Math.round(box.width),
+        height: Math.round(box.height),
+        fullscreen: el.classList.contains('modal-fullscreen'),
+        tableMaxHeight: getComputedStyle(wrap).maxHeight,
+        tableHeight: Math.round(wrap.getBoundingClientRect().height),
+        tableScrollHeight: Math.round(wrap.scrollHeight),
+        bodyClientHeight: Math.round((el.querySelector('.modal-body') as HTMLElement).clientHeight),
+      };
+    });
+
+    /** 切页签并**等表格真的出现**：数据还在路上的那一帧里整个 `.table-wrap` 不渲染。 */
+    const gotoTab = async (tab: string) => {
+      await panel.getByRole('button', { name: tab, exact: true }).click();
+      await panel.locator('.table-wrap').waitFor();
+    };
+
+    /**
+     * 停在「目标学生」那一屏，并**等到它真的渲染出足够多的行**。
+     *
+     * 三个页签各自在切过去之后才请求数据，所以「切完立刻数」量到的是空表格那一帧——
+     * 一次全量 e2e 里它就这么红过一次（单跑时快，恰好绿）。而下面用的是**轮询**而不是
+     * `expect(count()).toBeGreaterThan(11)`：后者是一次性取值，等不到任何东西。
+     */
+    const showTargetsWithRows = async () => {
+      await gotoTab('目标学生');
+      await expect.poll(
+        () => panel.locator('tbody tr').count(),
+        { message: '目标学生那一屏没有渲染出足够多的行，这一条失去了对象' },
+      ).toBeGreaterThan(11);
+    };
+
+    const tableMaxHeightByTab = async () => {
+      const out: Record<string, string> = {};
+      for (const tab of ['目标学生', '完成明细', '未匹配行']) {
+        await gotoTab(tab);
+        out[tab] = await panel.locator('.table-wrap').evaluate(
+          (el) => getComputedStyle(el as HTMLElement).maxHeight,
+        );
+      }
+      // 回到行数最稳的那一屏，下面的高度断言要在它上面做。
+      await showTargetsWithRows();
+      return out;
+    };
+
+    // 先证明有东西可量：量一个空表格的尺寸也是「绿」的。
+    await showTargetsWithRows();
+    // 这一条切页签的往返通常已经盖过了那 0.25 秒，但那是**运气**——上一条用例就是这么
+    // 红的（`323`，见 `waitForModalSettled` 的注释），所以这里也明着等一次。
+    await waitForModalSettled(panel);
+
+    // 常规态：面板是那一档 lg（940px）+ 85vh，表格被页面压在 340px 里。
+    const normal = await measure();
+    expect(normal.fullscreen, '常规态就挂着全屏类名，下面的尺寸断言证明不了任何事').toBe(false);
+    expect(normal.width, '常规态的面板不该铺满视口').toBeLessThan(viewport.width);
+    expect(normal.tableMaxHeight, '常规态表格的高度上限该是那一页写的那一档').toBe('340px');
+    // 常规态是**被夹住**的。不断这一条的话，下面那句「全屏之后越过 340」就没有对照。
+    expect(normal.tableHeight, '常规态表格没有被 340 夹住，下面那条对照就没有意义').toBe(340);
+    expect(await tableMaxHeightByTab(), '常规态下还有页签的上限不是那一档').toEqual({
+      目标学生: '340px', 完成明细: '340px', 未匹配行: '340px',
+    });
+
+    await expand.click();
+
+    await expect(panel).toHaveClass(/modal-fullscreen/);
+    await expect(expand).toHaveAttribute('aria-pressed', 'true');
+
+    const full = await measure();
+    expect(full.width, '全屏之后面板没有铺满视口宽度').toBe(viewport.width);
+    expect(full.height, '全屏之后面板没有铺满视口高度（85vh 那条没被覆盖）').toBe(viewport.height);
+    // 一个居中的 1280×720 面板也会满足上面两条——这两条钉住它真的在左上角。
+    expect(full.x).toBe(0);
+    expect(full.y).toBe(0);
+    expect(full.tableMaxHeight, '表格仍然被行内那个 340px 压着').toBe('none');
+    // 这条才是「里面的内容也铺开了」：表格长过了常规态那条硬上限。**不能写成
+    // `>= 某个下界`**——下界那种写法在 `min-height` 面前是恒真的（上一条的注释记着那次实测）。
+    expect(full.tableHeight, '全屏之后表格没有越过常规态那条上限').toBeGreaterThan(340);
+    expect(await tableMaxHeightByTab(), '全屏下还有页签被那个 340px 压着').toEqual({
+      目标学生: 'none', 完成明细: 'none', 未匹配行: 'none',
+    });
 
     // 再点一次逐项复原：这个按钮是两个方向共用的那一个。
     await expand.click();

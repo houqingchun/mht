@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from fastapi import Request
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -579,8 +580,36 @@ def create_account(
         must_change_password=True,
         active=True,
     )
-    db.add(user)
-    db.flush()
+    try:
+        # `begin_nested()` 是必须的：`IntegrityError` 会让**整个事务**进入失败状态，
+        # 不套 savepoint 的话连下面那条重查都发不出去（`open_or_reuse_care_case`
+        # 里是同一个手法、同一个理由，CLAUDE.md §28）。
+        with db.begin_nested():
+            db.add(user)
+            db.flush()
+    except IntegrityError:
+        # 两个请求**同时**建同一个账号：上面那次 `exists` 查的是各自事务的快照，
+        # 两边都查不到、于是两边都插，第二个撞唯一键。这与 `open_or_reuse_care_case`
+        # 是同一种读-然后-写的竞态，处置也一样——**让唯一键自己说话，撞了就把并发
+        # 这一路折回「账号已存在」那句话**，而不是让它变成一句英文的 500。
+        again = db.scalar(
+            select(UserAccount)
+            .where(
+                UserAccount.account == account, UserAccount.account_type == account_type
+            )
+            # ★ `with_for_update()` 是**当前读**，不是可有可无的加锁。默认隔离级别
+            # 是 REPEATABLE-READ，普通 SELECT 读的是本事务**第一条语句**时定下的
+            # 快照——而我们要找的那一行恰恰是**刚刚才被别人提交**的，快照里没有它，
+            # 重查会得到 `None`，于是这一路照样抛英文的 `IntegrityError`。
+            # `numbering.py` 里「撞了就重读一遍再算」不成立，是同一件事的实测记录。
+            .with_for_update()
+        )
+        if again is None:
+            # 不是撞了这个唯一键（外键、非空、别的约束……）：原样往外抛，
+            # 别把一句真实的数据库错报成「账号已存在」。
+            raise
+        raise AppError("VALIDATION_ERROR", _duplicate_message(account_type, account), 422)
+
     for row in rows:
         row.user_id = user.id
         db.add(row)

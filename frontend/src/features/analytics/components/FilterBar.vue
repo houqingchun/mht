@@ -10,11 +10,34 @@ const props = defineProps<{
   showMetric?: boolean
   gradeOptions?: string[]
   classOptions?: Array<{ grade: string; name: string }>
+  /**
+   * 变更前的一道门（V2.0.0 §5.13 Phase B）。
+   *
+   * 返回 `false` 就不发 `query` / `reset`——专业报告页拿它挡「有未保存正文时切任务 /
+   * 重置筛选」。**默认不传 = 行为与从前逐字相同**：这一页之外还有三个调用方
+   * （总览 / 八维度 / 年级对比），它们没有任何可丢的内容，加一道门只是多一次 await。
+   *
+   * **自动加载那一次不走这道门**（`loadTasks()` 里的 `query(true)`）：那一刻页面刚建起来，
+   * 没有任何东西可丢，拦下它只会让页面停在一个空壳上——而这是「新能力不许动既有行为」
+   * 那条（默认值是关）在这里的具体形状。
+   */
+  beforeChange?: () => boolean | Promise<boolean>
 }>()
 
 const emit = defineEmits<{
   query: [filters: FilterState]
   reset: []
+  /**
+   * 任务列表到手之后把它交出去（V2.0.0 §5.13 Phase A）。
+   *
+   * 专业报告页要把 `task_scope.task_ids` 说成人看得懂的范围摘要（「我的报告」那一列），
+   * 而它自己**不该再拉一次** `getAssessmentTasks()`——同一页上两次请求同一份数据，
+   * 一次失败另一次成功时两处会各说各话。所以由这边把已经拿到的那一份递出去。
+   *
+   * **没有监听者时它是空转的**，三个既有调用方一个字都不用改（与 `beforeChange`
+   * 同一条：新能力默认不改变既有行为）。
+   */
+  tasksLoaded: [tasks: AssessmentTaskItem[]]
 }>()
 
 export interface FilterState {
@@ -50,6 +73,7 @@ async function loadTasks() {
   try {
     tasks.value = await getAssessmentTasks()
     tasksError.value = ''
+    emit('tasksLoaded', tasks.value)
     const task = defaultTask()
     if (task) {
       filters.value.taskIds = [task.id]
@@ -88,7 +112,8 @@ watch(() => filters.value.grade, () => {
   }
 })
 
-function query(initial = false) {
+async function query(initial = false) {
+  if (!initial && props.beforeChange && !(await props.beforeChange())) return
   if (!filters.value.taskIds.length) {
     stamp.value = '请至少选择一个测评任务'
     return
@@ -98,7 +123,8 @@ function query(initial = false) {
   emit('query', { ...filters.value })
 }
 
-function reset() {
+async function reset() {
+  if (props.beforeChange && !(await props.beforeChange())) return
   const task = defaultTask()
   filters.value = { taskIds: task ? [task.id] : [], grade: 'all', cls: 'all', validity: 'ALL_CALCULATED', metric: 'rate' }
   stamp.value = '已重置为最新可分析任务'

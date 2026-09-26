@@ -8,7 +8,7 @@
 端点每一次调用都 500，而在 e2e 上它只表现为界面上一句「服务端返回了无法解析的内容」。
 `test_the_export_goes_through_the_export_center` 就是那条路径的守卫。
 
-四组，各有各的靶子：
+五组，各有各的靶子：
 
 1. **状态机**（草稿 → 发布 → 新版本），含「发布之后不可覆盖」——§5.4 的
    `DRAFT / PUBLISHED / ARCHIVED` 与 `REPORT_IMMUTABLE`；
@@ -16,13 +16,22 @@
    这一点是这个文件最容易被改坏的地方；
 3. **快照冻结**——§5.4「历史报告不得因实时数据变化而漂移」。判据写成
    「同一次数据改动，实时报表动了、报告没动」，而不是「报告里的数等于某个值」；
-4. **导出作业**——§5.5：走既有 Export Job、实名遮蔽、审计、以及**按版本导出**。
+4. **导出作业**——§5.5：走既有 Export Job、实名遮蔽、审计、以及**按版本导出**；
+5. **版本级发布状态**（§5.13 缺口 1，迁移 `0023`）——发布状态下沉到版本行之后
+   「谁能看到哪一版」：V2 草稿期间领导仍然读得到、导得出 V1，V2 发布之后默认看到 V2。
+   这一组的判据全部先造出「V1 已发布、V2 是草稿」这个中间状态——它在 0023 之前
+   连造都造不出来。
+
+**`0023` 的**数据回填**不在这个文件里**：回填只在「停在 0022 的旧库」上有意义，
+而这里的测试库已经走在 head 上了（`test_report_version_publish_migration.py` 用
+`throwaway_database` 自己造一份）。
 """
 
 from datetime import datetime
 
 import csv
 import io
+import json
 
 import pytest
 from sqlalchemy import select
@@ -146,8 +155,8 @@ def _validity_flagged(snapshot: dict) -> int:
     return snapshot["sample_quality"]["validity_flagged_count"]
 
 
-def _exported_metrics(client, headers, report_id: int, version_no: int) -> str:
-    """把某个**版本**导出来，读文件里「统计指标」那一格（含效度两个数）。
+def _exported_document(client, headers, report_id: int, version_no: int, purpose: str = "核对版本快照") -> dict:
+    """把某个**版本**导出来，整份文件解成「项目 → 内容」。
 
     按版本号导而不是按默认（当前版本）导，是整条链路上唯一能证明「版本级那一份快照
     真的被刷新过」的办法：`_snapshot_of` 先读版本行、版本行为空才回落报告级，所以
@@ -158,10 +167,21 @@ def _exported_metrics(client, headers, report_id: int, version_no: int) -> str:
     job = client.post(
         f"{PROFESSIONAL}/{report_id}/export-jobs",
         headers=headers,
-        json={"purpose": "核对版本快照", "version_no": version_no},
+        json={"purpose": purpose, "version_no": version_no},
     ).json()["data"]
     text = client.get(f"/api/v1/export-jobs/{job['id']}/download", headers=headers).content.decode("utf-8-sig")
-    return dict(csv.reader(io.StringIO(text)))["统计指标"]
+    return dict(csv.reader(io.StringIO(text)))
+
+
+def _exported_metrics(client, headers, report_id: int, version_no: int) -> str:
+    """那一份文件里的「统计指标」那一格（含效度两个数）。"""
+    return _exported_document(client, headers, report_id, version_no)["统计指标"]
+
+
+def _version_detail(client, headers, report_id: int, version_no: int) -> dict:
+    response = client.get(f"{PROFESSIONAL}/{report_id}/versions/{version_no}", headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()["data"]
 
 
 # --- 1. 状态机 -------------------------------------------------------------------
@@ -573,3 +593,289 @@ def test_a_leader_exports_the_published_report_but_not_the_draft(client, counsel
     )
     assert allowed.status_code == 200, allowed.text
     assert allowed.json()["data"]["export_type"] == "PROFESSIONAL_REPORT"
+
+
+# --- 5. 版本级发布状态（§5.13 缺口 1，迁移 0023）----------------------------------
+#
+# 这一组钉的是同一个缺陷的两个面：**发布状态下沉到版本行之后，谁能看到哪一版**。
+# 缺陷本来的形状是——一份已发布的报告点「新建版本」，报告头被改回 `DRAFT`，而领导的
+# 可见性恰好按报告头过滤，于是**V2 编辑期间已经发布出去的 V1 对领导端消失了**。
+# 校园里的后果具体：学校正在改第二版的那几天，领导端那一行整个不见。
+#
+# 这里每一条用例都先造出「V1 已发布、V2 是草稿」这个中间状态——它是这一整节的前提，
+# 而它在 0023 之前**造不出可观察的差别**（版本行没有状态可读）。
+
+
+def test_a_version_carries_its_own_publish_state(client, counselor):
+    """发布写的是**版本行**那一份，报告头那一份仍然镜像当前版本（两者此刻同值）。
+
+    `published_by` 断的是「发布人」，而演示库里那两位员工的 `display_name` 就是角色名，
+    所以这里拿 `created_by_name` 比而不是写死一个中文——写死会把「这一列接的是账号表」
+    变成「这一列等于某个字面量」（CLAUDE.md 测试注意那条「数行数要问接口要」）。
+    """
+    report = _create(client, counselor, _task_id(client, counselor), overall_summary="第一版。")
+    assert report["content"]["status"] == "DRAFT", "建出来就是草稿"
+    assert report["content"]["published_by"] is None
+
+    published = _publish(client, counselor, report["id"])
+    content = published["content"]
+
+    assert content["version_no"] == 1
+    assert content["status"] == "PUBLISHED", "版本行自己那一列才是发布的权威"
+    assert content["published_at"] is not None
+    assert content["published_by"] == report["created_by"]
+    assert content["published_by_name"] == published["created_by_name"]
+    assert published["latest_published_version"] == 1
+
+
+def test_a_new_version_keeps_the_published_one_visible_to_the_leader(client, counselor, leader):
+    """**这一条就是 §5.13 缺口 1 的判据**：V2 编辑期间，V1 对领导端仍然在。
+
+    三次「先证明有东西可读」的断言各自挡掉一类假绿：发布后领导读得到（否则下面
+    「仍然读得到」可能本来就一直读不到）、草稿 V2 的正文确实与 V1 不同（否则
+    「领导读到的是 V1」在「两版文本一样」时证明不了什么）。
+
+    领导读到的是 `content_version = 1`，而**报告头写着 `DRAFT`**——这两件事同时成立
+    正是这次修复要的结果：报告头继续镜像当前版本（心理老师需要知道「手上这一版还是
+    草稿」），而领导的可见性与内容都跟着**已发布的那一版**走。
+    """
+    report = _create(client, counselor, _task_id(client, counselor), overall_summary="第一版的结论。")
+    _publish(client, counselor, report["id"])
+    assert [x["id"] for x in client.get(PROFESSIONAL, headers=leader).json()["data"]["items"]] == [report["id"]]
+
+    created = client.post(f"{PROFESSIONAL}/{report['id']}/new-version", headers=counselor).json()["data"]
+    assert created["current_version"] == 2
+    assert created["status"] == "DRAFT", "报告头继续镜像当前版本——V2 是草稿"
+    client.put(
+        f"{PROFESSIONAL}/{report['id']}/draft",
+        headers=counselor,
+        json={"overall_summary": "第二版的结论。", "dimension_interpretation": "", "sample_validity_note": "", "support_plan": ""},
+    )
+    assert _detail(client, counselor, report["id"])["content"]["overall_summary"] == "第二版的结论。"
+
+    # 领导：列表里还在，详情读得到，而且读到的是 V1。
+    assert [x["id"] for x in client.get(PROFESSIONAL, headers=leader).json()["data"]["items"]] == [report["id"]]
+    seen = _detail(client, leader, report["id"])
+    assert seen["content_version"] == 1
+    assert seen["content"]["status"] == "PUBLISHED"
+    assert seen["content"]["overall_summary"] == "第一版的结论。"
+    assert seen["latest_published_version"] == 1
+
+    # 导出也仍然成立，并且文件上那一格写的是**那一版**的状态，不是报告头的。
+    exported = _exported_document(client, leader, report["id"], 1, purpose="领导取已发布那一版")
+    assert exported["版本"] == "1"
+    assert exported["状态"] == "已发布", "报告头此刻是 DRAFT，而这一版是发布过的"
+    assert exported["整体情况说明"] == "第一版的结论。"
+
+
+def test_the_leader_gets_the_new_version_once_it_is_published(client, counselor, leader):
+    """V2 发布之后领导默认看到 V2——「最新已发布版本」这个口径要有它自己的上限。
+
+    没有这一条的话，一个「永远取 version_no 最小的已发布版本」的实现在上一条上全绿。
+    """
+    report = _create(client, counselor, _task_id(client, counselor), overall_summary="第一版。")
+    _publish(client, counselor, report["id"])
+    client.post(f"{PROFESSIONAL}/{report['id']}/new-version", headers=counselor)
+    client.put(
+        f"{PROFESSIONAL}/{report['id']}/draft",
+        headers=counselor,
+        json={"overall_summary": "第二版。", "dimension_interpretation": "", "sample_validity_note": "", "support_plan": ""},
+    )
+    assert _detail(client, leader, report["id"])["content_version"] == 1
+
+    _publish(client, counselor, report["id"])
+
+    seen = _detail(client, leader, report["id"])
+    assert seen["content_version"] == 2
+    assert seen["content"]["overall_summary"] == "第二版。"
+    assert seen["latest_published_version"] == 2
+    assert seen["content"]["status"] == "PUBLISHED"
+
+    # 历史版本对领导仍然读得到（只读保留），而**草稿版本读不到**——两者的措辞
+    # 逐字相同（§9：不属于你的与不存在的必须不可分辨）。
+    assert _version_detail(client, leader, report["id"], 1)["content"]["overall_summary"] == "第一版。"
+    assert client.get(f"{PROFESSIONAL}/{report['id']}/versions/99", headers=leader).status_code == 404
+
+
+def test_the_version_detail_api_returns_that_versions_own_text_and_snapshot(client, counselor, db_session):
+    """`GET /professional-reports/{id}/versions/{n}`：正文与**那一版冻结的**统计快照。
+
+    「先证明两个版本的快照真的不同」是这条用例的前提——`_score_a_sitting` 让这一场真
+    有结果、改 `validity_status` 之后 `new_version()` 会重新取数（§5.13 的裁决），所以
+    版本 1 与版本 2 的快照差一个人。少了这一步，一个「两个版本都返回报告级那一份」的
+    实现在这里也是绿的。
+
+    文本与快照**一起**断：这一对是「历史版本不可读」那个缺口的全部内容，只看文本的话，
+    一个把快照接成实时的实现在这里过得去。
+    """
+    task_id = _score_a_sitting(client, counselor, db_session)
+    report = _create(client, counselor, task_id, overall_summary="第一版的结论。")
+    _publish(client, counselor, report["id"])
+    before = _validity_flagged(_detail(client, counselor, report["id"])["statistics_snapshot"])
+
+    result = db_session.scalar(
+        select(AssessmentResult).join(AssessmentSession, AssessmentSession.id == AssessmentResult.session_id).where(AssessmentSession.task_id == task_id)
+    )
+    assert result is not None, "上一步刚算出来那一场的结果应当在这里"
+    result.validity_status = "RETEST_RECOMMENDED"
+    db_session.flush()
+    client.post(f"{PROFESSIONAL}/{report['id']}/new-version", headers=counselor)
+    client.put(
+        f"{PROFESSIONAL}/{report['id']}/draft",
+        headers=counselor,
+        json={"overall_summary": "第二版的结论。", "dimension_interpretation": "", "sample_validity_note": "", "support_plan": ""},
+    )
+
+    first = _version_detail(client, counselor, report["id"], 1)
+    second = _version_detail(client, counselor, report["id"], 2)
+
+    assert first["content"]["version_no"] == 1
+    assert first["content"]["overall_summary"] == "第一版的结论。"
+    assert first["content"]["status"] == "PUBLISHED"
+    assert first["content"]["published_at"] is not None
+    assert _validity_flagged(first["statistics_snapshot"]) == before
+
+    assert second["content"]["version_no"] == 2
+    assert second["content"]["overall_summary"] == "第二版的结论。"
+    assert second["content"]["status"] == "DRAFT"
+    assert second["content"]["published_at"] is None
+    assert _validity_flagged(second["statistics_snapshot"]) == before + 1
+
+    # 版本详情的元数据与报告头同源：任务范围 / 分析口径 / 报告编号。
+    assert first["report_no"] == report["report_no"]
+    assert first["task_scope"] == report["task_scope"]
+    assert first["analysis_mode"] == report["analysis_mode"]
+
+
+def test_reading_a_version_writes_audit(client, counselor):
+    """§7.5：敏感读取写审计。这一条读的是四段专业判断与聚合统计，与前两个 GET 同档。
+
+    「先证明有东西可查」在这里是那两条 `查看专业报告版本` 之外的**否定式**：断言里
+    那条轨迹的 `resource_id` 必须是这一份报告，否则一个「随便记一条」的实现也满足
+    「有一条这样的审计」。
+    """
+    report = _create(client, counselor, _task_id(client, counselor))
+    client.get(f"{PROFESSIONAL}/{report['id']}/versions/1", headers=counselor)
+
+    logs = client.get("/api/v1/audit-logs", headers=auth_headers(client, "admin", "admin")).json()["data"]["items"]
+    rows = [x for x in logs if x["action"] == "查看专业报告版本"]
+    assert rows, "读一个历史版本必须留下一条轨迹"
+    assert rows[0]["resource_id"] == str(report["id"])
+
+
+def test_the_version_route_does_not_leak_whether_a_report_exists(client, counselor, db_session):
+    """版本这条路同样不许泄露「那份报告存在不存在」（§9 / CLAUDE.md §24）。
+
+    在版本接口上这一条比在详情接口上更值得单独钉一次：路径里多了一段版本号，而
+    「报告不是你的」与「这一版不存在」是两个不同的 404 来源（`_visible` 与 `_version`），
+    两者措辞**恰好相同**是「不属于你与不存在必须不可分辨」这条在这个端点上的形式。
+    分开写的话，一位心理老师拿别人报告的 id 逐个试版本号，就能从措辞上读出那份报告
+    在不在（`专业报告不存在` vs `报告版本不存在`）。
+
+    两个 404 都由**报告那一层**给出，这正是「先判报告、后取版本」这个次序的可执行形式：
+    报告都看不到时，版本号一个都不该被解析。
+    """
+    report_id = _create(client, counselor, _task_id(client, counselor))["id"]
+    owner = _detail(client, counselor, report_id)["created_by"]
+    other = db_session.scalar(select(UserAccount.id).where(UserAccount.id != owner))
+    assert other is not None, "库里必须有第二位员工账号，否则这条用例证明不了任何事"
+    row = db_session.get(ProfessionalReport, report_id)
+    row.created_by = other
+    db_session.flush()
+
+    not_mine = client.get(f"{PROFESSIONAL}/{report_id}/versions/1", headers=counselor)
+    missing = client.get(f"{PROFESSIONAL}/999999/versions/1", headers=counselor)
+
+    assert not_mine.status_code == missing.status_code == 404
+    assert not_mine.json()["error"]["message"] == missing.json()["error"]["message"]
+
+
+def test_a_leader_cannot_read_a_draft_version_even_by_asking_for_its_number(client, counselor, leader):
+    """领导点名要一个**草稿**版本号也是 404，措辞与「这一版不存在」逐字相同。
+
+    省掉这条的话，「点名草稿版本」这条路径只能是「碰巧没写」——而它一旦被放开，
+    领导端只要把版本号从 1 试到 9 就能读到正在写的草稿（§5.13 的可见性边界）。
+    """
+    report = _create(client, counselor, _task_id(client, counselor), overall_summary="第一版。")
+    _publish(client, counselor, report["id"])
+    client.post(f"{PROFESSIONAL}/{report['id']}/new-version", headers=counselor)
+
+    draft = client.get(f"{PROFESSIONAL}/{report['id']}/versions/2", headers=leader)
+    missing = client.get(f"{PROFESSIONAL}/{report['id']}/versions/99", headers=leader)
+
+    assert draft.status_code == 404, draft.text
+    assert draft.json()["error"]["message"] == missing.json()["error"]["message"]
+    assert client.get(f"{PROFESSIONAL}/{report['id']}", headers=leader).json()["data"]["content_version"] == 1
+
+
+def test_a_new_draft_does_not_unpublish_the_version_before_it(client, counselor):
+    """迁移 0023 的回填在**新写入**这一侧的镜像：新建出来的那一版是草稿。
+
+    这一条与 `test_a_new_version_starts_from_the_published_text` 断的是同一件事的
+    另一面——那一条读响应，这一条**从库里读版本行**。没有它的话，一个「新行照抄上一行
+    的 status」的实现（`ProfessionalReportVersion(status=report.status)` 之类的写法）
+    会让 V2 一出生就是 `PUBLISHED`，而响应上的 `status`（报告头镜像）照样是 `DRAFT`。
+    """
+    report = _create(client, counselor, _task_id(client, counselor))
+    _publish(client, counselor, report["id"])
+    client.post(f"{PROFESSIONAL}/{report['id']}/new-version", headers=counselor)
+
+    rows = client.get(f"{PROFESSIONAL}/{report['id']}", headers=counselor).json()["data"]["versions"]
+    by_no = {v["version_no"]: v for v in rows}
+    assert set(by_no) == {1, 2}
+    assert by_no[1]["status"] == "PUBLISHED"
+    assert by_no[1]["published_at"] is not None
+    assert by_no[2]["status"] == "DRAFT"
+    assert by_no[2]["published_at"] is None
+    assert by_no[2]["published_by"] is None
+
+
+def test_the_report_detail_never_hands_the_leader_a_draft_version(client, counselor, leader):
+    """领导拿到的 `versions[]` 里**只能有已发布的那些**——§5.13 缺口 1 的第二半。
+
+    缺陷本来的形状：`GET /professional-reports/{id}` 走
+    `serialize(include_versions=True, viewer=user)`，而 `viewer` 只影响 `content` 的选取
+    （领导取最新已发布那一版）、**不影响 `versions[]`**。于是同一份草稿正文，
+    `GET …/versions/2` 对领导回 404（`_version` 的 viewer 分支），而 `GET …` 的
+    `versions[]` 里逐字发给他——挡住前一条路的那道门被后一条路整个绕过，而两条路
+    各说各话在这份响应里看不出来。这与 CLAUDE.md §4 那句「受控导出不能成为绕过心理
+    详情的旁路」是同一个形状：**一条读得到明细的旁路，等于那道门没装。**
+
+    「先证明有东西可读」在这里要断**两个方向**：心理老师的 `versions[]` 必须**有** V2 的
+    草稿正文（否则「领导那份里没有」可能只是因为草稿根本没写进去），领导的必须**没有**。
+    只断后者的话，一个「`versions[]` 一律不下发」的实现也是绿的——而那是把老师自己的
+    版本时间线整个拆掉（`ProfessionalReportVersions.vue` 的每一行都靠它渲染）。
+
+    最后一条断**整份响应文本**而不只是 `versions[]`：漏的那一天不一定是从这个字段漏的。
+    用 `json.dumps` 而不是 `response.text`，因为前者由这里控制编码（`ensure_ascii=False`
+    之后中文是字面量），后者取决于服务端此刻怎么序列化——一个被转义成 `\\u7b2c` 的响应
+    会让这条断言恒真，而**一条恒真的断言比没有更糟**。
+    """
+    first = "第一版的结论。"
+    second = "第二版的结论（尚未发布）。"
+    report = _create(client, counselor, _task_id(client, counselor), overall_summary=first)
+    _publish(client, counselor, report["id"])
+    client.post(f"{PROFESSIONAL}/{report['id']}/new-version", headers=counselor)
+    client.put(
+        f"{PROFESSIONAL}/{report['id']}/draft",
+        headers=counselor,
+        json={
+            "overall_summary": second,
+            "dimension_interpretation": "",
+            "sample_validity_note": "",
+            "support_plan": "",
+        },
+    )
+
+    # 心理老师：两版都在，草稿那一版的正文读得到。
+    mine = _detail(client, counselor, report["id"])["versions"]
+    assert {v["version_no"]: v["status"] for v in mine} == {1: "PUBLISHED", 2: "DRAFT"}
+    assert next(v for v in mine if v["version_no"] == 2)["overall_summary"] == second
+
+    # 领导：只剩已发布的那一版，草稿正文一个字都不在响应里。
+    payload = _detail(client, leader, report["id"])
+    assert [v["version_no"] for v in payload["versions"]] == [1]
+    assert all(v["status"] == "PUBLISHED" for v in payload["versions"])
+    assert payload["content_version"] == 1
+    assert payload["content"]["overall_summary"] == first
+    assert second not in json.dumps(payload, ensure_ascii=False)

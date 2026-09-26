@@ -45,7 +45,7 @@ from app.services.export_labels import (
     participation_label,
     target_status_label,
 )
-from app.services.numbering import insert_with_unique_number
+from app.services.numbering import insert_with_unique_number, run_until_not_deadlocked
 from app.services.target_snapshot import target_snapshot
 
 
@@ -444,6 +444,27 @@ def delete_or_void_task(db: Session, user: UserAccount, task_id: int, *, reason:
 
 
 def create_school_assessment_task(
+    db: Session,
+    user: UserAccount,
+    *,
+    name: str,
+    start_at: str | None,
+    end_at: str | None,
+) -> AssessmentTask:
+    """建一场校内测评任务并发放目标行，**整段可重跑**。
+
+    外面这层是为 1213 加的（CLAUDE.md §33），与 `reporting_service.create_report` 同源：
+    并发下 `insert_with_unique_number` 会在页尾撞出 InnoDB 死锁，而它回滚的是**整个
+    事务**，所以只能在「整个操作」这一层重跑。契约也成立——进门只有读（学校、量表、
+    `count`），第一个写入就是那次插入。
+    """
+    return run_until_not_deadlocked(
+        db,
+        lambda: _create_school_assessment_task(db, user, name=name, start_at=start_at, end_at=end_at),
+    )
+
+
+def _create_school_assessment_task(
     db: Session,
     user: UserAccount,
     *,

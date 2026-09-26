@@ -2,10 +2,10 @@
 -- 心晴 · 数据库增量升级脚本
 --
 -- 从  V1.0.0（迁移 0012_drop_care_case_unique）
--- 到  V2.0.0（迁移 0022_professional_reports）
+-- 到  V2.0.0（迁移 0023_report_version_publish）
 --
 -- 由 deploy/build_migration_sql.py 生成，**不要手工编辑**：它的数据源是
--- 链上 10 条迁移各自的 PRECHECKS 常量与 alembic 的离线渲染。
+-- 链上 11 条迁移各自的 PRECHECKS 常量与 alembic 的离线渲染。
 -- 改了迁移就重跑一次 `make db-upgrade-sql`。
 -- ==============================================================================
 
@@ -15,9 +15,9 @@
 --       mysqldump -h HOST -u USER -p --default-character-set=utf8mb4 \
 --         --single-transaction DB > backup_$(date +%Y%m%d).sql
 --
---   第二步 · 把整个文件交给 mysql 执行。文件按迁移分成 10 条，每条都是
+--   第二步 · 把整个文件交给 mysql 执行。文件按迁移分成 11 条，每条都是
 --       「先【检查】、后【DDL】」两小段：
---             第 1 条 / 共 10 条：0013_xxx
+--             第 1 条 / 共 11 条：0013_xxx
 --               【检查】…   ← 每一条都必须返回 Empty set
 --               【DDL】…    ← 这条迁移真正动手的地方
 --       ★ 一定要**按这个次序**：后面的迁移会读前面刚加上去的列，
@@ -33,7 +33,7 @@
 --
 --   第三步 · 核对：
 --       SELECT version_num FROM alembic_version;
---       应当是 0022_professional_reports
+--       应当是 0023_report_version_publish
 --
 --   注意三件事：
 --   ① 这个文件是 UTF-8、含中文注释，**必须**带 --default-character-set=utf8mb4，
@@ -71,7 +71,7 @@ DELIMITER ;
 
 
 -- ==============================================================================
--- 第 1 条 / 共 10 条：0013_v12_expand
+-- 第 1 条 / 共 11 条：0013_v12_expand
 -- ==============================================================================
 
 -- 【检查】1 条。**每一条都必须返回 Empty set**。
@@ -646,7 +646,7 @@ UPDATE alembic_version SET version_num='0013_v12_expand' WHERE alembic_version.v
 
 
 -- ==============================================================================
--- 第 2 条 / 共 10 条：0014_v12_enforce
+-- 第 2 条 / 共 11 条：0014_v12_enforce
 -- ==============================================================================
 
 -- 【检查】12 条。**每一条都必须返回 Empty set**。
@@ -954,7 +954,7 @@ UPDATE alembic_version SET version_num='0014_v12_enforce' WHERE alembic_version.
 
 
 -- ==============================================================================
--- 第 3 条 / 共 10 条：0015_calc_status_backfill
+-- 第 3 条 / 共 11 条：0015_calc_status_backfill
 -- ==============================================================================
 
 -- 【检查】这一条迁移没有需要事先问一遍的数据形状，直接往下跑它的 DDL。
@@ -970,7 +970,7 @@ UPDATE alembic_version SET version_num='0015_calc_status_backfill' WHERE alembic
 
 
 -- ==============================================================================
--- 第 4 条 / 共 10 条：0016_import_batch_name
+-- 第 4 条 / 共 11 条：0016_import_batch_name
 -- ==============================================================================
 
 -- 【检查】这一条迁移没有需要事先问一遍的数据形状，直接往下跑它的 DDL。
@@ -986,7 +986,7 @@ UPDATE alembic_version SET version_num='0016_import_batch_name' WHERE alembic_ve
 
 
 -- ==============================================================================
--- 第 5 条 / 共 10 条：0017_json_null_normalize
+-- 第 5 条 / 共 11 条：0017_json_null_normalize
 -- ==============================================================================
 
 -- 【检查】这一条迁移没有需要事先问一遍的数据形状，直接往下跑它的 DDL。
@@ -1006,7 +1006,7 @@ UPDATE alembic_version SET version_num='0017_json_null_normalize' WHERE alembic_
 
 
 -- ==============================================================================
--- 第 6 条 / 共 10 条：0018_row_conflict_resolution
+-- 第 6 条 / 共 11 条：0018_row_conflict_resolution
 -- ==============================================================================
 
 -- 【检查】这一条迁移没有需要事先问一遍的数据形状，直接往下跑它的 DDL。
@@ -1022,7 +1022,7 @@ UPDATE alembic_version SET version_num='0018_row_conflict_resolution' WHERE alem
 
 
 -- ==============================================================================
--- 第 7 条 / 共 10 条：0019_total_includes_validity
+-- 第 7 条 / 共 11 条：0019_total_includes_validity
 -- ==============================================================================
 
 -- 【检查】这一条迁移没有需要事先问一遍的数据形状，直接往下跑它的 DDL。
@@ -1046,7 +1046,7 @@ UPDATE alembic_version SET version_num='0019_total_includes_validity' WHERE alem
 
 
 -- ==============================================================================
--- 第 8 条 / 共 10 条：0020_total_excludes_validity
+-- 第 8 条 / 共 11 条：0020_total_excludes_validity
 -- ==============================================================================
 
 -- 【检查】2 条。**每一条都必须返回 Empty set**。
@@ -1102,7 +1102,7 @@ UPDATE alembic_version SET version_num='0020_total_excludes_validity' WHERE alem
 
 
 -- ==============================================================================
--- 第 9 条 / 共 10 条：0021_v2_task_governance
+-- 第 9 条 / 共 11 条：0021_v2_task_governance
 -- ==============================================================================
 
 -- 【检查】这一条迁移没有需要事先问一遍的数据形状，直接往下跑它的 DDL。
@@ -1132,7 +1132,7 @@ UPDATE alembic_version SET version_num='0021_v2_task_governance' WHERE alembic_v
 
 
 -- ==============================================================================
--- 第 10 条 / 共 10 条：0022_professional_reports
+-- 第 10 条 / 共 11 条：0022_professional_reports
 -- ==============================================================================
 
 -- 【检查】这一条迁移没有需要事先问一遍的数据形状，直接往下跑它的 DDL。
@@ -1190,9 +1190,55 @@ UPDATE alembic_version SET version_num='0022_professional_reports' WHERE alembic
 
 
 -- ==============================================================================
+-- 第 11 条 / 共 11 条：0023_report_version_publish
+-- ==============================================================================
+
+-- 【检查】这一条迁移没有需要事先问一遍的数据形状，直接往下跑它的 DDL。
+
+-- 【DDL】这条迁移要执行的全部语句（由 alembic 离线渲染，一条不多、一条不少），
+-- 末尾那条 UPDATE 把 alembic_version 推到 0023_report_version_publish。
+-- ------------------------------------------------------------------------------
+-- Running upgrade 0022_professional_reports -> 0023_report_version_publish
+
+ALTER TABLE professional_report_version ADD COLUMN status VARCHAR(32) NOT NULL DEFAULT 'DRAFT';
+
+ALTER TABLE professional_report_version ADD COLUMN published_at DATETIME;
+
+ALTER TABLE professional_report_version ADD COLUMN published_by INTEGER;
+
+ALTER TABLE professional_report_version ADD CONSTRAINT professional_report_version_fk_published_by FOREIGN KEY(published_by) REFERENCES user_account (id);
+
+UPDATE professional_report_version v
+        JOIN professional_report r ON r.id = v.report_id
+        SET v.status = 'PUBLISHED'
+        WHERE r.status IN ('PUBLISHED', 'ARCHIVED');
+
+UPDATE professional_report_version v
+        JOIN professional_report r ON r.id = v.report_id
+        SET v.published_at = r.published_at, v.published_by = r.published_by
+        WHERE r.status IN ('PUBLISHED', 'ARCHIVED') AND v.version_no = r.current_version;
+
+UPDATE professional_report_version v
+        JOIN professional_report r ON r.id = v.report_id
+        SET v.status = 'PUBLISHED', v.published_at = r.published_at, v.published_by = r.published_by
+        WHERE r.status NOT IN ('PUBLISHED', 'ARCHIVED')
+          AND r.current_version > 1
+          AND v.version_no = r.current_version - 1;
+
+UPDATE professional_report_version v
+        JOIN professional_report r ON r.id = v.report_id
+        SET v.status = 'PUBLISHED'
+        WHERE r.status NOT IN ('PUBLISHED', 'ARCHIVED')
+          AND r.current_version > 1
+          AND v.version_no < r.current_version;
+
+UPDATE alembic_version SET version_num='0023_report_version_publish' WHERE alembic_version.version_num = '0022_professional_reports';
+
+
+-- ==============================================================================
 -- 到这里就结束了。核对一句：
 --   SELECT version_num FROM alembic_version;
--- 应当是 0022_professional_reports。
+-- 应当是 0023_report_version_publish。
 --
 -- 程序文件那一侧照常走一键安装包（升级模式不会重跑 seed、不会重置管理员密码、
 -- 不会碰数据库里的数据，只更新程序文件并再跑一次迁移——那时这一步已经是空转的）。

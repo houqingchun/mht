@@ -950,6 +950,21 @@ export function reportStatusTone(code: string | null | undefined): Tone {
   return 'gray'
 }
 
+/**
+ * 「状态 · 版本号」的组合读法（`草稿 · V2` / `已发布 · V1`）——报告列表、页头指标卡
+ * 与德育领导端三处共用一份。
+ *
+ * 版本号为空读作「未创建」：那是「这个口径**还没有**任何报告」，不是「一份版本号
+ * 是空的草稿」——两者在屏幕上必须长得不一样，否则老师会以为有什么东西等着他保存。
+ *
+ * 状态中文一律从 `reportStatusLabel` 拿，视图里不另写「草稿」两个字（§3 第一面：
+ * 同一张表两个定义时，改中文只改一处、漏一处，而漏的那处界面上照旧显示旧词）。
+ */
+export function reportVersionLabel(status: string | null | undefined, versionNo: number | null | undefined): string {
+  if (versionNo === null || versionNo === undefined) return '未创建'
+  return `${reportStatusLabel(status)} · V${versionNo}`
+}
+
 export function maskLevelLabel(code: string | null | undefined) {
   return labelOf(MASK_LEVEL_LABELS, code)
 }

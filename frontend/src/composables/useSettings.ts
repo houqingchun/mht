@@ -42,7 +42,9 @@ const FALLBACK: SystemSettings = {
   },
   export: {
     purposes: ['校内心理工作跟进', '经批准的工作汇报', '复测任务准备'],
-    key_question_reasons: ['执行人工复核', '处置紧急工作事项', '核验历史记录']
+    key_question_reasons: ['执行人工复核', '处置紧急工作事项', '核验历史记录'],
+    // 与后端 DEFAULTS 对齐；`/admin/settings` 拉不到时用它，导出弹层才不会显示一个空的有效期。
+    job_ttl_hours: 24
   },
   cadence: {
     follow_up_days: 7,

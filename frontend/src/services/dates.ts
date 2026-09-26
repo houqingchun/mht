@@ -36,6 +36,23 @@ export const DEFAULT_TASK_START = () => today()
 export const DEFAULT_TASK_END = () => daysFromNow(14)
 
 /**
+ * 服务端来的 `datetime` → `MM-DD HH:MM`。
+ *
+ * 后端发的是 `2026-09-25T09:00:00` 这种朴素字符串，直接印出来既长又占列宽，
+ * 而这一页要显示的时间（创建 / 发布 / 更新）都是**同一学年内**的事，年份不承载信息。
+ * 取值口径与 `ExportCenterPage` / `SessionListDialog` 里那两处内联写法逐字相同
+ * （`slice(5, 16).replace('T', ' ')`）——**那两处暂未改过来**，将来一并收敛到这里，
+ * 别再加第三份副本。
+ *
+ * 空值回 `—`：那是界面占位符，不是空串（§3 数值列那条：空单元格与「没有这一项」
+ * 在表格软件里长得一样）。
+ */
+export function formatDateTime(value: string | null | undefined): string {
+  if (!value) return '—'
+  return value.slice(5, 16).replace('T', ' ')
+}
+
+/**
  * 作答用时，单位取自后端落库的秒数。
  *
  * 这是一个**墙钟**时长：口径是「首次作答 → 交卷」，不是「在页面上停留的时间」。

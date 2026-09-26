@@ -4764,6 +4764,118 @@ M2 让取数的 `numberIn` 恒返回 0 → 红在 `toBeGreaterThan(0)`（**先�
 只有撤销）、两条审计与 `var/exports/` 下一个文件。它的 `purpose` 写着
 「人工核对：验证导出链路」——**比擦掉它更诚实**。
 
+### 33. 业务单号并发：撞号（1062）与死锁（1213 / 1305）是两件事，各有各的出路（2026-09-26）
+
+`task_no` / `report_no` / `report_version_no` 一类**业务单号**（不是自增主键，是
+「日期 + 序号」那种给人看的号）在并发下会失败两次，形状完全不同。全站唯一的处置定义在
+`backend/app/services/numbering.py`，两个函数各管一种：
+
+| 失败 | 谁接 | 出路 |
+|---|---|---|
+| **1062** 撞号（两人算到同一个号） | `insert_with_unique_number` | **换一个号再插一次**（在 savepoint 里） |
+| **1213 / 1305** 死锁 | `run_until_not_deadlocked` | **整个操作重跑**（不能在这一层修） |
+
+#### 第一层：撞号就往上试一个，不重读、不锁
+
+最直觉的修法「撞了就重新数一遍」**在 MySQL 上不成立**：默认 REPEATABLE-READ，事务快照
+在第一条语句时就定下来了，重读到的还是撞车那个数（实测确认），于是试一轮、再撞一次。
+
+换 `SELECT … FOR UPDATE` 也不行，而且是两个层次的错：库里那一行**还不存在**，所谓「锁
+一行」锁的是它会落进去的那个**间隙**，而两个间隙锁在 InnoDB 里**互相兼容**——两边都拿得
+到，接着两边都插，撞的是插入意向锁。
+
+所以让**唯一键自己说话**：撞了就把序号往上试一个，每一轮都是数据库在回答「这个号有人用
+了吗」，而不是我们在读一份可能过期的快照。整段套 `begin_nested()`（savepoint）——
+`IntegrityError` 会让**整个事务**进入失败状态，不套 savepoint 连下一条语句都发不出去
+（与 §28 的 `open_or_reuse_care_case` 同一个手法）。上限 `MAX_ATTEMPTS = 10`，用尽报
+**409 `NUMBER_CONFLICT`**——那是一次**能读懂的失败**，不是 500。
+
+#### 第二层：1213 会来，而且第一层接不住
+
+「撞号就往上试一个」这个模式**自己会造出死锁**。2026-09-26 实测（12 并发
+`POST /professional-reports`）：2 个请求 500，业务栈都停在 `numbering.py` 的 `db.flush()`。
+`SHOW ENGINE INNODB STATUS` 的 `LATEST DETECTED DEADLOCK` 逐字是：
+
+```
+(1) HOLDS  : index PRIMARY of professional_report  lock_mode X   ← 记录 hex 73757072656d756d
+(1) WAITING: index PRIMARY of professional_report  lock_mode X insert intention waiting
+(2) HOLDS  : 同一条记录、同一个模式
+(2) WAITING: 同一条记录、同一个模式        →  WE ROLL BACK TRANSACTION (2)
+```
+
+`73757072656d756d` 是 **`supremum`（页尾上界）**：双方**都已经**在页尾插过一行、各自持有
+那一处的 X 锁，然后又都要往同一个位置插。`AUTO_INCREMENT` 主键的行**必然**落在页尾，所以
+这不是运气，是**结构性存在**的形状——第一轮撞号失败的越多，第二轮同时去要插入意向锁的
+就越多。
+
+**第一层接不住它，因为 InnoDB 回滚的是整个事务，不是回滚到 savepoint。** 死锁一发生，
+`begin_nested()` 的那个 savepoint 一起消失，紧接着的 savepoint 操作报
+**1305 `SAVEPOINT … does not exist`**——实测同一次并发里两种码都出现过。所以：
+
+- **`DEADLOCK_ERRNOS = (1213, 1305)`，两个都要认。** 只认 1213 的话另一半请求仍然带着
+  一句英文的 500 出去。1305 不是「另一个错」，它就是死锁的另一面。
+- **判据是 errno（`err.orig.args[0]`），不是错误文案。** 文案跟着服务器
+  `lc_messages` 走，逐字匹配会在中文/日文服务器上静默失效（`is_deadlock`）。
+
+出路**只有在整个操作那一层重跑**——`run_until_not_deadlocked(db, operation)`：MySQL 那句
+话自己就是这么说的（`try restarting transaction`）。两个调用点各一处薄壳：
+`reporting_service.create_report` 与 `task_service.create_school_assessment_task`
+（各自拆成「薄壳 + `_create_xxx`」）。`DEADLOCK_ATTEMPTS = 3`（含第一次），退避
+`DEADLOCK_BACKOFF_SECONDS * attempt`——它不是为了等锁（死锁已经替我们回滚、锁也放了），
+是为了**把重跑的请求错开**，免得三次又落回同一个瞬间。
+
+#### 调用方契约：`operation` 必须**可重跑**（风险全在这里）
+
+1. **写入都发生在「可能死锁的那一句」之后。** 现在两个调用点都满足：进门先做几次只读
+   查询，第一个写入就是那次插入。
+2. **它自己不提交**（提交归路由，`get_db` 的 `finally: db.close()` 从不提交）。若哪天真
+   有人在 `operation` 里 `db.commit()`，而 1213 恰好发生在提交那一刻，「重跑」就可能把一次
+   **已经生效**的写入做第二遍——这个函数挡不住那个形状。
+
+#### ★ 那句 `db.rollback()` 是必须的，而且它的守卫是补出来的（不是一开始就有）
+
+摘掉它会撞一句 **1452**，不是死锁：会话里那些**已经 `add`、还没发出去**的写入（版本行的
+`report_id`、答卷的 `session_id` 那一类）会带着**指向已被回滚掉那一行**的引用，在重跑时
+被同一次 flush 发出去。**这是本节的教训**：第一版守卫写的是「死锁落在第一次 flush 上」
+（会话里只有一个已经 flush 过、干净的 report），摘掉 `db.rollback()` **全绿**——那条用例
+根本没扫到这个形状。补的
+`test_numbering_concurrency.py::test_a_deadlock_on_the_second_flush_still_reruns_clean`
+用 `event.listen(session, "before_flush", …)` 把死锁精确钉在**第二次** flush 上（那时会话
+里正躺着那个孤儿引用），M1 才红。**「先证明有东西可扫，再断言它干净」在这里的具体含义是：
+守卫要落在「有脏对象」的那半边。** 文件 docstring 第一版那句「不回滚的话下一次 flush 会接着
+发已经被回滚掉的语句」也是**过度声称**，现已改成上面那个 1452 的说法。
+
+#### 跑数与变异
+
+`app/tests/test_numbering_concurrency.py` 共 **8 条**（撞号 2 条 + 死锁 6 条）。
+**变异验证 4/4 全部变红，每条红的正是它该红的那一条**（一律 `cp -p` 落盘备份 + `cmp`
+逐字节还原）：
+
+| 变异 | 位置 | 结果 |
+|---|---|---|
+| M1 摘掉 `db.rollback()` | `numbering.py` 的 `run_until_not_deadlocked` | **1 failed**（`…second_flush_still_reruns_clean`，报 1452） |
+| M2 摘掉 `1305` | `numbering.py` 的 `DEADLOCK_ERRNOS` | **1 failed**（参数化的 `[1305]` 那一条） |
+| M3 判据退化成异常类型（`return bool(args)`） | `numbering.py` 的 `is_deadlock` | **1 failed**（不是死锁的 2006 那一条） |
+| M4 摘掉任务侧薄壳 | `task_service.create_school_assessment_task` | **1 failed**（任务侧那一条） |
+
+**修前 / 修后（真实 12 / 20 / 40 并发探针）**：12 并发 → 2 个 **500**（业务栈全部停在
+`numbering.py` 的 flush），修后 20 并发 → 18×200 + 2×409 + **0×500**、40 并发 → **0×500**。
+409 是撞号用尽时的预期答复，不是缺陷。
+
+#### 重跑是**按操作**包的，不是按单号包的（这一点决定了 M1 那条用例的存在）
+
+全站只有**两个** `insert_with_unique_number` 调用点（`reporting_service.py` 与
+`task_service.py`），与 `run_until_not_deadlocked` 的两个调用点一一对应。但一次操作里
+**不只有一个写入**：`_create_report` 在插入报告头之后，还有一行 `db.add(ProfessionalReportVersion(...))
++ db.flush()`，而它**不经过**编号设施（`version_no` 是普通整数 1，不是「日期+序号」那种
+业务单号）。若重跑只包住「插报告头」那一句，这一行就被留在外面了——**而死锁恰恰可能落在
+它那次 flush 上**，那时会话里正躺着一个引用着「马上要被回滚掉的那一行」的孤儿对象。
+按操作包，两次写入天然共进退。
+
+同一个形状还有一处**已知且接受**的：两处薄壳是各写一遍的（不是装饰器 / 中间件），所以
+**摘掉其中一个不会有任何东西变红**——除非有为它单独写的用例。`test_a_deadlocked_task_creation_is_rerun_too`
+就是为任务那一半写的（M4 验过）。新增第三个调用点时照办。
+
 ## 已知缺口（动手前先看这里）
 
 1. **数据范围已在查询层生效，但有两处刻意的例外和一个口径盲点。**

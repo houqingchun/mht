@@ -109,15 +109,64 @@ export async function getDataScopeSummary(): Promise<DataScopeSummary> {
   return apiRequest<DataScopeSummary>('/auth/me/data-scope-summary')
 }
 
+/**
+ * 专业报告的**一个版本**——正文四段，外加它自己的发布元数据。
+ *
+ * `status` / `published_at` / `published_by` 是**版本级**的（后端 `0023` 起，见
+ * `reporting_service._content_payload`）：V2 还在写的时候，V1 这一行仍然是
+ * `PUBLISHED`，而报告头那三个字段已经指回 `DRAFT` 了。两个都能读到，别混用——
+ * 「这一版发布过没有」读这里，「这份报告当前那一版是什么状态」读 `ProfessionalReport`。
+ */
+export interface ProfessionalReportVersion {
+  version_no: number
+  status: 'DRAFT'|'PUBLISHED'|'ARCHIVED'
+  created_by: number; created_by_name?: string | null
+  created_at: string
+  published_at?: string | null
+  published_by?: number | null; published_by_name?: string | null
+  overall_summary: string; dimension_interpretation: string
+  sample_validity_note: string; support_plan: string
+}
+
 export interface ProfessionalReport {
   id: number; report_no: string; title: string; status: 'DRAFT'|'PUBLISHED'|'ARCHIVED'; current_version: number
+  /** 建这份报告时选定的任务集合（`{task_ids:number[]}`）。列表上的「任务范围摘要」读它。 */
+  task_scope?: { task_ids: number[] } | null
+  analysis_mode: string
   statistics_snapshot: AnalyticsReport
-  content?: { version_no:number; overall_summary:string; dimension_interpretation:string; sample_validity_note:string; support_plan:string }
-  versions?: Array<{version_no:number; created_at:string; created_by:number}>
+  /** 当前版本的**版本级**状态：心理老师用它判「能不能继续写」（已发布就要先建新版本）。 */
+  current_version_status?: 'DRAFT'|'PUBLISHED'|'ARCHIVED' | null
+  created_by: number; created_by_name?: string | null
+  created_at: string; updated_at: string
+  /** 报告头那一对是**当前版本**的镜像；下面 `latest_published_*` 才是「最新已发布那一版」。 */
+  published_at?: string | null; published_by?: number | null
+  latest_published_version?: number | null
+  latest_published_at?: string | null
+  latest_published_by?: number | null; latest_published_by_name?: string | null
+  /** 下面这份 `content` 是**哪一版**的正文——领导读到的是最新已发布那一版。 */
+  content_version?: number | null
+  content?: ProfessionalReportVersion
+  versions?: ProfessionalReportVersion[]
 }
 export async function listProfessionalReports(): Promise<ProfessionalReport[]> { return (await apiRequest<{items:ProfessionalReport[]}>('/professional-reports')).items }
 /** 单份报告（含 `versions` 版本列表）。`versions` 只有 `listProfessionalReports` 不给——列表页不需要它。 */
 export async function getProfessionalReport(id:number): Promise<ProfessionalReport> { return apiRequest(`/professional-reports/${id}`) }
+/**
+ * 某一个**版本**的正文与它**冻结的那份**统计快照（`GET …/versions/{n}`）。
+ *
+ * 这是「打开历史版本」唯一的读法：服务端一处统计都不重算（`reporting_service.get_version`），
+ * 所以翻回 V1 时屏幕上的数字是 V1 发布时的数字，不随后来的数据变。
+ * 领导点名要一个仍是草稿的版本号 → 404，措辞与「这一版不存在」逐字相同。
+ */
+export interface ProfessionalReportVersionDetail {
+  report_id: number; report_no: string; title: string
+  task_scope: { task_ids: number[] } | null; analysis_mode: string
+  statistics_snapshot: AnalyticsReport
+  content: ProfessionalReportVersion
+}
+export async function getProfessionalReportVersion(id:number, versionNo:number): Promise<ProfessionalReportVersionDetail> {
+  return apiRequest(`/professional-reports/${id}/versions/${versionNo}`)
+}
 export async function createProfessionalReport(payload: unknown): Promise<ProfessionalReport> { return apiRequest('/professional-reports', {method:'POST', body:JSON.stringify(payload)}) }
 export async function saveProfessionalReport(id:number, payload:unknown): Promise<ProfessionalReport> { return apiRequest(`/professional-reports/${id}/draft`, {method:'PUT', body:JSON.stringify(payload)}) }
 /** 已发布报告不可原地覆盖（§7.4），进一步编辑必须走这一条：服务端建新 `version_no`，旧版本永久保留。 */
@@ -1201,6 +1250,15 @@ export interface SystemSettings {
   export: {
     purposes: string[]
     key_question_reasons: string[]
+    /**
+     * 导出文件在导出中心保留多少小时（后端 `settings_service.DEFAULTS` 的
+     * `export.job_ttl_hours`，默认 24）。
+     *
+     * 它一直下发着（`get_namespace` 会把 `DEFAULTS` 合并进去），只是这一层类型没有声明。
+     * 声明它，是为了让导出用途弹层能把「有效期」写成服务端那个数——
+     * **不硬编码第二个 24**：那个数改了而这里没改时，屏幕上说的与库里记的就分岔了。
+     */
+    job_ttl_hours: number
   }
   cadence: {
     follow_up_days: number

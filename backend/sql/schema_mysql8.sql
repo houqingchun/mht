@@ -1637,13 +1637,18 @@ CREATE TABLE `professional_report_version` (
   `sample_validity_note` text NOT NULL,
   `support_plan` text NOT NULL,
   `statistics_snapshot_json` json NOT NULL,
+  `status` varchar(32) NOT NULL DEFAULT 'DRAFT',
+  `published_at` datetime DEFAULT NULL,
+  `published_by` int DEFAULT NULL,
   `created_by` int NOT NULL,
   `created_at` datetime NOT NULL DEFAULT (now()),
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_professional_report_version` (`report_id`,`version_no`),
   KEY `professional_report_version_fk_created_by` (`created_by`),
+  KEY `professional_report_version_fk_published_by` (`published_by`),
   CONSTRAINT `professional_report_version_fk_report` FOREIGN KEY (`report_id`) REFERENCES `professional_report` (`id`),
-  CONSTRAINT `professional_report_version_fk_created_by` FOREIGN KEY (`created_by`) REFERENCES `user_account` (`id`)
+  CONSTRAINT `professional_report_version_fk_created_by` FOREIGN KEY (`created_by`) REFERENCES `user_account` (`id`),
+  CONSTRAINT `professional_report_version_fk_published_by` FOREIGN KEY (`published_by`) REFERENCES `user_account` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- =============================================================================
