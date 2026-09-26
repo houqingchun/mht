@@ -2649,15 +2649,88 @@ M6 往页头塞一个 `ACTIVE` 当场变红，证明那一页的正文确实在�
 
 #### 5.14.6 CROSS-ROLE-UX（P1）：导航、动作、空态与语言
 
-- [ ] 建立统一 SVG 图标组件/映射，替换 `AppLayout.vue`、`KpiCard.vue` 中的 Unicode 字符图标。
-- [ ] 图标固定 20/24px viewBox、统一线宽；装饰图标 `aria-hidden=true`，纯图标按钮有可读名称。
-- [ ] 桌面导航保留现有角色分区；移动端底栏仅保留 4～5 个最高频入口，其余进入“更多”。
-- [ ] 375～480px 将登录设备、修改密码、退出合并到账号菜单；退出仍需易发现。
-- [ ] 每页最多一个主操作；次操作降级；删除/停用/关闭等危险操作分离并确认。
-- [ ] 空态说明“现在没有什么”及“下一步可以做什么”，但不得把用户指向实际不可用的动作。
-- [ ] 角色语言保持分离：学生=任务/进度/帮助；心理老师=复核/跟进/专业解读；领导=趋势/推进/
+- [x] 建立统一 SVG 图标组件/映射，替换 `AppLayout.vue`、`KpiCard.vue` 中的 Unicode 字符图标。
+- [x] 图标固定 20/24px viewBox、统一线宽；装饰图标 `aria-hidden=true`，纯图标按钮有可读名称。
+- [x] 桌面导航保留现有角色分区；移动端底栏仅保留 4～5 个最高频入口，其余进入“更多”。
+- [x] 375～480px 将登录设备、修改密码、退出合并到账号菜单；退出仍需易发现。
+- [x] 每页最多一个主操作；次操作降级；删除/停用/关闭等危险操作分离并确认。
+- [x] 空态说明“现在没有什么”及“下一步可以做什么”，但不得把用户指向实际不可用的动作。
+- [x] 角色语言保持分离：学生=任务/进度/帮助；心理老师=复核/跟进/专业解读；领导=趋势/推进/
   逾期/资源；管理员=账号/权限/配置/作业状态。
-- [ ] 保留 `:focus-visible`、`prefers-reduced-motion`，并验证 375/768/1024/1440px。
+- [x] 保留 `:focus-visible`、`prefers-reduced-motion`，并验证 375/768/1024/1440px。
+
+##### 5.14.6.1 八条各自的落点与判据
+
+| # | 条目 | 落点 | 守卫 |
+|---|---|---|---|
+| 1 | 统一 SVG 图标 | `components/AppIcon.vue`——一张 key → path 映射，未知 key 渲染占位圆点并 `console.warn`。**它由 `cda3fc9`（§5.13.7 Phase E）引入、已在 HEAD**，所以第 1/2 两条的骨架**不在本期的 diff 里**；本期做的是拿守卫把它钉住 | `app.spec.ts:5697` |
+| 2 | viewBox / 线宽 / aria | 同上：`viewBox="0 0 24 24"`、`stroke-width="1.8"`、`aria-hidden="true"` + `focusable="false"`。尺寸由使用处 CSS 给，组件**不接 `size` prop**（同一枚图标在两处大小不同） | 同上。判据取的是**图标位里没有文字**，不是一份字符黑名单——黑名单漏一个字符不会红；而且每一处**先断图标位数量 > 0**，否则「一个图标都没渲染」的页面也满足 `0 == 0` |
+| 3 | 底栏 4~5 项 + 「更多」 | `AppLayout.vue` 的 `MOBILE_PRIMARY`（counselor / leader / admin 各 4 项，student 只有两个入口所以**没有**「更多」） | `app.spec.ts:5760`（四角色 × 各自清单）+ **本期补的第二个面** `:2291-2292`（见 5.14.6.3） |
+| 4 | 375~480px 账号菜单 | `AppLayout.vue` 顶栏：窄档把「登录设备 / 修改密码 / 退出」收进 `.account-menu` | `app.spec.ts:2616`（四档视口 × 三枚动作收进菜单；菜单里那三个名字与宽屏那三枚**逐字相同**；Esc 与遮罩可关；**展开之后再量一次溢出**） |
+| 5 | 一个主操作 / 危险操作分离 | 四处：① `ScaleRulePanel.vue` 的「放弃修改」改为先确认；② 三处「选择文件」降级为次操作；③ `CounselorWorkbenchPage.vue` 的「关闭档案」改 `.btn.danger`；④ `TasksPage.vue` 未匹配行说明按 `canWrite` 分岔 | 既有用例（本期为它改了 `app.spec.ts:6610` 那条的交通方式，见 5.14.6.2） |
+| 6 | 空态 + 不指向不可达动作 | `ExportCenterPage.vue` 的 `emptyText` 双分岔（先按筛选、再按角色）+ `TasksPage.vue` 的 `v-if="canWrite"` | `app.spec.ts:5069`（`空态与说明不指向不可达动作` 组） |
+| 7 | 角色语言分离 | 普查 + 一处修复（`DimensionsPage.vue:192`：`心理专业负责人` → `心理老师`）；`vocabulary.spec.ts` 新增 `FORBIDDEN_ROLE_NAMES` / `leakedRoleNames`，并补全 `ROLE_PAGES` | `vocabulary.spec.ts:388` / `:400`（四角色页头与正文各扫一次） |
+| 8 | `:focus-visible` + `prefers-reduced-motion` + 四档视口 | `styles.css:484`（`:focus-visible`，用 `:focus-visible` 而非 `:focus`）与 `:116`（`prefers-reduced-motion: reduce` 下停动效）——两条本来就都在，**本期一个字没改**；四档溢出由 `vocabulary.spec.ts:1351`（`ROLE_PAGES` 逐页量）与 `app.spec.ts:2616` 把守 | `app.spec.ts:5872` |
+
+##### 5.14.6.2 实测数与变异验证（都在仓库根跑）
+
+```
+  189 passed (1.4m)   # npx playwright test（全量）
+============== 869 passed, 5 warnings in 544.14s (0:09:04) ==============
+  ✓ 174 modules transformed / ✓ built in 1.09s   # cd frontend && npm run build
+```
+
+后端那 5 条 warning 里含 `analytics_service.py` 那条**既知的 SAWarning 误报**（§23 已查清、
+不要重查）。全量 e2e 与 `make test` 严格串行，两个 pytest 进程没有同时跑过（§20）。
+
+**本期全量 e2e 第一跑是 2 failed**，两条都是**既有用例的交通方式**随本期的改动而失效，
+不是新功能坏了——两处都修了，而且两处都是「本期第 3 / 第 5 条的直接后果」：
+
+| 红在哪 | 根因 | 修法 |
+|---|---|---|
+| `app.spec.ts:2276 系统管理员的导航里没有测评任务` | 它写于 2026-09-17，用的是 CSS 定位器 `page.locator('nav.nav')`；本期第 3 条让 `.nav-desktop` 与 `.nav-mobile` **两套都常驻 DOM**，于是它解析到两个元素 → strict mode violation | 改成 `nav.nav-desktop`，并**补上第二个面**：`.nav-mobile` 里也不含「测评任务」（`:2291-2292`） |
+| `app.spec.ts:6610 换一个版本读失败时，标题栏不留着上一个版本的规则号` | 第 5 条把 `ScaleRulePanel.vue` 的「放弃修改」由 `@click="load"` 改成 `@click="showDiscard = true"`，而该用例点完直接等 `.form-error`，卡在弹层开着 | 补一次 dialog 作用域的点击：`page.getByRole('dialog').getByRole('button', { name: '放弃修改' })`——**触发器与确认键同名**，`page.getByRole('button', …)` 会同时命中两个（这一写法本文件 `:5003` 早有先例） |
+
+**变异验证**：往 `.nav-mobile` 里注入一行 `<span class="nav-text">测评任务</span>`
+（`python3` 定点注入、断言 needle 恰好 1 处）→ **1 failed，红在 `:2292`**，
+而 `:2291` 的「账号与权限」先通过——**同时证明了两件事**：新加的那条断言有牙，
+以及那句「先证明有东西可扫」不是空转的。随后 `cp -p` 还原、`cmp` 报 `restored-identical`。
+
+##### 5.14.6.3 本期的三处发现，以及一次未复现的偶发
+
+**① `ROLE_PAGES` 的 redirect 陷阱：一份清单「看起来覆盖了」，实际一条都没扫到。**
+`/counselor/analytics` 与 `/leader/analytics` 在路由表里是 **redirect**（落到四个子 view），
+所以 `auditPages` 走这两条路径时**停在 redirect 的落点上**——统计分析的四个子 view
+**从未被任何角色用例扫过**，而它在清单上完全看不出缺席，读起来就像「这一块已经覆盖了」。
+这与 §18 那族「**一个不报错的失败，等于没有这一步**」是同一个形状，而且它同时骗过两个
+消费者（词汇扫描与视口溢出扫描）。补全清单是本次第 7 条的一半工作。
+
+**② 一套界面，两套导航，而 `display:none` 只挡得住无障碍树。**
+`.nav-mobile` 在 1280px 下是 `display:none`，所以 `getByRole` 找不到它——**而 CSS 定位器
+照样数得到它**。于是「只断 `.nav-desktop`」的守卫在窄屏底栏上完全是空的：底栏里混进一个
+不该有的入口，不会有任何东西红。这与 §29「**一条恒绿的守卫比没有更糟，它占着「这一条
+有人守」的位置**」是同一族。落点就是 `:2291-2292` 那两行。
+
+**③ 第 7 条是词汇要求，不是能力要求；全站唯一真违规是一处用了不存在的角色名。**
+导航与 `meta.title` 两层**本来就是分开的**（`专业分析报告` vs `学校心理工作分析摘要`，
+两个不同组件、两套措辞），所以第 7 条在这两层上是既有事实、不是本期产出。普查之后：
+
+- **修了一处**：`DimensionsPage.vue:192` 的「心理专业负责人」——**那不是这套系统里的角色**
+  （§4：角色已冻结为四类，不得恢复「心理负责人」）。改成「心理老师」，与
+  `OverviewPage.vue:126` 的「仅心理老师授权处理」同源。
+- **记录而不改两处**，各有各的理由：`ClassPortraitPage.vue:178` 的「心理老师专业研判」
+  是**能力**问题（需求已明确排除「管理员心理内容权限」那一类），不是词汇问题；
+  `StudentHelpDialog.vue:74` 的「班主任」是**真实世界的指路人**——学校里确实有班主任，
+  学生要去找的是他，而系统里没有这个角色（所以也不该有他的数据）。这两处写在这里，
+  免得下一个人把它们读成漏了。
+
+**一次未复现的偶发（如实记，没有修）**：全量 e2e 第二跑报
+`app.spec.ts:2387 卡片上的数与它点进去那个列表说的是同一个数` 1 failed / 188 passed；
+**单跑该用例 1 passed、第三跑全量 189 passed 全绿**。候选成因是它与并发用例抢账号计数
+（那张卡读「需修改密码的账号」等四个数，而 `fullyParallel` 下别的 spec 会重置密码把
+`must_change_password` 翻成真）——**未确证**，失败现场被随后的成功运行清掉了
+（`test-results/` 只在失败与下一次成功之间存在）。处置同 §29 那条：写进这里说明它有过
+一次，不假装已经修好。
 
 #### 5.14.7 测试与 Definition of Done
 
