@@ -970,6 +970,14 @@ export async function getAnalyticsReport(
 export interface ReminderItem {
   kind: string
   when: string
+  /**
+   * 与 `when` 同一件事的数值形态：负数 = 已逾期，`0` = 今天，正数 = 还有几天。
+   *
+   * 工作台要按它把「今天 / 逾期 / 一周内」与「未来 7–30 天」分开，并把后一档折起来
+   * （V2.0.0 §5.13.7 Phase E 第 5 条）。**不要改成去解 `when` 那句中文**：
+   * 那是同一个距离的第二个定义，改一次文案就静默失效。
+   */
+  days: number
   overdue: boolean
   title: string
   desc: string
@@ -1999,9 +2007,24 @@ export async function resolveAssessmentImportRow(
   })
 }
 
-/** 最近导入过哪几批（最近的在前，服务端封顶 20 条）。逐行明细走 `getAssessmentImportRows`。 */
-export async function getAssessmentImportBatches(): Promise<AssessmentImportBatchPage> {
-  return apiRequest<AssessmentImportBatchPage>('/assessment-imports')
+/**
+ * 最近导入过哪几批（最近的在前）。逐行明细走 `getAssessmentImportRows`。
+ *
+ * **窗口由调用方定**（`limit`，服务端 `le=200`，省略时用服务端默认的 20）。这一页以
+ * **名称**定位某一批（「8 月那批普查」），而一个写死的小窗口会在批次攒够之后把那一批
+ * 挤出去——屏幕上表现为「那一批不见了」，读起来像它被删了。所以调用方显式传一个大窗口，
+ * 再按 `total` 与 `items.length` 的差额说自己有没有截断（§10：凡是截断都要自己说出来）。
+ */
+export async function getAssessmentImportBatches(
+  params: { limit?: number; offset?: number } = {},
+): Promise<AssessmentImportBatchPage> {
+  const query = new URLSearchParams()
+  if (params.limit !== undefined) query.set('limit', String(params.limit))
+  if (params.offset !== undefined && params.offset > 0) query.set('offset', String(params.offset))
+  const suffix = query.toString()
+  return apiRequest<AssessmentImportBatchPage>(
+    `/assessment-imports${suffix ? `?${suffix}` : ''}`,
+  )
 }
 
 /**

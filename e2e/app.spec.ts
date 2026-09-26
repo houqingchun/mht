@@ -350,6 +350,84 @@ test.describe('Counselor Workbench', () => {
     await expect(page).toHaveURL('/counselor/data');
     await expect(page.getByRole('heading', { name: 'MHT题库版本导入' })).toBeVisible();
   });
+
+  /**
+   * Phase E 第 5 条（WORKBENCH-UX-01）：首屏优先呈现今天 / 逾期 / 待复核，
+   * 未来 7–30 天**只展示摘要**。
+   *
+   * 这条用例要证明的是第二件事**没有连带吃掉第一件事**——只断言「摘要句存在」的实现，
+   * 把 `dueReminders` 写成空数组也一样绿，而那正是这条要求最容易做坏的地方：
+   * 折起来的那一刀如果切在 `days >= 0` 上，逾期的那几条会一起从屏幕上消失，看起来
+   * 只是「这周刚好没有逾期的」。
+   *
+   * 判据全部从**服务端同一份清单**现算（`GET /counselor/reminders`），不写死条数：
+   * `seed_demo` 给的是 `today + 7`（跟进）与 `today + 30`（复测），演示库放几天之后
+   * 那几个数就会漂，写死会让这条用例红在一个与折叠无关的地方（CLAUDE.md 测试注意）。
+   * 但**必须先证明有东西可扫**，所以第一句断了 `soon` 非空。
+   */
+  test('折叠未来提醒之后，今天与逾期的那几条仍然逐条在首屏', async ({ page }) => {
+    await loginAs(page, 'counselor')
+
+    const login = await page.request.post('/api/v1/auth/login', {
+      data: { account: '13800000001', password: '123456', role: 'counselor' }
+    })
+    const headers = { Authorization: `Bearer ${(await login.json()).data.access_token}` }
+    const response = await page.request.get('/api/v1/counselor/reminders', { headers })
+    await expectOk(response, '这一条失去了取数的手段：GET /counselor/reminders')
+    const items = (await response.json()).data.items as Array<{
+      when: string
+      days: number
+      kind: string
+      overdue: boolean
+    }>
+
+    // 与 `CounselorWorkbenchPage.vue` 的 `REMINDER_SOON_DAYS` 是**同一个 7**
+    // （后端只发 `days`，不发这个分界，所以它跨这一条边界只有两处定义）。
+    const SOON_DAYS = 7
+    const soon = items.filter(r => r.days <= SOON_DAYS)
+    const later = items.filter(r => r.days > SOON_DAYS)
+    expect(
+      soon.length,
+      `服务端一周内一条提醒都没有，这条用例会退化成空转。清单：${JSON.stringify(items)}`
+    ).toBeGreaterThan(0)
+
+    const card = page.locator('article.card', { has: page.getByRole('heading', { name: '近期提醒' }) })
+    // 等首屏真的落地再量：折线与空态那句都是**取数之后**才出现的。
+    await expect(card.locator('.timeline-item, .card-body > .muted').first()).toBeVisible()
+
+    // ① **首屏逐条列出的，恰好是 `days <= 7` 那一批。**
+    //    判据是每一条的 `when`（「已逾期 1 天」/「今天」/「6 天后」）与服务端逐项对齐，
+    //    在「 · 」处切开、**不去解那句中文**（后面跟的是类别中文，那张表在
+    //    `labels.ts` 里，在这里抄一份就是第二处定义）。
+    //    少了逾期那几条 → 数组不等；折叠没生效、把更远的也列出来 → 也不等。
+    const lines = card.locator('.timeline-item')
+    await expect(lines).toHaveCount(soon.length)
+    const renderedWhen = (await card.locator('.timeline-item > .muted').allTextContents())
+      .map(text => text.split(' · ')[0].trim())
+    expect(renderedWhen, '首屏那条时间线与服务端一周内的清单对不上').toEqual(soon.map(r => r.when))
+
+    // ② **逾期仍然在首屏**（「优先呈现逾期」的可执行形式）。服务端这一刻有没有逾期
+    //    取决于演示库放了多少天，所以断的是「与它一致」而不是「≥1」——后者在刚
+    //    `make seed-demo` 完的库上会红（那一批跟进是 `today + 7`），而红的原因与折叠无关。
+    await expect(card.locator('.timeline-dot.overdue')).toHaveCount(items.filter(r => r.overdue).length)
+
+    // ③ 未来那一档**只报数**：摘要句当且仅当服务端有 `days > 7` 的条目时出现，
+    //    且**按类别各报一段**。后一半不是修辞——那是 `RETEST` 在界面上唯一的落点
+    //    （见 `e2e/vocabulary.spec.ts` 里 `UNTRANSLATED_CODES` 那一段注释：这一页守
+    //    那两个码的是**负向断言**，扫不到东西照样绿，所以它必须念出类别）。
+    const summary = card.locator('p:has-text("未来 7 天之后的提醒有")')
+    await expect(summary).toHaveCount(later.length > 0 ? 1 : 0)
+    if (later.length) {
+      await expect(summary).toContainText(`未来 7 天之后的提醒有 ${later.length} 项`)
+      const text = (await summary.textContent()) ?? ''
+      const bracketed = text.slice(text.indexOf('（') + 1, text.indexOf('，最近一项'))
+      const kinds = [...new Set(later.map(r => r.kind))]
+      expect(
+        bracketed.split('、').filter(Boolean),
+        `摘要句要按类别各报一段（这一刻的类别：${kinds.join('、')}），实际是「${bracketed}」`
+      ).toHaveLength(kinds.length)
+    }
+  });
 });
 
 // ========== Leader Overview Tests ==========
@@ -1470,10 +1548,25 @@ test.describe('专业报告工作台', () => {
     await expect(row.locator('td').nth(2)).toHaveText('V1')
 
     // 同一个作业在导出中心查得到（编号从回执里现取，不写死）。
+    //
+    // 编号要**整串命中**，不能用裸字符串做 `hasText`：那个选项是**子串**匹配，
+    // 而按天编号的作业号互为前缀。2026-09-26 在真页面上量过一次（一次性探针，跑完删）：
+    // 拿 `…-21` 当针时裸 `hasText` 命中 **8** 行（`-210`…`-219`），而那一个编号本身
+    // **一行都不在首页**——整串命中给的才是 0，也就是实话。
+    //
+    // **这一处今天不会真的红**（所以它不是那条偶发红的根因，别把它读成修好了什么）：
+    // 本用例的编号取自「当天行数 + 1」，也就是当天最大的那一个，没有比它更长的编号
+    // 能把它当子串包住。改它的理由是**让它说的正是它要做的事**——同文件里两处同类
+    // 定位器早就这么写了：`reportRow` 用 `new RegExp(\`${reportNo}(?!\\d)\`)`、
+    // `versionRow` 用 `^V${no}$`（它的注释逐字写着「避免 V1 命中 V10」）。留着裸写法
+    // 就是留一颗「换个取号口径就响」的雷，而那两个兄弟的正解就摆在上面十几行处。
+    // `toHaveCount(1)` 一个字节没改：它仍然在说「同一个作业恰好一行」。
     const jobNo = (await notice.innerText()).match(/EXPORT-[\d-]+/)?.[0]
     expect(jobNo, '导出回执里必须带着作业编号').toBeTruthy()
     await page.goto('/counselor/exports')
-    await expect(page.locator('tbody tr', { hasText: jobNo as string })).toHaveCount(1)
+    await expect(
+      page.locator('tbody tr').filter({ hasText: new RegExp(`${jobNo}(?!\\d)`) })
+    ).toHaveCount(1)
   });
 
   test('有未保存改动时四处都拦一下，保存之后不再拦', async ({ page }) => {
@@ -2070,6 +2163,78 @@ test.describe('Mobile Responsiveness', () => {
     await page.goto('/login');
     const roleTabs = page.locator('.role-tabs button');
     await expect(roleTabs).toHaveCount(4);
+  });
+
+  /**
+   * Phase E 第 7 + 8 条（NAV-UX-01）：四档视口下顶栏与工作台都必须成立，且
+   * 375–480px 把「登录设备 / 修改密码 / 退出」三枚收进账号菜单。
+   *
+   * 报告页那一侧的四档/溢出已由「专业报告工作台」的用例覆盖；这一条补的是
+   * **顶栏与工作台**。`expectBottomNavInViewport` 只在 ≤780px 调用——只有那一档
+   * `.sidebar` 才是 `position: fixed; bottom: 0`，更宽时它是普通侧栏、会随页面滚动，
+   * 那时断它「整块在视口内」会无故变红（helper 自己写着这条）。
+   *
+   * 账号菜单那一段断的是**菜单里那三个名字与宽屏那三枚逐字相同**，而不是各写一份
+   * 字面量：它们是同一个动作的两个 DOM 分支，改一处漏另一处时屏幕上就是两个名字，
+   * 而照着宽屏那个名字去菜单里找的人会找不到（缺口 7 那一族：把「看不懂」换成了
+   * 「搜不到」）。所以两边的文案用 `allTextContents()` 互相比。
+   */
+  test('四档视口下工作台不横向溢出，窄档顶栏把三枚动作收进账号菜单', async ({ page }) => {
+    await loginAs(page, 'counselor')
+
+    const reminderCard = page.locator('article.card', { has: page.getByRole('heading', { name: '近期提醒' }) })
+    // 等首屏真的落地再量：折线与空态那句都是**取数之后**才出现的，在骨架那一帧量
+    // 溢出等于什么都没量（CLAUDE.md 测试注意「先证明有东西可扫，再断言它干净」）。
+    await expect(reminderCard.locator('.timeline-item, .card-body > .muted').first()).toBeVisible()
+
+    for (const { width, height, mobile } of [
+      { width: 375, height: 812, mobile: true },
+      { width: 768, height: 1024, mobile: true },
+      { width: 1024, height: 768, mobile: false },
+      { width: 1440, height: 900, mobile: false }
+    ]) {
+      const label = `${width}px 的工作台`
+      await page.setViewportSize({ width, height })
+      await expectNoHorizontalOverflow(page, label)
+      if (mobile) await expectBottomNavInViewport(page, label)
+
+      const wideActions = page.locator('.top-action-wide:visible')
+      const accountMenu = page.locator('.account-menu')
+
+      if (width <= 480) {
+        // 第 8 条：窄档那三枚必须真的收起来。`:visible` 是判据——CSS 用
+        // `display:none` 藏它们，而 `display:none` 的元素 `:visible` 为假；
+        // 只断言「菜单在」的话，一个「菜单与三枚并存」的实现也是绿的。
+        await expect(wideActions, `${label}：顶栏那三枚动作没有收进账号菜单`).toHaveCount(0)
+        await expect(accountMenu, `${label}：账号菜单没有出现`).toBeVisible()
+
+        const trigger = accountMenu.locator('.acct-trigger')
+        await trigger.click()
+        await expect(trigger).toHaveAttribute('aria-expanded', 'true')
+        const menuItems = accountMenu.locator('.acct-pop .acct-item')
+        await expect(menuItems).toHaveCount(3)
+        // 宽屏那三枚此时 `display:none`，但 `textContent` 与渲染无关，所以这里读到
+        // 的正是它们的文案——两边排序后逐个比。
+        expect(
+          (await menuItems.allTextContents()).map(t => t.trim()).sort(),
+          `${label}：账号菜单里那三个动作与顶栏那三枚不是一个名字`
+        ).toEqual((await page.locator('.top-action-wide').allTextContents()).map(t => t.trim()).sort())
+        // 展开状态再量一次：弹层有自己的定位与宽度，页面不溢出不代表它不溢出。
+        await expectNoHorizontalOverflow(page, `${label} 的账号菜单展开时`)
+        // 第 9 条（键盘）：Esc 收起，焦点此刻在 `.acct-trigger` 上、事件冒泡到菜单。
+        await page.keyboard.press('Escape')
+        await expect(menuItems).toHaveCount(0)
+        // 再开一次，点遮罩收起——遮罩是这一层唯一的「点别处关闭」（刻意没有
+        // document 外点监听，见 `AppLayout.vue` 那一段注释）。
+        await trigger.click()
+        await expect(menuItems).toHaveCount(3)
+        await accountMenu.locator('.acct-backdrop').click()
+        await expect(menuItems).toHaveCount(0)
+      } else {
+        await expect(wideActions, `${label}：宽屏上三枚动作应当直接可见`).toHaveCount(3)
+        await expect(accountMenu, `${label}：宽屏上不该出现账号菜单`).toBeHidden()
+      }
+    }
   });
 });
 
@@ -3841,6 +4006,88 @@ test.describe('布局完整性', () => {
     // 246px rail; a collapsed grid would make it full-width or zero-height.
     expect(box!.width).toBeGreaterThan(200);
     expect(box!.width).toBeLessThan(300);
+  });
+
+  /**
+   * Phase E 第 1/2/3 条（NAV-UX-01）：图标一律是 `AppIcon` 的 SVG，不再是充当图标的
+   * Unicode 字符。
+   *
+   * 这一组此前**零覆盖**——侧栏 `navConfig` 的那批几何字符、`KpiCard` 的七个、
+   * 排序指示符的三档（`▲` / `▼` / `⇅`）以及弹窗关闭按钮那个 `×`，全部换成 `AppIcon`
+   * 之后没有任何一条用例看得见。而这类改动**恰好是最容易悄悄回退的**：
+   * `<AppIcon name="x" />` 换回 `×` 只改一个字符，界面上仍然「有个叉」，
+   * 全站所有文本断言照旧绿。
+   *
+   * 判据取的是**图标位里没有文字**，不是一份字符黑名单：任何 Unicode 字符塞进
+   * `.nav-icon` 都会让它的 `textContent` 非空，而黑名单只挡得住列进去的那几个。
+   * 两者在旧写法下都会红，但只有前者挡得住下一个人换上的那个字符。
+   *
+   * 三处写法上的讲究，少一条这条用例就会假绿：
+   * - **读 `textContent` 而不是 `innerText`**：`innerText` 对不可见元素返回空串，
+   *   而 `.nav-submenu` 是 `v-show`（收起来时 `display:none`）——用它会在图标**没换**
+   *   的实现上收到一列空串，断言反而是绿的。
+   * - **每一处先证明有东西可扫**：先断言图标位数量 > 0，再断言 svg 数量与之相等。
+   *   只写后半句的话，一个「图标位一个都没渲染」的页面也满足 `0 == 0`。
+   * - **`aria-hidden` / `focusable="false"` 与 viewBox / 线宽一起断**：它们是第 2 条
+   *   那两句承诺的可执行形式——「装饰图标不打扰读屏软件」与「任意两个图标放在一行里
+   *   视觉重量一致」。可读名称归**按钮**自己（`.modal-close` 的 `aria-label`），
+   *   不归它里面那个图形（§15 那条分工）。
+   *
+   * 变异验证（各自只红这一条）：把任一处的 `AppIcon` 换回字符（红在「图标位里还有
+   * 文字」与 svg 计数两条上）、把 `stroke-width` 改成 `2`（红在线宽）、
+   * 把 `aria-hidden` 摘掉（红在装饰性）。
+   */
+  test('图标走 AppIcon 的 SVG，不再是充当图标的 Unicode 字符', async ({ page }) => {
+    await loginAs(page, 'counselor');
+
+    const assertIcons = async (selector: string, label: string) => {
+      const slots = page.locator(selector);
+      const count = await slots.count();
+      expect(count, `${label}：一个图标位都没渲染，下面的断言会空转`).toBeGreaterThan(0);
+      const svgs = page.locator(`${selector} svg.app-icon`);
+      await expect(svgs, `${label}：图标位的数量与 svg 的数量对不上`).toHaveCount(count);
+
+      // 图标位里不该有任何文字——这正是「图形不再是文字」的判据。
+      expect(
+        await slots.evaluateAll((els) => els.map((el) => (el.textContent ?? '').trim())),
+        `${label}：图标位里还有文字（Unicode 字符充当图标的旧写法）`
+      ).toEqual(new Array(count).fill(''));
+
+      for (const shape of await svgs.evaluateAll((els) =>
+        els.map((el) => ({
+          viewBox: el.getAttribute('viewBox'),
+          strokeWidth: el.getAttribute('stroke-width'),
+          hidden: el.getAttribute('aria-hidden'),
+          focusable: el.getAttribute('focusable'),
+        }))
+      )) {
+        expect(shape.viewBox, `${label}：坐标系不统一`).toBe('0 0 24 24');
+        expect(shape.strokeWidth, `${label}：线宽不统一`).toBe('1.8');
+        expect(shape.hidden, `${label}：装饰图标必须 aria-hidden`).toBe('true');
+        expect(shape.focusable, `${label}：SVG 要退出 tab 序列`).toBe('false');
+      }
+    };
+
+    // ① 侧栏（counselor 实测 12 个图标位；`v-show` 收着的子菜单那几项也在 DOM 里）。
+    //    它在每一页都在。
+    await page.goto('/counselor/tasks');
+    await expect(page.locator('.nav-icon').first()).toBeVisible();
+    await assertIcons('.nav-icon', '侧栏导航');
+
+    // ② 可排序表头的三档指示符（`sort` / `sort-asc` / `sort-desc`）。
+    await expect(page.locator('tbody tr').first()).toBeVisible();
+    await assertIcons('.sort-indicator', '可排序表头');
+
+    // ③ 纯图标按钮：图形是 svg，可读名称在按钮自己身上。
+    await page.getByRole('button', { name: '查看明细' }).first().click();
+    await expect(page.locator('.modal-panel')).toBeVisible();
+    await assertIcons('.modal-close', '弹窗关闭按钮');
+    await expect(page.locator('.modal-close')).toHaveAttribute('aria-label', '关闭');
+
+    // ④ 指标卡——另一处出现过字符图标的地方，落在统计页上。
+    await page.goto('/counselor/analytics/overview');
+    await expect(page.locator('.kpi-icon').first()).toBeVisible();
+    await assertIcons('.kpi-icon', '指标卡');
   });
 });
 

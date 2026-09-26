@@ -188,6 +188,58 @@ def test_reminders_are_not_flagged_truncated_below_the_cap(client):
     assert data["truncated"] is False
 
 
+def test_reminders_carry_the_distance_as_a_number_sorted_by_it(client):
+    """每条提醒都带 `days`，而且**按它排**（不是按那句中文的字典序）。
+
+    这是 V2.0.0 §5.13.7 Phase E 第 5 条的前置：工作台要把「今天 / 逾期 / 一周内」
+    与「未来 7–30 天」分开、并把后一档折起来，而载荷里此前只有一句中文（`when`）。
+    让视图去解那句话是同一个距离的第二个定义——改一次文案就静默失效。
+
+    排的那一半是**真的错过的 bug**：`when` 按字典序排时 `"10 天后" < "5 天后"`
+    （`'1' < '5'`），所以「最近的那个」排在第十天之后。它此前一直是这样，而屏幕上
+    看起来只是一个正常的列表。所以这里必须**同时**有两个不同的未来日期——
+    只放一个的话，把排序键换回 `when` 这条用例照样是绿的。
+    """
+    submit_for_student(client, yes_numbers={85})
+    counselor = auth_headers(client, "counselor", "13800000001")
+    case = client.get("/api/v1/care-cases", headers=counselor).json()["data"]["items"][0]
+
+    # 故意先插远的、再插近的：插入次序与期望次序相反，所以「碰巧按插入次序」也过不去。
+    for offset in (10, 5):
+        created = client.post(
+            f"/api/v1/care-cases/{case['case_id']}/follow-ups",
+            headers=counselor,
+            json={
+                "record_type": "心理老师访谈",
+                "confirmed_facts": f"约定 {offset} 天后再谈。",
+                "next_follow_up_date": (date.today() + timedelta(days=offset)).isoformat(),
+            },
+        )
+        assert created.status_code == 200, created.text
+    # 外加一条逾期的（负数那一档）。
+    overdue = client.post(
+        f"/api/v1/care-cases/{case['case_id']}/follow-ups",
+        headers=counselor,
+        json={
+            "record_type": "心理老师访谈",
+            "confirmed_facts": "这条已经过期了。",
+            "next_follow_up_date": (date.today() - timedelta(days=3)).isoformat(),
+        },
+    )
+    assert overdue.status_code == 200, overdue.text
+
+    items = client.get("/api/v1/counselor/reminders", headers=counselor).json()["data"]["items"]
+
+    # 逾期在前，再按天的远近升序——三档各出现一次，正负都验到。
+    assert [item["days"] for item in items] == [-3, 5, 10], items
+    # `days` 与 `when` 说的是同一件事（只断 `days` 的话，一个把符号写反的实现
+    # 只要 `when` 还照旧拼就仍然是绿的）。
+    assert items[0]["when"] == "已逾期 3 天"
+    assert items[0]["overdue"] is True
+    assert items[1]["when"] == "5 天后"
+    assert items[1]["overdue"] is False
+
+
 def test_a_closed_case_drops_out_of_the_reminder_panel(client):
     """关掉档案之后，它的待办不再出现在提醒面板上。
 

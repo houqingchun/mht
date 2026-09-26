@@ -205,13 +205,29 @@ def assessment_import_commit(
 def assessment_import_batches(
     current_user: AssessmentImporter,
     db: Annotated[Session, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ):
-    """最近导入过哪几批（最近的在前，最多 20 条）。
+    """最近导入过哪几批（最近的在前）。
+
+    **窗口由调用方定，默认 20**（2026-09-26）。此前它写死在服务层的函数默认值里，
+    调用方没有地方说「我要看得更远一点」——而这一页恰恰需要：它以**名称**定位某一批
+    （「8 月那批普查」），而写死的窗口会在批次攒够之后把那一批挤出可见范围，
+    界面上表现为「那一批不见了」，读起来像它被删了。
+
+    写死一个更大的数不是同一条修法：那只是把出界的时间往后推，而**出界时仍然没有
+    任何一句话**（`total` 一直是发出去的，从前没有读者）。所以窗口交给调用方，
+    截断由调用方按 `total` 与 `len(items)` 说出来（§10）。
+
+    上限 200 与逐行明细那两个端点同值（`le=200`）：这一页一次列几百批没有意义，
+    而一个不带上限的 `limit` 会让一份坏请求把整张表拖出来。
 
     逐行明细**不在这个响应里**：一批普查是几百行，把每一批的行全带上会让这一页
-    为了显示 20 行批次而传输几万行。要明细走下面那个端点。
+    为了显示几行批次而传输几万行。要明细走下面那个端点。
     """
-    result = list_import_batches(db, school=school_for_import(db))
+    result = list_import_batches(
+        db, school=school_for_import(db), limit=limit, offset=offset
+    )
     actors = _actors(db, [batch.imported_by for batch in result["items"]])
     return ok(
         {

@@ -335,11 +335,25 @@ async function loadAssessmentTasks() {
   }
 }
 
+/**
+ * 这一页一次要多少批。
+ *
+ * **200 不是「够用了」，是「界面上限」**（服务端 `le=200`，与逐行明细那两个端点同值）。
+ * 它此前是一个写死在服务层的 20，而这张表以**名称**定位某一批（「8 月那批普查」），
+ * 20 行在批次攒够之后会把那一批挤出去——屏幕上表现为「那一批不见了」，读起来像它被删了。
+ * 调到 200 只是把出界的时间往后推（共享演示库上每跑一轮 e2e 就多几批），所以**真正
+ * 让这件事不再静默的是 `batchHistoryTruncated`**：出界那天屏幕上会写明还有多少没列出来。
+ */
+const BATCH_HISTORY_LIMIT = 200
+
+/** 库里比这张表多出批次时为真——那句话就是 §10 要的「截断要自己说出来」。 */
+const batchHistoryTruncated = computed(() => historyTotal.value > batchHistory.value.length)
+
 async function loadBatchHistory() {
   historyLoading.value = true
   historyError.value = ''
   try {
-    const page = await getAssessmentImportBatches()
+    const page = await getAssessmentImportBatches({ limit: BATCH_HISTORY_LIMIT })
     batchHistory.value = page.items
     historyTotal.value = page.total
   } catch (err) {
@@ -1024,7 +1038,13 @@ onUnmounted(() => {
     <div class="card" style="margin-top:17px">
       <div class="card-head">
         <h2>导入批次</h2>
-        <span class="muted tiny">最近 {{ historyTotal }} 批 · 最新的在前</span>
+        <!-- 这一格说的是**这张表里此刻有几行**，不是「库里有几批」——两个数截断时不同，
+             而从前它写的是后者（`最近 {{ historyTotal }} 批`），于是一张只列了 20 行的表
+             在标题上宣称有 200 批，而「还有多少没显示」一个字都没有。§10 那条
+             「凡是截断，都要自己说出来」在这里的落点就是下面那一句。 -->
+        <span class="muted tiny">
+          共 {{ historyTotal }} 批 · 显示最近 {{ batchHistory.length }} 批
+        </span>
       </div>
       <div class="card-body">
         <SkeletonBlock v-if="historyLoading" variant="table" :rows="3" />
@@ -1078,6 +1098,15 @@ onUnmounted(() => {
             </tbody>
           </table>
         </div>
+        <!-- §10：凡是截断，都要自己说出来，并给一条出路。这一页的窗口是 200 批，
+             所以这句话在真实学校的数据上几乎不会出现——但「几乎不出现」正是它必须
+             存在的原因：它出现的那一天，屏幕上不能是一张看起来完整的表。
+             出路写着**去哪里找**（审计日志按动作搜），而不是「请自行想办法」。 -->
+        <p v-if="batchHistoryTruncated" class="muted tiny" style="margin:9px 0 0">
+          另有 {{ historyTotal - batchHistory.length }} 批较早的没有列出来（这一页按时间倒序显示最近
+          {{ batchHistory.length }} 批）。更早的那些可以在「审计日志」里按动作「导入测评记录」查到，
+          每一批的编号就是那一行的对象编号。
+        </p>
       </div>
     </div>
 

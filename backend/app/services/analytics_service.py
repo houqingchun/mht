@@ -1284,6 +1284,14 @@ def counselor_reminders(db: Session, user: UserAccount) -> dict:
     cap the caller cannot see is a lie about the workload: the panel's badge said
     「20 项」 whether there were 20 reminders or 400. `total` counts the whole set in
     the caller's scope and the UI reports the truncation when they differ.
+
+    `days` is the same distance `when` spells out in Chinese, as a number:
+    negative = overdue, `0` = today, positive = days ahead. It exists because the
+    workbench has to tell 「今天 / 逾期 / 一周内」 from 「未来 7–30 天」 and then
+    collapse the latter (V2.0.0 §5.13.7 Phase E 第 5 条). Without it the view would
+    have to parse 「已逾期 3 天」 / 「5 天后」 — a second definition of a distance the
+    server already knows, and one that breaks in silence the day anyone rewords the
+    sentence. It is additive: `when` stays the string the timeline prints.
     """
     if not scope_allows(db, user.role_code, STUDENT_PSYCH_DETAIL, allow={SCOPED}):
         raise AppError("ROLE_FORBIDDEN", "当前角色无权执行该操作", 403)
@@ -1324,6 +1332,7 @@ def counselor_reminders(db: Session, user: UserAccount) -> dict:
             {
                 "kind": "FOLLOW_UP",
                 "when": when,
+                "days": days,
                 "overdue": overdue,
                 # `title` 是**主题**，不是整句话：类别由 `kind` 单独下发，中文由
                 # `labels.ts` 的 `REMINDER_KIND_LABELS` 渲染。此前这里写成
@@ -1347,6 +1356,7 @@ def counselor_reminders(db: Session, user: UserAccount) -> dict:
             {
                 "kind": "RETEST",
                 "when": f"{days} 天后" if days >= 0 else f"已逾期 {abs(days)} 天",
+                "days": days,
                 "overdue": days < 0,
                 "title": student.masked_name,
                 "desc": retest.reason,
@@ -1355,7 +1365,12 @@ def counselor_reminders(db: Session, user: UserAccount) -> dict:
         )
 
     # Overdue first, then nearest due date.
-    items.sort(key=lambda item: (not item["overdue"], item["when"]))
+    #
+    # 排的是 `days` 而不是 `when`：那一串中文按字典序排，`"10 天后" < "5 天后"`，
+    # 所以「最近的那个」会排在第十天之后（2026-09-26 修，与 `days` 同一批）。
+    # 它此前一直是这样，而屏幕上看起来只是一个正常的列表——直到前端按 `days`
+    # 把未来那一档折起来，折起来的那一批的**首条**才需要真的是最近的那条。
+    items.sort(key=lambda item: (not item["overdue"], item["days"]))
 
     # 计数是一次 SELECT COUNT，不是「把上面那批数一数」——后者数的是**被截断后的**
     # 那一批，正是这条要修的东西。

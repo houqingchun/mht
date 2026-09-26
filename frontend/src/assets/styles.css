@@ -294,6 +294,14 @@
   border-color: #9eafc1;
 }
 
+/* 按下态（V2.0.0 §5.13.7 Phase E 第 4 条：交互项要有 hover / active / disabled）。
+   用 `transform` 而不是改底色：底色那一条会被 `.primary` / `.danger` 这些**特异度
+   更高**的规则盖住（`.btn.primary:hover` 是 0,3,0 而 `.btn:active` 只有 0,2,0），
+   而位移没有第二个人声明，所以在四种按钮上一致生效。 */
+.btn:active {
+  transform: translateY(1px);
+}
+
 .btn.primary {
   color: #fff;
   background: var(--blue);
@@ -521,9 +529,15 @@ body {
 
 .nav-chevron {
   margin-left: auto;
-  font-size: 1.1rem;
+  display: grid;
+  place-items: center;
   transform: rotate(90deg);
   transition: transform 0.18s ease;
+}
+
+.nav-chevron .app-icon {
+  width: 16px;
+  height: 16px;
 }
 
 .nav-group-trigger[aria-expanded="false"] .nav-chevron {
@@ -546,13 +560,34 @@ body {
 
 .nav-subitem .nav-icon {
   width: 16px;
-  font-size: 0.78rem;
+}
+
+.nav-subitem .app-icon {
+  width: 16px;
+  height: 16px;
+}
+
+/* 全站唯一的图标（`components/AppIcon.vue`，V2.0.0 §5.13.7 Phase E）。
+   尺寸只在这一处定基准，使用处按需覆盖——组件自己不接 size prop，理由写在它的文件头。 */
+.app-icon {
+  display: block;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+/* 学生答题页那句「选择后自动保存」的前缀图标。需要这一层 flex 是因为 `.app-icon`
+   自己是 `display: block`——直接放进一行文字里会把它挤到单独一行。 */
+.auto-save-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .nav-icon {
   width: 20px;
-  text-align: center;
-  font-weight: 850;
+  display: grid;
+  place-items: center;
 }
 
 .nav-spacer {
@@ -578,6 +613,14 @@ body {
   backdrop-filter: blur(14px);
 }
 
+/* 顶栏左侧那一块。`min-width: 0` 是**窄屏能省略号收尾的前提**——flex 子项的默认
+   `min-width: auto` 让它不肯缩到内容宽度以下，于是下面的 `text-overflow: ellipsis`
+   永远轮不到（V2.0.0 §5.13.7 Phase E 第 8 条：先把三枚按钮收进账号菜单，
+   再让标题自己会缩，而不是给标题焊死一个 `max-width`）。 */
+.top-id {
+  min-width: 0;
+}
+
 .top-title {
   font-size: 1.04rem;
   font-weight: 800;
@@ -593,6 +636,85 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+/* 窄屏的账号菜单（V2.0.0 §5.13.7 Phase E 第 8 条）。宽屏上整块不出现——那一档
+   三枚按钮直接排着（`.top-action-wide`），与 `.sidebar` 在 780px 以下变成底部导航
+   是同一个做法：两套都在 DOM 里，媒体查询选一套。断点定在 480px，与那一档既有的
+   顶栏规则同处（见文件末尾的 `@media (max-width: 480px)`）。 */
+.account-menu {
+  display: none;
+  position: relative;
+}
+
+.acct-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+/* 复用既有的 `chevron-right`，转 90° 就是向下——不为一个箭头再加一个 key
+   （`AppIcon` 的键是语义的，`chevron-down` 与 `chevron-right` 是同一个形状）。 */
+.acct-caret {
+  display: inline-flex;
+  transform: rotate(90deg);
+}
+
+.acct-caret .app-icon {
+  width: 15px;
+  height: 15px;
+}
+
+/* 只在菜单开着时存在。它盖住整屏，所以点任何别处都落成一次关闭——不用给
+   `document` 挂监听（那个要在卸载时摘掉，而这一层被卸载的路径最容易漏）。 */
+.acct-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+}
+
+.acct-pop {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 31;
+  min-width: 150px;
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 14px 34px rgba(15, 32, 54, 0.16);
+}
+
+.acct-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 9px 11px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  font: inherit;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.acct-item:hover {
+  background: #f2f6fb;
+}
+
+/* 键盘焦点环由全站那条 `:focus-visible` 给（`styles.css` 开头），不在这里另写。 */
+.acct-item:active {
+  background: #e7eef7;
+}
+
+/* 这三项今天都不会被禁用，但 `.acct-item` 是一类可复用的条目——留一条明确的禁用
+   态，比等哪天有人给它加 `:disabled` 时发现「按下去还有反应」便宜（同上第 4 条）。 */
+.acct-item:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
 }
 
 /* Inline checkbox + label, used for row and select-all toggles. */
@@ -712,8 +834,19 @@ body {
 
 .sort-indicator {
   margin-left: 5px;
-  font-size: 0.7rem;
   color: #9aa5b4;
+  /* 表头那一行是 inline 排的，所以这里自己变成 inline-flex 再垂直居中——
+     换成 SVG 之后没有字体的基线可以对齐了（`.app-icon` 基础规则是 `display:block`，
+     直接放着会把表头撑高一整行）。 */
+  display: inline-flex;
+  vertical-align: -2px;
+}
+
+/* 表头里那三枚比 `.app-icon` 默认的 20px 小一档（表头字号是 0.78rem）：
+   尺寸归使用处的 CSS，这是 `AppIcon.vue` 文件头第二条说好的覆盖方式。 */
+.sort-indicator .app-icon {
+  width: 14px;
+  height: 14px;
 }
 
 [aria-sort="ascending"] .sort-indicator,
@@ -1655,7 +1788,9 @@ dd {
   height: 32px;
   border: none;
   background: transparent;
-  font-size: 1.4rem;
+  /* `font-size` 随 `×` 一起删掉了（Phase E 第 3 条）：那一个字号的唯一作用是给那个
+     字符定大小，换成 `<AppIcon>` 之后尺寸由 `.app-icon` 的 20px 说了算。留着一个
+     不再起作用的字号，下一个人会以为「这里的图标是靠它定大小的」。 */
   color: #647386;
   cursor: pointer;
   border-radius: 6px;
@@ -1952,8 +2087,12 @@ dd {
   border-radius: 50%;
   display: grid;
   place-items: center;
-  font-size: 0.75rem;
   flex-shrink: 0;
+}
+
+.toast-icon .app-icon {
+  width: 14px;
+  height: 14px;
 }
 
 .toast-success .toast-icon {
@@ -1986,8 +2125,13 @@ dd {
   color: #9aa5b4;
   cursor: pointer;
   border-radius: 4px;
-  font-size: 1rem;
+  display: grid;
+  place-items: center;
   flex-shrink: 0;
+}
+.toast-dismiss .app-icon {
+  width: 15px;
+  height: 15px;
 }
 
 .toast-dismiss:hover {
@@ -2910,8 +3054,21 @@ tbody tr:hover td {
 }
 
 @media (max-width: 480px) {
+  /* V2.0.0 §5.13.7 Phase E 第 8 条：这一档把「登录设备 / 修改密码 / 退出」收进账号
+     菜单。此前那一档的处置是给标题加 `max-width: 70px` 加省略号，也就是**在挤压
+     之后做补救**——屏幕上的标题剩下「心理…」，而三枚按钮仍然把右边占满。
+     现在收起的是按钮，标题按可用宽度自己缩。 */
+  .top-action-wide {
+    display: none;
+  }
+
+  .account-menu {
+    display: block;
+  }
+
+  /* 宽度交给 flex 分配（`.top-id` 的 `min-width: 0` 就是为此），`max-width` 不再
+     写死——写死的那一个正是这次要换掉的东西。 */
   .top-title {
-    max-width: 70px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

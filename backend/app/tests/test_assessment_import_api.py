@@ -2123,6 +2123,62 @@ def test_the_batch_list_shows_every_batch_of_the_school(client, db_session):
     assert newest["total_rows"] == 1
 
 
+def test_the_batch_window_is_the_callers_to_choose(client):
+    """批次列表的窗口由调用方定，**默认仍是 20**（2026-09-26 用户裁决 (a)）。
+
+    这一页以**名称**定位某一批（「8 月那批普查」），而窗口此前写死在服务层的函数默认值里
+    （`list_import_batches(..., limit: int = 20)`），调用方没有地方说「我要看得更远一点」
+    ——出界那天界面上表现为「那一批不见了」，**读起来像它被删了**，而当时连一句话都没有
+    （表头写的是库里的总数，表里只有 20 行，§10「凡是截断，都要自己说出来」在这张表上
+    是空转的）。
+
+    四条一起断，缺一条这个改动就可能只做了一半：
+
+    ① **不传参时默认值仍是 20**（行为一字不变，读 openapi 而不是造 21 批——造 21 批
+       能证明的还是同一件事，代价是二十次上传解析）；
+    ② 传了就**真的按它截**（窗口是生效的，不是一个被忽略的参数）；
+    ③ `offset` 生效（能给的不只是「前 N 批」）；
+    ④ **`total` 始终是整所学校的总数、与窗口无关**——界面正是拿它与 `len(items)`
+       的差额说出「另有 K 批没有列出来」的。**只做 ② 不做 ④ 的实现在屏幕上仍然是
+       一张看起来完整的表**，而那一句提示正是这次改动的重点。
+
+    三批用**不同的文件内容**（`_reusable_batch` 按 `file_sha256` 判同一个文件，
+    同操作者 + 同指纹 + 仍是 `PREVIEW` 会被复用成一批），否则这里造出来的是 1 批。
+    """
+    headers = counselor(client)
+    for index in range(3):
+        _preview_data(
+            client,
+            headers,
+            _csv([_row("赵同学", 2, 12, 1, 4, duration=f"{5000 + index}秒")]),
+            batch_name=f"九月普查-{index}",
+        )
+
+    # ① 默认值仍在 openapi 里（一个数字：合同的一部分，不是实现细节）
+    spec = client.get("/openapi.json").json()
+    path = next(p for p in spec["paths"] if p.endswith("/assessment-imports"))
+    parameters = {item["name"]: item for item in spec["paths"][path]["get"]["parameters"]}
+    assert parameters["limit"]["schema"]["default"] == 20
+    assert parameters["limit"]["schema"]["maximum"] == 200
+    assert parameters["offset"]["schema"]["default"] == 0
+
+    # ② 窗口生效：3 批里要 2 批
+    windowed = client.get("/api/v1/assessment-imports?limit=2", headers=headers)
+    assert windowed.status_code == 200, windowed.text
+    data = windowed.json()["data"]
+    assert [item["batch_name"] for item in data["items"]] == ["九月普查-2", "九月普查-1"]
+
+    # ④ 而 total 数的是整所学校（3），不是这一页列出来的那 2 行——差额就是界面上
+    #    那句「另有 1 批较早的没有列出来」的来源
+    assert data["total"] == 3
+
+    # ③ offset 生效：窗口能往后挪
+    tail = client.get("/api/v1/assessment-imports?limit=2&offset=2", headers=headers)
+    assert tail.status_code == 200, tail.text
+    assert [item["batch_name"] for item in tail.json()["data"]["items"]] == ["九月普查-0"]
+    assert tail.json()["data"]["total"] == 3
+
+
 def test_the_row_detail_is_the_same_judgement_as_the_upload(client):
     """逐行明细走的是**上传时那一处范围过滤**，不是把刚建的行原样发出来。
 

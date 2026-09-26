@@ -1,5 +1,6 @@
 <script setup lang="ts" generic="T extends Record<string, any>">
 import { computed, ref, watch } from 'vue'
+import AppIcon from './AppIcon.vue'
 
 export interface Column {
   key: string
@@ -172,8 +173,15 @@ function ariaSort(column: Column) {
               @keydown.space.prevent="toggleSort(column)"
             >
               {{ column.label }}
+              <!-- 三档走 `AppIcon`（Phase E 第 3 条）：它们此前是 `▲` / `▼` / `⇅`，
+                   字形由字体决定——客户机上落进另一套字形时，这三枚的粗细与基线
+                   与旁边那行字对不上，而排序状态正是靠它们读的。
+                   `aria-hidden` 保留：语义由 `th` 自己的 `aria-sort` 承担
+                   （§15：`aria-sort` 只给可排序的列）。 -->
               <span v-if="column.sortable" class="sort-indicator" aria-hidden="true">
-                {{ sortKey === column.key ? (sortOrder === 'asc' ? '▲' : '▼') : '⇅' }}
+                <AppIcon
+                  :name="sortKey === column.key ? (sortOrder === 'asc' ? 'sort-asc' : 'sort-desc') : 'sort'"
+                />
               </span>
             </th>
           </tr>

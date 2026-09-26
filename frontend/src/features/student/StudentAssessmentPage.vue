@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import AppIcon from '../../components/AppIcon.vue'
 import ConfirmDialog from '../../components/ConfirmDialog.vue'
 import Modal from '../../components/Modal.vue'
 import SkeletonBlock from '../../components/SkeletonBlock.vue'
@@ -310,7 +311,13 @@ onMounted(loadSession)
           <ErrorState v-if="error" :message="error" />
 
           <div class="question-foot">
-            <span class="muted tiny">{{ saving ? '保存中…' : '✓ 选择后自动保存，可随时退出后继续' }}</span>
+            <!-- 那个「✓」走 `AppIcon`（Phase E 第 3 条）：它是全站最后一处「Unicode
+                 字符充当视觉符号」的活体，字形由字体决定。它对读屏软件没有信息量
+                 （旁边那句话本身就是完整的），所以图标 `aria-hidden`、这里不补文字。 -->
+            <span class="muted tiny auto-save-hint">
+              <template v-if="saving">保存中…</template>
+              <template v-else><AppIcon name="check" /> 选择后自动保存，可随时退出后继续</template>
+            </span>
             <div class="actions">
               <button class="btn" :disabled="isFirstQuestion" @click="previous">上一题</button>
               <button v-if="!isLastQuestion" class="btn primary" @click="next">下一题</button>

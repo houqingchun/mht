@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { modalZIndex, pushModal, dropModal } from '../composables/modalStack'
+import AppIcon from './AppIcon.vue'
 
 const props = withDefaults(defineProps<{
   modelValue: boolean
@@ -209,7 +210,12 @@ onUnmounted(deactivate)
                 :title="expanded ? '退出全屏展示' : '全屏展示'"
                 @click="toggleExpanded"
               >{{ expanded ? '退出全屏' : '全屏' }}</button>
-              <button v-if="!persistent" class="modal-close" type="button" @click="onBackdropClick" aria-label="关闭">×</button>
+              <!-- 图形走 `AppIcon`（Phase E 第 3 条）：此前里面是一个 `×` 字符，
+                   字形由字体决定（有的字体里它偏小、偏上）。可读名称仍然在**按钮**
+                   自己身上（`aria-label="关闭"`），图标是装饰——§15 那条分工没变。 -->
+              <button v-if="!persistent" class="modal-close" type="button" @click="onBackdropClick" aria-label="关闭">
+                <AppIcon name="x" />
+              </button>
             </div>
           </header>
           <div class="modal-body">

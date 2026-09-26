@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { getToasts, removeToast } from '../services/toast'
 import { ref, onMounted, onUnmounted } from 'vue'
+import AppIcon from './AppIcon.vue'
 
 const items = ref(getToasts())
 const timer = ref<ReturnType<typeof setInterval> | null>(null)
@@ -40,9 +41,14 @@ onUnmounted(() => {
     aria-atomic="false"
   >
     <div v-for="toast in items" :key="toast.id" :class="['toast', `toast-${toast.type}`]">
-      <span class="toast-icon" aria-hidden="true">{{ toast.type === 'success' ? '✓' : toast.type === 'error' ? '✕' : 'ℹ' }}</span>
+      <span class="toast-icon" aria-hidden="true">
+        <AppIcon :name="toast.type === 'success' ? 'check' : toast.type === 'error' ? 'x' : 'info'" />
+      </span>
       <span class="toast-text">{{ toast.text }}</span>
-      <button class="toast-dismiss" type="button" @click="removeToast(toast.id)">×</button>
+      <!-- 纯图标按钮：可读名称挂在 `<button>` 上，不在里面那个图形上（§15 无障碍契约）。 -->
+      <button class="toast-dismiss" type="button" aria-label="关闭" @click="removeToast(toast.id)">
+        <AppIcon name="x" />
+      </button>
     </div>
   </TransitionGroup>
 </template>

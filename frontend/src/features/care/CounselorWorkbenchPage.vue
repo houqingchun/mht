@@ -226,6 +226,57 @@ const notesError = ref('')
 const remindersHidden = computed(() => Math.max(0, reminderTotal.value - reminders.value.length))
 
 /**
+ * 「一周之内」的分界（V2.0.0 §5.13.7 Phase E 第 5 条：工作台首屏优先呈现
+ * 今天 / 逾期 / 待复核，未来 7–30 天**默认折叠或只展示摘要**）。
+ *
+ * 7 是判据的一部分，不是排版参数——下面那句摘要里写的也是「7 天之后」，
+ * 两处要一起改。
+ */
+const REMINDER_SOON_DAYS = 7
+
+/**
+ * 首屏要看见的那一批。服务端已经按「逾期优先、再按天的远近」排过序，
+ * 所以这里**只切分、不重排**——重排就是同一件事的第二个排序口径（§11 那条「同源」）。
+ *
+ * 判据是 `days`（负数 = 逾期，0 = 今天）而不是去解 `when` 那句中文：
+ * 「已逾期 3 天」/「5 天后」的文本解析是同一个距离的第二个定义，
+ * 改一次文案就静默失效（后端为此专门发了 `days`，见 `analytics_service.counselor_reminders`）。
+ */
+const dueReminders = computed(() => reminders.value.filter(r => r.days <= REMINDER_SOON_DAYS))
+
+/**
+ * 未来 8–30 天。**不逐条列出、也不做展开**：`assets/styles.css` 的 `.timeline`
+ * 有 460px 上限，那是量出来的（2026-09-17：22 条全铺开 1805px，把工作台拉成 1941px；
+ * 2026-09-20 实测可见 6 条 / 共 9 条），而第 5 条明文允许的另一支是「只展示摘要」。
+ * 所以这一段只报数 + 说最近的一条在哪天 + 给出口。
+ */
+const laterReminders = computed(() => reminders.value.filter(r => r.days > REMINDER_SOON_DAYS))
+
+/** 折叠那批里最近的一条在几天后。读服务端排好的次序，不在这里再排一遍。 */
+const laterSoonestDays = computed(() => laterReminders.value[0]?.days ?? 0)
+
+/**
+ * 折叠那一档**按类别**分出来的数，拼成「复测 6 项」这样一句。
+ *
+ * 加这一条不是修辞：**首屏折叠之后，这一句是 `RETEST` 在界面上唯一的落点**。
+ * 实测（2026-09-26，开发库）：20 条提醒里 `days <= 7` 的 14 条全是 `FOLLOW_UP`，
+ * 6 条 `RETEST` 全在 `days = 29`——也就是说折起来之后，上面那条时间线一次都不会再
+ * 渲染「复测」这两个字。而 `e2e/vocabulary.spec.ts` 正是在 `/counselor/workbench`
+ * 上守 `REMINDER_KIND_LABELS` 那两个码的（2026-09-20 建的覆盖）。
+ * **它是负向断言，扫不到东西照样绿**——覆盖会静默归零，所以那一句必须念出类别。
+ * 换句话说：删掉这个 computed 不会让任何用例变红，只会让一个真实的守卫空转。
+ *
+ * 类别中文一律走 `labels.ts` 的 `reminderKindLabel`（§3 第一面），
+ * 不在视图里写第二张码表——写在这里就等于把 `labelOf` 的「认不出原样回退」也一起绕过，
+ * 而那正是这个守卫要抓的两种故障之一。
+ */
+const laterKindSummary = computed(() => {
+  const counts = new Map<string, number>()
+  for (const item of laterReminders.value) counts.set(item.kind, (counts.get(item.kind) ?? 0) + 1)
+  return [...counts.entries()].map(([kind, count]) => `${reminderKindLabel(kind)} ${count} 项`).join('、')
+})
+
+/**
  * 两个副面板各自记自己的失败。
  *
  * 2026-09-17 修：此前 `Promise.allSettled` 的两个 rejected 分支**都是空的**，
@@ -782,8 +833,8 @@ onMounted(load)
           <div class="card-body">
             <ErrorState v-if="notesError" :message="notesError" :on-retry="loadPanels" />
             <template v-else>
-              <div v-if="reminders.length" class="timeline">
-                <div v-for="(r, i) in reminders" :key="i" class="timeline-item">
+              <div v-if="dueReminders.length" class="timeline">
+                <div v-for="(r, i) in dueReminders" :key="i" class="timeline-item">
                   <div class="timeline-dot" :class="{ overdue: r.overdue }"></div>
                   <!-- 类别走 `labels.ts`（§3 第一面），不在视图里写三元：那句
                        `kind === 'RETEST' ? '复测' : '跟进'` 会把认不出的第三类
@@ -793,7 +844,12 @@ onMounted(load)
                   <div class="timeline-text">{{ r.desc }}</div>
                 </div>
               </div>
-              <div v-else class="muted tiny">近 30 天内没有待办跟进或复测。</div>
+              <!-- 两句的判据不同，不能合成一句：`reminders` 为空说的是「这份清单本来就是
+                   空的」，而「一周内为空、更远的地方有」不是空态——它是**被折叠**，
+                   下一句紧接着就说那几条在哪。合成一句会让前者替后者说话（§14）。 -->
+              <div v-else class="muted tiny">
+                {{ reminders.length ? '一周内没有待办跟进或复测。' : '近 30 天内没有待办跟进或复测。' }}
+              </div>
               <!-- 截断必须自己说出来。没有这一句，20 条与 400 条长得一模一样，
                    而这一块正是老师排工作量的地方。 -->
               <p v-if="remindersTruncated" class="muted tiny" style="margin-top:10px">
@@ -803,9 +859,23 @@ onMounted(load)
                    没有截断时这一支同样要写：`.timeline` 有 460px 的上限，19 条里
                    14 条在折线之下——**没有超过服务端的 20 条上限，所以上面那句不出现**，
                    而屏幕上看起来就是「提醒只有这五条」。它与队列那一句是同一类声明
-                   （「你看到的这份清单是不是全部」），差别是这一处裁的是**高度**。 -->
-              <p v-else-if="reminders.length" class="muted tiny" style="margin-top:10px">
-                共 {{ reminders.length }} 项，列表可上下滚动；逐条处理请到「重点关注学生」。
+                   （「你看到的这份清单是不是全部」），差别是这一处裁的是**高度**。
+                   数的是 `dueReminders` 而不是 `reminders`：这段话说的是**上面那块**
+                   （一周内那一批）有几条，说 `reminders.length` 会把折叠掉的那几条
+                   也算进来——那是同一屏上第二句会撒谎的话（§14）。 -->
+              <p v-else-if="dueReminders.length" class="muted tiny" style="margin-top:10px">
+                上面共 {{ dueReminders.length }} 项（一周内），列表可上下滚动；逐条处理请到「重点关注学生」。
+              </p>
+              <!-- 未来 7–30 天那一档**只报数，不逐条列出**（Phase E 第 5 条：
+                   「默认折叠或只展示摘要」，取后者——展开会让 `.timeline` 突破 460px
+                   那个量出来的上限，见 `styles.css` 那两段注释）。
+                   徽标写的是 30 天内的总数，而上面那块只装得下一周内的，两者之差就是这一句；
+                   所以这句话**必须出现**，否则读者会以为「{{ reminderTotal }} 项」全在上面那五条里。
+                   `laterKindSummary` 那一段解释了为什么这里要念出**类别**（它是 `RETEST`
+                   在界面上的唯一落点），不要因为「一句话更短」把它删掉。 -->
+              <p v-if="laterReminders.length" class="muted tiny" style="margin-top:6px">
+                未来 7 天之后的提醒有 {{ laterReminders.length }} 项（{{ laterKindSummary }}，最近一项在
+                {{ laterSoonestDays }} 天后），这里只报数、未逐条列出；要看这几条请到「重点关注学生」。
               </p>
             </template>
           </div>
