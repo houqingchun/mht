@@ -1255,6 +1255,35 @@ h1 {
   background: #e0f8f8;
 }
 
+/* ★ 窄屏上帮助入口**退出固定层、随内容走**（V2.0.0 §5.14.2 的 375px 验收项）。
+   两版固定方案都在 375px 上实测过，两版都被判掉：
+
+   - 维持 `bottom: 24px`：底部导航 `.sidebar` 是 fixed、z-index 40、不透明，
+     box y[599,667]；浮钮 box y[597,643] 整个落在它底下。`document.elementFromPoint`
+     在浮钮**中心**返回的是 `<A class="nav-btn">完成记录` ——学生的求助入口在手机上
+     **点不到**，而屏幕上它看起来只是"被裁掉一半"。
+   - 抬到 `bottom: 80px`：浮钮 y[541,587] 与 `.question-foot .actions` y[538,578]
+     相交，在「下一题」的中心命中的是 `BUTTON.help-fab`——**浮钮反过来压住了主操作**。
+
+   根因是那句「fixed 元素不参与文档流」：窄屏上它谁也不挤开，于是「被导航盖住」
+   与「盖住内容」二者必居其一，**加 padding 只挪得动内容、挪不动浮钮**。
+   出路是让它进流——在文档流里它就不可能盖住任何东西，而三个学生页各自在页尾
+   都渲染了它，照样找得到、点得到，键盘也走得到。
+   `padding-bottom` 留在页根上：进流之后它仍要在底部导航之上收尾。
+   （`.student-page` 这个类存在的唯一理由就是这三个有浮钮的页面。） */
+@media (max-width: 780px) {
+  .student-page,
+  .student-assessment-page {
+    padding-bottom: 76px;
+  }
+  .help-fab {
+    position: static;
+    display: block;
+    width: 100%;
+    margin: 18px 0 0;
+  }
+}
+
 .progress {
   height: 9px;
   border-radius: 99px;

@@ -32,9 +32,22 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "school_name": "青禾实验学校",
         "brand_name": "心晴",
         "brand_subtitle": "心理测评与关怀平台",
-        "counselling_room": "综合楼3层305室",
-        "counselling_hours": "周一至周五 12:30—17:30",
-        "counselling_contact": "陈老师 · 分机8305",
+        # 这三项**出厂是空的**，而且必须空着。
+        #
+        # 它们此前各有一个出厂的示例值（「综合楼3层305室」「陈老师 · 分机8305」），
+        # 而唯一的读者是学生端的「我想找人聊聊」弹层——也就是说，一所学校只要没有
+        # 主动去改这三格，它的学生打开那个弹层看到的是一间**不存在的辅导室**和一个
+        # **不存在的老师**。学生照着它去找人，找不到；而屏幕上那句话看起来像是
+        # 学校自己写的（旁边还有校名）。虚构一个联系人比不写联系人危险得多——
+        # 前者会让人白跑一趟，后者只是让人去问。
+        #
+        # 所以示例搬到 `SettingsPage.vue` 的 `placeholder` 上：同一句话，读者从
+        # 「每所学校的学生」变成「正在配置这一格的管理员」，那里的语义就是示例。
+        # 空值时弹层只出通用指引（可信成年人 / 家长 / 学校心理老师 / 当地紧急服务），
+        # 见 `StudentHelpDialog.vue`——**不猜、不补一个默认值**。
+        "counselling_room": "",
+        "counselling_hours": "",
+        "counselling_contact": "",
     },
     # These are de-facto enums that were previously free-text inputs, which let
     # the same concept be recorded under several different strings.

@@ -156,20 +156,30 @@ onMounted(load)
       <div class="card pad">
         <!-- 机构标识 -->
         <div v-if="activeTab === 'org'" class="settings-grid">
+          <!-- 最后三项是学生端「我想找人聊聊」弹层里那三行，**出厂是空的**。
+               示例写在这里的 `placeholder` 上，而不是写成 DEFAULTS 的值：
+               写进 DEFAULTS 的话，没配过的学校的学生会看到一间不存在的辅导室和
+               一个不存在的老师（见 `settings_service.DEFAULTS` 那段注释）。
+               placeholder 的读者是正在填这一格的管理员，那里的语义本来就是示例。 -->
           <label v-for="field in [
-            { key: 'school_name', label: '学校名称' },
-            { key: 'brand_name', label: '平台名称' },
-            { key: 'brand_subtitle', label: '平台副标题' },
-            { key: 'counselling_room', label: '心理辅导室位置' },
-            { key: 'counselling_hours', label: '开放时间' },
-            { key: 'counselling_contact', label: '校内联系方式' }
+            { key: 'school_name', label: '学校名称', hint: '' },
+            { key: 'brand_name', label: '平台名称', hint: '' },
+            { key: 'brand_subtitle', label: '平台副标题', hint: '' },
+            { key: 'counselling_room', label: '心理辅导室位置', hint: '如 综合楼3层305室' },
+            { key: 'counselling_hours', label: '开放时间', hint: '如 周一至周五 12:30—17:30' },
+            { key: 'counselling_contact', label: '校内联系方式', hint: '如 陈老师 · 分机8305' }
           ]" :key="field.key" class="field">
             <span>
               {{ field.label }}
               <span v-if="isCustomised('org', field.key)" class="customised-mark" title="已自定义">已改</span>
             </span>
-            <input v-model="(draft.org as any)[field.key]" type="text" />
+            <input v-model="(draft.org as any)[field.key]" type="text" :placeholder="field.hint" />
           </label>
+          <div class="notice">
+            最后三项会显示在学生端的「我想找人聊聊」里。<b>留空</b>时那里只出通用指引
+            （可信任的成年人、家长、学校心理老师、当地紧急服务），不会显示任何联系方式
+            ——所以请照着学校实际的情况填，不要照抄上面的示例。
+          </div>
         </div>
 
         <!-- 关怀词表 -->

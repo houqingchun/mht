@@ -235,6 +235,43 @@ def student_for_user(db: Session, user: UserAccount) -> Student:
     return student
 
 
+def _question_counts(db: Session, scale_ids: set[int]) -> dict[int, int]:
+    """每份量表版本有几道题，一次查完（`{scale_id: 题数}`）。
+
+    这是学生端「共 N 题」那个分母的**唯一来源**，而它读的正是答题页读的那张表
+    （`ScaleQuestion` 按 `scale_id`）——所以列表上的分母与实际渲染出来的题号个数
+    同源，题库换版本时两处一起走（§13：题数只定义一次）。
+
+    此前学生端根本没有这个数，`StudentHomePage.vue` 与 `StudentHistoryPage.vue`
+    各自写死了一个 100。那不是「差一点」：一所学校的量表是 60 题时，一名答满
+    全部题目的学生会看到「已答 60 / 100」，而一个答了 40 题就交卷的会看到
+    「已答 40 / 100」——两句话都在说一件没发生过的事。
+
+    批量查而不是逐行查：一场普查下每个学生有好几行，逐行查就是几次多余的往返。
+    """
+    if not scale_ids:
+        return {}
+    rows = db.execute(
+        select(ScaleQuestion.scale_id, func.count(ScaleQuestion.id))
+        .where(ScaleQuestion.scale_id.in_(scale_ids))
+        .group_by(ScaleQuestion.scale_id)
+    ).all()
+    return {scale_id: count for scale_id, count in rows}
+
+
+def _question_count(counts: dict[int, int], scale_id: int | None) -> int | None:
+    """一份量表的题数，**没有题就是 `None`，不是 `0`**。
+
+    `0` 是一个能当分母的数（进度条会算出 `0/0`），而「这一版量表里一道题都没有」
+    的诚实读法是「这个数还不知道 / 这一版没有题」——界面照 `None` 分岔，只显示
+    已答数、不显示分母（§11：`None` 与 `0` 在界面上必须长得不一样）。
+    """
+    if scale_id is None:
+        return None
+    count = counts.get(scale_id)
+    return count or None
+
+
 def list_student_tasks(db: Session, user: UserAccount) -> list[dict]:
     student = student_for_user(db, user)
     rows = db.execute(
@@ -259,6 +296,7 @@ def list_student_tasks(db: Session, user: UserAccount) -> list[dict]:
         .where(AssessmentTarget.student_id == student.id, active_task_predicate())
         .order_by(AssessmentTask.id.desc())
     ).all()
+    counts = _question_counts(db, {task.scale_id for task, _target, _session in rows})
     result = []
     for task, target, session in rows:
         answered_count = 0
@@ -272,6 +310,8 @@ def list_student_tasks(db: Session, user: UserAccount) -> list[dict]:
                 "id": task.id,
                 "task_no": task.task_no,
                 "name": task.name,
+                # 这一场一共多少题（分母）。学生端按它算进度与百分比，不再写死 100。
+                "question_count": _question_count(counts, task.scale_id),
                 # 与心理老师看到的那个列表用同一个判据（`effective_task_status`）。
                 # 学生端现在不显示这一项（`StudentHomePage.vue` 按 `target_status`
                 # 判断自己的进度），但同一个后端不该给两个人两种「这场测评的状态」。
@@ -314,6 +354,7 @@ def list_student_assessment_history(db: Session, user: UserAccount) -> list[dict
         .where(AssessmentTarget.student_id == student.id, active_task_predicate())
         .order_by(AssessmentTask.id.desc())
     ).all()
+    counts = _question_counts(db, {task.scale_id for task, _target, _session in rows})
     items = []
     for task, target, session in rows:
         answered_count = 0
@@ -327,6 +368,8 @@ def list_student_assessment_history(db: Session, user: UserAccount) -> list[dict
                 "task_name": task.name,
                 "status": target.status,
                 "answered_count": answered_count or 0,
+                # 同上：记录页的「已答 N / M 题」里那个 M，不再写死 100。
+                "question_count": _question_count(counts, task.scale_id),
                 "submitted_at": session.submitted_at.isoformat() if session and session.submitted_at else None,
                 "duration_seconds": session.duration_seconds if session else None,
                 # 学生也该知道这场测评不是在本系统里做的。他在自己的记录里看到一条

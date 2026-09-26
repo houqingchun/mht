@@ -2765,6 +2765,559 @@ test.describe('学生端信任与进度', () => {
   });
 });
 
+// ========== 学生端安心作答（P1，§5.14.2） ==========
+
+/**
+ * 一份**只活在内存里**的答题服务端（五个端点），供这一组用例驱动。
+ *
+ * 为什么必须打桩，而不是拿 `S001` 的真实会话：`playwright.config.ts` 是
+ * `fullyParallel: true`，而演示库里 `S001` 只有一条 `IN_PROGRESS` 会话，它同时被
+ * 「Student Assessment Flow」（`serial`）与别处的用例读写。任何「答了 2 题之后界面
+ * 该长这样」的断言落在共享会话上，都会与别人此刻正在答的那几题抢——而那种红与功能
+ * 无关（与「不要靠改测试让库里的数据好看」是同一条规矩的两面）。
+ *
+ * 打桩之后这一组用例的输入完全由它自己决定：题数、已有答案、以及服务端**收到过什么**
+ * （`state.submitCalls`）。判据用**判定函数** / 正则而不是 `**\/api\/v1\/…` 那种通配
+ * ——路径里带 id 的三个端点尤其要这样，否则 `/assessment-sessions` 会把
+ * `/assessment-sessions/{id}/questions` 一起吃掉。
+ *
+ * `answered_count` 与 `current_question_no` 全部由 `state.answers` **现推**（服务端
+ * 本来就是按题存的），于是「界面上的数」与「服务端手上的数」不可能各说各话。
+ */
+const STUB_TASK_ID = 9001
+const STUB_SESSION_ID = 90011
+
+interface StubCard {
+  id: number
+  name: string
+  /** 这一场自己的状态（ACTIVE / NOT_STARTED / CLOSED…）：决定按钮点不点得动。 */
+  status: string
+  target_status: string
+  answered_count?: number
+  /** 省掉 = 本场题数（`questionCount`）；显式给 `null` = 「这个数还不知道」。 */
+  question_count?: number | null
+  end_at?: string | null
+}
+
+async function installAssessmentStubs(
+  page: Page,
+  options: {
+    cards: StubCard[]
+    questionCount?: number
+    initialAnswers?: Record<string, 'YES' | 'NO'>
+    /**
+     * 扣住答案保存的答复不放，直到测试自己调 `state.releaseAnswers()`。
+     *
+     * 要证明的是「学生按下的那一刻屏幕上就生效」（§13），而那种断言**不能用会重试的
+     * `expect`**：等往返的实现迟早在重试里等到那个数，于是它证明不了「立即」。
+     * 判据只能是一次**同步读**，而同步读要成立，就必须保证读数时那个答复确实还没回来
+     * ——用时长去保证是要靠运气的（Tab 走多久不由这条用例决定），所以这里用一道闸门。
+     */
+    holdAnswers?: boolean
+  }
+) {
+  const questionCount = options.questionCount ?? 10
+  const liveCardId = options.cards.some((card) => card.id === STUB_TASK_ID) ? STUB_TASK_ID : null
+  const gate = { released: !options.holdAnswers, waiters: [] as Array<() => void> }
+  const awaitGate = () =>
+    gate.released ? Promise.resolve() : new Promise<void>((resolve) => gate.waiters.push(resolve))
+  const state = {
+    answers: { ...(options.initialAnswers ?? {}) } as Record<string, 'YES' | 'NO'>,
+    /** 服务端一共收到过几次交卷：用来断言「没答满就没有提交出去」。 */
+    submitCalls: 0,
+    /** 放行被 `holdAnswers` 扣住的答复。没扣住时调它什么也不做。 */
+    releaseAnswers: () => {
+      gate.released = true
+      gate.waiters.splice(0).forEach((resolve) => resolve())
+    },
+  }
+  const envelope = (data: unknown) => ({ success: true, data, request_id: 'e2e', error: null })
+  const questionNos = () => Array.from({ length: questionCount }, (_, index) => index + 1)
+  const storedCount = () => questionNos().filter((no) => state.answers[String(no)]).length
+  /** 服务端口径：第一道没答的题（答满了就是 null）。答题页的 `pickStart` 读它。 */
+  const firstMissing = () => questionNos().find((no) => !state.answers[String(no)]) ?? null
+
+  const sessionPayload = () => ({
+    id: STUB_SESSION_ID,
+    task_id: STUB_TASK_ID,
+    student_id: 1,
+    scale_id: 1,
+    scale_version: 'MHT-1.1.0',
+    status: storedCount() === questionCount ? 'SUBMITTED' : 'IN_PROGRESS',
+    current_question_no: firstMissing(),
+    answered_count: storedCount(),
+    answers: { ...state.answers },
+  })
+
+  await page.route(
+    (url) => url.pathname === '/api/v1/student/tasks',
+    (route) =>
+      route.fulfill({
+        json: envelope({
+          items: options.cards.map((card) => ({
+            ...card,
+            task_no: `E2E-${card.id}`,
+            start_at: null,
+            end_at: card.end_at ?? null,
+            completed_at: null,
+            question_count:
+              card.question_count === undefined ? questionCount : card.question_count,
+            // 「答题中」那张卡片的进度跟着服务端走：学生答一题，首页上那句
+            // 「已答 N / M 题」就该跟着动（§11：同一个数只能有一个来源）。
+            answered_count: card.id === liveCardId ? storedCount() : (card.answered_count ?? 0),
+            session_id: card.id === liveCardId ? STUB_SESSION_ID : null,
+          })),
+        }),
+      })
+  )
+
+  await page.route(
+    (url) => url.pathname === '/api/v1/assessment-sessions',
+    (route) => route.fulfill({ json: envelope(sessionPayload()) })
+  )
+
+  await page.route(
+    (url) => /^\/api\/v1\/assessment-sessions\/\d+\/questions$/.test(url.pathname),
+    (route) =>
+      route.fulfill({
+        json: envelope({
+          items: questionNos().map((no) => ({
+            question_no: no,
+            question_text: `E2E 第 ${no} 题：最近我常觉得心里不踏实`,
+          })),
+        }),
+      })
+  )
+
+  await page.route(
+    (url) => /^\/api\/v1\/assessment-sessions\/\d+\/answers\/\d+$/.test(url.pathname),
+    async (route) => {
+      const no = route.request().url().split('/').pop() as string
+      const body = route.request().postDataJSON() as { answer: 'YES' | 'NO' }
+      // 收下这一题（服务端确实拿到手了），答复先扣着——见 `holdAnswers`。
+      state.answers[no] = body.answer
+      await awaitGate()
+      await route.fulfill({ json: envelope(sessionPayload()) })
+    }
+  )
+
+  await page.route(
+    (url) => /^\/api\/v1\/assessment-sessions\/\d+\/submit$/.test(url.pathname),
+    async (route) => {
+      state.submitCalls += 1
+      await route.fulfill({
+        json: envelope({
+          session_id: STUB_SESSION_ID,
+          status: 'SUBMITTED',
+          calculation_status: 'CALCULATED',
+          calculation_error: null,
+          submitted_at: '2026-09-26T10:00:00',
+          tested_at: '2026-09-26T10:00:00',
+          tested_at_source: 'ONLINE_SUBMIT',
+          // 非 null：走的才是「成绩也算出来了」那一句 toast。另一句
+          // （「成绩处理还需要老师再看一下」）是给评分失败的答卷的。
+          result: { id: 1, status: 'CALCULATED' },
+        }),
+      })
+    }
+  )
+
+  return state
+}
+
+/**
+ * 375px 下的几何体检：横向溢出、帮助浮钮可达、以及**可点的主操作**有没有被盖住。
+ *
+ * 判据用 `document.elementFromPoint`（点在中心，落到谁身上）而不是「两个矩形相不相交」：
+ * 相交是正常的——浮动按钮本来就压在内容上方那一层，真正要问的是点击会被谁接走。
+ *
+ * 两处**刻意的跳过**，各自都曾经造成过误报：
+ *
+ * - **`[disabled]` 控件不进来**：`elementFromPoint` 会跳过被禁用的表单控件、返回它的
+ *   父元素，于是一个灰掉的「上一题」永远命中 `DIV.actions`。那是 `elementFromPoint`
+ *   的性质，不是遮挡（第一版就是在这里报了一次假）。
+ * - **视口外的元素不算**：没滚到它那里，它本来就不该被点到。
+ */
+async function narrowGeometry(page: Page) {
+  return page.evaluate(() => {
+    const hitAt = (el: Element) => {
+      const rect = el.getBoundingClientRect()
+      const cx = rect.x + rect.width / 2
+      const cy = rect.y + rect.height / 2
+      const onScreen = cy >= 0 && cy <= window.innerHeight && cx >= 0 && cx <= window.innerWidth
+      const text = (el as HTMLElement).innerText.replace(/\s+/g, ' ').trim().slice(0, 20)
+      if (!onScreen) return { text, onScreen, covered: false, hitClass: '' }
+      const hit = document.elementFromPoint(cx, cy)
+      return {
+        text,
+        onScreen,
+        covered: !(hit === el || el.contains(hit)),
+        hitClass: hit ? String((hit as HTMLElement).className) : '(none)',
+      }
+    }
+    const controls = Array.from(
+      document.querySelectorAll(
+        '.task-card button.primary, ' +
+          '.question-foot .actions button:not([disabled]), ' +
+          '.question-secondary button:not([disabled])'
+      )
+    )
+    const fab = document.querySelector('.help-fab')
+    const fabHit = fab ? hitAt(fab) : null
+    return {
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+      controlCount: controls.length,
+      fabPosition: fab ? getComputedStyle(fab).position : 'missing',
+      fabOnScreen: fabHit?.onScreen ?? false,
+      fabCovered: fabHit?.covered ?? false,
+      controls: controls.map(hitAt),
+    }
+  })
+}
+
+/** 滚动取样点：0 与 1 就是顶部与底部，中间三点是为了扫过它们之间那些位置。 */
+const NARROW_STOPS = [0, 0.25, 0.5, 0.75, 1] as const
+
+/**
+ * 375px 体检。四条判据，**第一条是根因、也是唯一真正挡住这一档的那一条**，
+ * 其余三条是它的可见后果。
+ *
+ * 1. **帮助浮钮不在固定层**（`position` 是 `static` / `relative` / `sticky` 之一）。
+ *    这不是「实现细节」：窄屏上 `fixed` 的元素**谁也不挤开**，于是「被底部导航盖住」
+ *    与「盖住内容」二者必居其一——加 `padding` 只挪得动内容、挪不动它。
+ *    所以「退出固定层」正是本条验收的要求本身，而不是达成它的某一种写法。
+ *    两种固定写法都实测过、都被判掉（理由与两组量出来的坐标在 `styles.css` 那一段）。
+ * 2. **它从没接走某个主操作的点击**——扫过整页取样。
+ * 3. 任何位置都没有横向溢出。
+ * 4. 滚到底时浮钮自己在屏幕上、并且点得到（它是文档流里的最后一行）。
+ *
+ * ★ **第 2 条抓不住「退回固定层」那一档，实测过，别把它读成第 1 条的替代品。**
+ * 把 `.help-fab` 注回 `position: fixed; bottom: 80px`、**只关掉第 1 条**，这条用例
+ * 仍然是**绿的**。原因是夹具的版式：stub 的题干只有一行，内容在底部导航之上就结束了，
+ * 于是那个固定浮钮悬在「内容末尾」与「底栏上沿」之间那条**空隙**里，谁也没碰着。
+ * 它盖住东西是有条件的——真实页面上题干长得多，`.question-foot` 才会落在浮钮那一行
+ * （探针实测：`document.elementFromPoint` 在「下一题」的中心返回 `BUTTON.help-fab`，
+ * `covered: true`）。
+ *
+ * 所以第 2 条的**准确说法**是「在这个夹具的版式下，浮钮有没有盖住主操作」。它有牙
+ * （浮钮盒子变大、被写成 `width: 100%` 这类形状它会红），但它**证明不了**「没有隔着
+ * 空隙的遮挡」——夹具的版式与真实页面不同。这是「先证明有东西可扫」的另一种形状：
+ * 一条判据说自己守住了某件事，而夹具里那件事根本没机会出现。真正不依赖版式的是第 1 条，
+ * 两条都在，各说各的。
+ *
+ * **只按「谁压着它」判，不按「压没压着」判**：手机上滚动中途有内容从固定底栏下面
+ * 经过是正常的——`padding-bottom: 76px` 的意义正是「滚得到它」。把「被底栏压住」
+ * 也算违规，一条题干只有一行的短页面上那两枚次级按钮就会红，而**浮钮根本没碰它们**
+ * （第一版就是这么红的，报错里那句 `position=static` 说明浮钮根本不在固定层）。
+ * 那是会为与浮钮无关的原因变红的守卫，而会无故变红的守卫很快会被人关掉。
+ */
+async function expectNarrowGeometry(page: Page, label: string) {
+  const maxScroll = await page.evaluate(
+    () => document.documentElement.scrollHeight - document.documentElement.clientHeight
+  )
+  let lastGeometry = await narrowGeometry(page)
+
+  for (const stop of NARROW_STOPS) {
+    await page.evaluate((y) => window.scrollTo(0, y), Math.round(maxScroll * stop))
+    await page.waitForTimeout(120)
+    lastGeometry = await narrowGeometry(page)
+    const at = `${label} ${Math.round(stop * 100)}%`
+
+    // 先证明这一屏真的有可点的主操作，否则下面那条是空转的。
+    expect(lastGeometry.controlCount, `${at}：一个可点的主操作都没有`).toBeGreaterThan(0)
+    expect(
+      lastGeometry.scrollWidth,
+      `${at}：横向溢出 ${lastGeometry.scrollWidth}/${lastGeometry.clientWidth}`
+    ).toBe(lastGeometry.clientWidth)
+    expect(
+      lastGeometry.controls
+        .filter((item) => item.onScreen && item.covered && item.hitClass.includes('help-fab'))
+        .map((item) => item.text),
+      `${at}：这些主操作被帮助浮钮接走了（浮钮 position=${lastGeometry.fabPosition}）`
+    ).toEqual([])
+  }
+
+  // 根因那一半。允许 `relative` / `sticky`——它们同样在文档流里，也就同样盖不住东西。
+  expect(
+    ['static', 'relative', 'sticky'].includes(lastGeometry.fabPosition),
+    `${label}：帮助浮钮在窄屏上仍处于固定层（position=${lastGeometry.fabPosition}），` +
+      '那样它要么被底部导航盖住、要么盖住内容'
+  ).toBe(true)
+  expect(lastGeometry.fabOnScreen, `${label}：滚到底时帮助浮钮不在屏幕上`).toBe(true)
+  expect(
+    lastGeometry.fabCovered,
+    `${label}：滚到底时帮助浮钮点不到（position=${lastGeometry.fabPosition}）`
+  ).toBe(false)
+}
+
+test.describe('学生端安心作答（P1）', () => {
+  test('四种任务卡状态各自说清「能不能答、为什么」', async ({ page }) => {
+    await installAssessmentStubs(page, {
+      questionCount: 10,
+      cards: [
+        { id: 9101, name: 'E2E 新任务', status: 'ACTIVE', target_status: 'NOT_STARTED' },
+        { id: 9102, name: 'E2E 答题中', status: 'ACTIVE', target_status: 'IN_PROGRESS', answered_count: 8 },
+        { id: 9103, name: 'E2E 已完成', status: 'ACTIVE', target_status: 'COMPLETED', answered_count: 10 },
+        { id: 9104, name: 'E2E 未开始', status: 'NOT_STARTED', target_status: 'NOT_STARTED' },
+        { id: 9105, name: 'E2E 已结束', status: 'CLOSED', target_status: 'NOT_STARTED', end_at: '2026-08-31T23:59:00' },
+        // 「题数还不知道」是一种真实状态（`question_count` 按契约可空），
+        // 而它与「题数为 0」在界面上必须长得不一样：分母不出现，预计时长也不出现。
+        { id: 9106, name: 'E2E 题数未知', status: 'ACTIVE', target_status: 'IN_PROGRESS', answered_count: 3, question_count: null },
+      ],
+    })
+    await loginAs(page, 'student')
+
+    const card = (name: string) => page.locator('.task-card', { hasText: name })
+    await expect(page.locator('.task-card')).toHaveCount(6)
+
+    // 能答的两张（外加题数未知那张）才有主按钮；其余三张是灰的。
+    await expect(page.locator('.task-card button.primary')).toHaveCount(3)
+    await expect(page.locator('.task-card button[disabled]')).toHaveCount(3)
+
+    // ① 新任务：还没开始，说得出还剩多少、要多少时间
+    await expect(card('E2E 新任务')).toContainText('共 10 题，尚未开始')
+    await expect(card('E2E 新任务').getByRole('button', { name: '开始作答' })).toBeEnabled()
+    await expect(card('E2E 新任务')).toContainText(/预计约 \d+ 分钟/)
+
+    // ② 答题中：进度是「已答 N / M 题」，按钮换成「继续作答」
+    await expect(card('E2E 答题中')).toContainText('已答 8 / 10 题')
+    await expect(card('E2E 答题中').getByRole('button', { name: '继续作答' })).toBeEnabled()
+    await expect(card('E2E 答题中')).toContainText(/预计约 \d+ 分钟/)
+
+    // ③ 已完成：按钮不可点，且**不再许诺时长**
+    await expect(card('E2E 已完成')).toContainText('已完成全部 10 题')
+    await expect(card('E2E 已完成').getByRole('button', { name: '已完成' })).toBeDisabled()
+    await expect(card('E2E 已完成')).toContainText('你已经交过这一场')
+    await expect(card('E2E 已完成')).not.toContainText('预计约')
+
+    // ④ 未开始：灰按钮上的字与后端 `effective_task_status` 的口径同源（§12），
+    //    并说得出什么时候开始。
+    await expect(card('E2E 未开始').getByRole('button', { name: '未开始' })).toBeDisabled()
+    await expect(card('E2E 未开始')).toContainText('这一场还没有开始。')
+    await expect(card('E2E 未开始')).not.toContainText('预计约')
+
+    // ⑤ 已结束：同样点不动，并说出截止时间——这一条与后端那道门逐字对齐：
+    //    界面说已结束时 `create_or_get_session` 就真的开不了。
+    await expect(card('E2E 已结束').getByRole('button', { name: '已结束' })).toBeDisabled()
+    await expect(card('E2E 已结束')).toContainText('这一场已于')
+    await expect(card('E2E 已结束')).not.toContainText('预计约')
+
+    // ⑥ 题数未知：只报已答数，不编一个分母，也不编一个时长
+    await expect(card('E2E 题数未知')).toContainText('已答 3 题')
+    await expect(card('E2E 题数未知')).not.toContainText('共 10 题')
+    await expect(card('E2E 题数未知')).not.toContainText('预计约')
+    await expect(card('E2E 题数未知').getByRole('button', { name: '继续作答' })).toBeEnabled()
+  })
+
+  test('答一部分后保存退出，重新登录仍从原题继续，进度与答案都不丢', async ({ page }) => {
+    await installAssessmentStubs(page, {
+      questionCount: 3,
+      cards: [{ id: STUB_TASK_ID, name: 'E2E 可作答', status: 'ACTIVE', target_status: 'NOT_STARTED' }],
+    })
+    await loginAs(page, 'student')
+    // 「中途退出不会白做」这件事要先在点进去之前说，否则它答不上学生不开始作答的原因。
+    await expect(page.getByText('作答时每选一题都会自动保存')).toBeVisible()
+
+    await startableTask(page).click()
+    await page.waitForURL(/\/student\/assessment\/9001/)
+
+    const bar = page.locator('.assessment-bar')
+    await expect(bar).toContainText('第 1 题')
+    await expect(bar).toContainText('已完成 0/3')
+
+    await page.getByRole('button', { name: '是', exact: true }).click()
+    await expect(bar).toContainText('已完成 1/3')
+    await page.getByRole('button', { name: '下一题' }).click()
+    await page.getByRole('button', { name: '否', exact: true }).click()
+    await expect(bar).toContainText('第 2 题')
+    await expect(bar).toContainText('已完成 2/3')
+
+    // 用键盘走到「暂不继续，保存退出」（验收里「键盘可完成保存退出」那一条）。
+    await tabUntil(page, (el) => el.text.includes('暂不继续，保存退出'), '保存退出按钮')
+    await page.keyboard.press('Enter')
+
+    await page.waitForURL(/\/student\/home/)
+    await expect(
+      page.locator('.toast', { hasText: '已保存：答了 2/3 题，下次从这一题接着答' })
+    ).toBeVisible()
+    const card = page.locator('.task-card', { hasText: 'E2E 可作答' })
+    await expect(card).toContainText('已答 2 / 3 题')
+    await expect(card.getByRole('button', { name: '继续作答' })).toBeEnabled()
+
+    // 重新登录一次（`loginAs` 会 `goto('/login')`，而登录页不会因为本地还留着 token
+    // 就把人弹走）。光标键按会话 id 命名，**不在登出清理的范围内**——它记的是
+    // 「这一场我上次看到第几题」，下一名学生读到也认不出自己那一场。
+    await loginAs(page, 'student')
+    await startableTask(page).click()
+    await page.waitForURL(/\/student\/assessment\/9001/)
+    await expect(bar).toContainText('第 2 题')
+    await expect(bar).toContainText('已完成 2/3')
+    // 答案本身也在：第 2 题答的是「否」。
+    await expect(page.locator('.answer-grid button.selected')).toHaveText('否')
+  })
+
+  test('有漏答时不能误导为已完成：提交被拦下，并说清还差几题', async ({ page }) => {
+    const state = await installAssessmentStubs(page, {
+      questionCount: 4,
+      initialAnswers: { 1: 'YES' },
+      cards: [{ id: STUB_TASK_ID, name: 'E2E 有漏答', status: 'ACTIVE', target_status: 'IN_PROGRESS' }],
+    })
+    await loginAs(page, 'student')
+
+    // 光标钉在第 4 题（最后一题，那里才有「提交测评」）。
+    //
+    // 「中间有一道题没答」这个形状**点不出来**：`next()` 要求当前题已作答（否则
+    // 只给一句「请先选择一个答案」），`previous()` 只会往回走，而 `pickStart` 又优先
+    // 取「第一道未答题」——所以一路点下来永远是连续的。这里的漏答是**服务端的事实**
+    // （`save_answer` 本来就是按题存的），而这条用例要钉的正是那句提示里的数数的是
+    // 「本版题库里没答的那些」，不是「当前位置之后的那些」：按后者算会说出「还有 0 题」，
+    // 而学生手里明明有一道空着。
+    await page.evaluate(() => localStorage.setItem('xlp_assessment_cursor:90011', '4'))
+    await startableTask(page).click()
+    await page.waitForURL(/\/student\/assessment\/9001/)
+
+    const bar = page.locator('.assessment-bar')
+    await expect(bar).toContainText('第 4 题')
+    await expect(bar).toContainText('已完成 1/4')
+
+    await page.getByRole('button', { name: '提交测评' }).click()
+
+    await expect(page.getByText('还有 3 题没有作答，已定位到第一道未答题')).toBeVisible()
+    await expect(bar).toContainText('第 2 题')
+    // 定位到的是**他刚才站的位置之前**那一题——「按位置算」的实现会漏掉它。
+    await expect(page.locator('.toast', { hasText: '已定位到第 2 题' })).toBeVisible()
+    // 没答满就没有确认框、也没有提交出去。
+    await expect(page.getByRole('dialog', { name: '确认提交测评' })).toHaveCount(0)
+    expect(state.submitCalls).toBe(0)
+  })
+
+  test('只靠键盘能选答案、上一题、下一题、定位未答并确认提交', async ({ page }) => {
+    const state = await installAssessmentStubs(page, {
+      questionCount: 3,
+      // 答完第 1 题之后，服务端**扣住答复不放**，直到下面显式放行——见那一处的注释。
+      holdAnswers: true,
+      cards: [{ id: STUB_TASK_ID, name: 'E2E 键盘', status: 'ACTIVE', target_status: 'NOT_STARTED' }],
+    })
+    await loginAs(page, 'student')
+    await startableTask(page).click()
+    await page.waitForURL(/\/student\/assessment\/9001/)
+
+    const bar = page.locator('.assessment-bar')
+    const press = async (text: string, label: string) => {
+      await tabUntil(page, (el) => el.text === text, label)
+      await page.keyboard.press('Enter')
+    }
+
+    await expect(bar).toContainText('第 1 题')
+
+    // 「学生按下的那一刻，屏幕上就得是他选的那个」（§13：答错的代价由他自己承担）。
+    //
+    // 这一段**故意用同步读**（`await bar.innerText()`）而不是 `await expect(...).toContainText`：
+    // 后者会重试到 5 秒，于是「等了一次服务端往返才更新」的实现也照样能绿——它证明的是
+    // 「最后会对」，不是「按下就生效」。而同步读要成立，就得保证读数时答复确实还没回来；
+    // 那件事不能靠「Tab 走得比网络快」去赌（Tab 花多久不由这条用例决定），所以用闸门。
+    const firstAnswer = page.waitForRequest((r) => /\/assessment-sessions\/\d+\/answers\/1$/.test(r.url()))
+    await press('是', '第 1 题的「是」')
+    await firstAnswer // 服务端**收到**了，但答复还扣着
+    expect(await bar.innerText()).toContain('已完成 1/3')
+    expect(await page.locator('.answer-grid button.selected').innerText()).toBe('是')
+
+    // 同一段窗口里的另一半：往返还在路上时，「下一题」必须走得动，而且不许反过来
+    // 指责他「请先选择一个答案」——那是假的，他刚选完。
+    await press('下一题', '「下一题」按钮')
+    expect(await bar.innerText()).toContain('第 2 题')
+
+    // 放行：从这里往后都是「服务端已经答过话」的普通状态。
+    state.releaseAnswers()
+    await expect(bar).toContainText('已完成 1/3')
+
+    // 往回走：键盘不是只能往前。回到第 1 题，答案还在。
+    await press('上一题', '「上一题」按钮')
+    await expect(bar).toContainText('第 1 题')
+    await expect(page.locator('.answer-grid button.selected')).toHaveText('是')
+
+    // 走到底并把剩下的答完。
+    await press('下一题', '「下一题」按钮')
+    await press('是', '第 2 题的「是」')
+    await press('下一题', '「下一题」按钮')
+    await press('是', '第 3 题的「是」')
+    await expect(bar).toContainText('已完成 3/3')
+
+    // 「定位未答」的**另一支**：一道都不缺时不把人带到别处，而是明说可以提交。
+    await press('定位未答', '「定位未答」按钮')
+    await expect(page.locator('.toast', { hasText: '全部题目已完成，可以提交' })).toBeVisible()
+
+    await press('提交测评', '「提交测评」按钮')
+    const dialog = page.getByRole('dialog', { name: '确认提交测评' })
+    await expect(dialog).toBeVisible()
+    // 这句话是学生最后一次核对自己的机会：答了几题、还差几题、交了不能改。
+    await expect(dialog).toContainText('已完成 3/3 题，未答 0 题。提交后不能自行修改答案。')
+
+    await press('确认提交', '「确认提交」按钮')
+    await page.waitForURL(/\/student\/home/)
+    expect(state.submitCalls).toBe(1)
+  })
+
+  test('三个学生页面共用同一个求助入口', async ({ page }) => {
+    await installAssessmentStubs(page, {
+      questionCount: 3,
+      cards: [{ id: STUB_TASK_ID, name: 'E2E 求助入口', status: 'ACTIVE', target_status: 'NOT_STARTED' }],
+    })
+    await loginAs(page, 'student')
+
+    // 三处必须是**同一个**弹层：正文与紧急提示逐字相同。写成三份复制时，同一句话
+    // 会在学生手上出现两个版本，而「三处一致」这件事没有任何东西保证。
+    const openHelp = async (where: string) => {
+      const trigger = page.getByRole('button', { name: '我想找人聊聊' })
+      await expect(trigger, `${where}：求助入口不见了`).toBeVisible()
+      await trigger.click()
+      const dialog = page.getByRole('dialog', { name: '我想找人聊聊' })
+      await expect(dialog, `${where}：弹层没打开`).toBeVisible()
+      await expect(dialog).toContainText('可以随时停下来')
+      await expect(dialog).toContainText('这不是一件需要独自扛着的事')
+      await dialog.getByRole('button', { name: '关闭' }).click()
+      await expect(dialog).toHaveCount(0)
+    }
+
+    await page.waitForSelector('.help-fab')
+    await openHelp('我的测评')
+
+    await startableTask(page).click()
+    await page.waitForURL(/\/student\/assessment\/9001/)
+    await page.waitForSelector('.help-fab')
+    await openHelp('在线答题')
+
+    await page.goto('/student/history')
+    await page.waitForSelector('.help-fab')
+    await openHelp('完成记录')
+  })
+
+  test.describe('窄屏 375px', () => {
+    test.use({ viewport: { width: 375, height: 667 } })
+
+    test('主操作不被帮助浮钮遮挡，题目与按钮也没有横向溢出', async ({ page }) => {
+      await installAssessmentStubs(page, {
+        questionCount: 3,
+        cards: [
+          { id: STUB_TASK_ID, name: 'E2E 窄屏可作答', status: 'ACTIVE', target_status: 'NOT_STARTED' },
+          { id: 9202, name: 'E2E 窄屏已完成', status: 'ACTIVE', target_status: 'COMPLETED', answered_count: 3 },
+        ],
+      })
+      await loginAs(page, 'student')
+      await page.waitForSelector('.help-fab')
+      await expectNarrowGeometry(page, '我的测评')
+
+      await startableTask(page).click()
+      await page.waitForURL(/\/student\/assessment\/9001/)
+      await page.waitForSelector('.question-text')
+      // 一屏里同时有题干、是 / 否、上一题 / 下一题、定位未答 / 保存退出——最容易
+      // 出事的那一屏就是它。
+      await expectNarrowGeometry(page, '在线答题')
+    })
+  })
+});
+
 // ========== 密码轮换 ==========
 
 test.describe('密码轮换', () => {

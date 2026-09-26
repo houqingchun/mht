@@ -227,6 +227,15 @@ export interface StudentTask {
   end_at: string | null
   session_id: number | null
   answered_count: number
+  /**
+   * 这一场一共多少题，**答不出来时是 null**（不是 0）。
+   *
+   * 与答题页读的是同一张表、同一个 `scale_id`，所以列表上的分母与页面上真实渲染的
+   * 题号个数同源；题库换成非 100 题的版本时两处一起走（§13）。
+   * `null` 的读法是「这个数还不知道」——界面照它分岔，只显示已答数、不显示分母，
+   * 绝不 `?? 100` 或 `?? 0`。
+   */
+  question_count: number | null
   completed_at: string | null
 }
 
@@ -252,6 +261,8 @@ export interface StudentAssessmentHistoryItem {
   task_name: string
   status: string
   answered_count: number
+  /** 同 `StudentTask.question_count`：这一场一共多少题，答不出来时是 null。 */
+  question_count: number | null
   submitted_at: string | null
   /** 首次作答 → 交卷，单位为秒。迁移前的会话与 /reset 之后的会话是 null。 */
   duration_seconds: number | null

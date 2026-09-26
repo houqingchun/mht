@@ -2,34 +2,41 @@
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import Modal from '../../components/Modal.vue'
+import ErrorState from '../../components/ErrorState.vue'
 import SkeletonBlock from '../../components/SkeletonBlock.vue'
-import { showToast } from '../../services/toast'
+import StudentHelpDialog from './StudentHelpDialog.vue'
 import { useSettings } from '../../composables/useSettings'
 import { getMe, getStudentTasks, type StudentTask } from '../../services/api'
+import { formatDateTime } from '../../services/dates'
 import { TARGET_STATUS_LABELS, taskStatusLabel } from '../../services/labels'
 
 const router = useRouter()
 
-// 辅导室位置与联系方式由系统配置提供（此前三处硬编码副本）
 const { settings } = useSettings()
-const user = ref<{ display_name: string } | null>(null)
 const tasks = ref<StudentTask[]>([])
 const loading = ref(true)
+const error = ref('')
 const showPrivacy = ref(false)
 const showHelpModal = ref(false)
 
 async function load() {
   loading.value = true
+  error.value = ''
   try {
     const me = await getMe()
     if (me.role_code !== 'student') {
       await router.push('/login')
       return
     }
-    user.value = me
     tasks.value = await getStudentTasks()
-  } catch {
-    await router.push('/login')
+  } catch (err) {
+    // 角色不对 → 回登录页（那是「你不该在这一页」）；**读取失败不是那一回事**。
+    // 此前这里一律 `router.push('/login')`，于是后端一次 500 或一次抖动的读
+    // 会把学生踢到登录页，他看到的是「登录过期了」——一个说不出口的错误被换成了
+    // 一句关于他的、恰好错的结论（§2：服务端答了话与一个字都没收到要分得开）。
+    // 现在按 §14 给它一条错误与一个「重试」，空态（「当前没有待完成测评任务」）
+    // 只在真的读到空列表时出现。
+    error.value = err instanceof Error ? err.message : '没能读到你的测评任务'
   } finally {
     loading.value = false
   }
@@ -51,10 +58,71 @@ function canAnswer(task: StudentTask) {
   return task.status === 'ACTIVE'
 }
 
-/** Students never see raw backend codes — only their own completion state. */
+/**
+ * 进度与分母。**题数来自服务端**（`question_count`，与答题页读的是同一份题库），
+ * 不是写死的 100。
+ *
+ * 此前这里写死 100：一所学校的量表是 60 题时，答满的学生看到「已完成全部 100 题」，
+ * 答了 40 题的那个看到「已答 40 / 100」——两句都在说一件没发生过的事，而进度条
+ * 的宽度 `answered_count%` 也一起错。`question_count` 为 `null`（这一版量表没有题，
+ * 一个不该出现的状态）时不显示分母，只显示已答数：一个编出来的分母比没有分母更糟。
+ */
 function answeredLabel(task: StudentTask) {
-  if (isDone(task)) return '已完成全部 100 题'
-  return task.answered_count > 0 ? `已答 ${task.answered_count} / 100 题` : '尚未开始'
+  const total = task.question_count
+  if (isDone(task)) return total ? `已完成全部 ${total} 题` : '已完成'
+  if (!total) return task.answered_count > 0 ? `已答 ${task.answered_count} 题` : '尚未开始'
+  if (task.answered_count <= 0) return `共 ${total} 题，尚未开始`
+  return `已答 ${task.answered_count} / ${total} 题`
+}
+
+function progressPercent(task: StudentTask) {
+  const total = task.question_count
+  if (!total || total <= 0) return 0
+  return Math.min(100, Math.round((task.answered_count / total) * 100))
+}
+
+/**
+ * 预计用时**只从配置算**，不写死一个「约 15 分钟」。
+ *
+ * 出处与答题页那句「预计还需约 N 分钟」是同一个（`settings.ui.seconds_per_question`，
+ * `StudentAssessmentPage.vue` 的 `remainingHint`）——一处配置、两处读，所以两句话
+ * 不可能各说各话。学校没配过时它有一个出厂值（12 秒/题），那仍然是一个**配置值**，
+ * 不是这个文件里猜的数。
+ *
+ * 只在**还能作答**时给：已完成、以及窗口还没开/已经关掉的那两档都答不了，
+ * 给一个「预计约 3 分钟」等于在邀请学生去做一件他做不到的事。
+ */
+function estimateLabel(task: StudentTask) {
+  const total = task.question_count
+  if (!canAnswer(task) || isDone(task) || !total) return ''
+  const left = total - task.answered_count
+  if (left <= 0) return ''
+  const minutes = Math.max(1, Math.round((left * settings.value.ui.seconds_per_question) / 60))
+  return `预计约 ${minutes} 分钟`
+}
+
+/**
+ * 不能作答时**说出为什么**。
+ *
+ * 一个灰掉的按钮不说原因，读起来是「系统坏了」或者「我不被允许」——两种都会让学生
+ * 去问老师，而答案本来就在这一行里（窗口还没开 / 已经结束 / 你已经交过）。日期用
+ * 全站同一个 `formatDateTime`，不在这里另写一种格式。
+ */
+function blockedReason(task: StudentTask) {
+  if (isDone(task)) return '你已经交过这一场，不需要再作答。'
+  if (task.status === 'NOT_STARTED') {
+    return task.start_at ? `这一场将于 ${formatDateTime(task.start_at)} 开始。` : '这一场还没有开始。'
+  }
+  if (task.status === 'CLOSED') {
+    return task.end_at ? `这一场已于 ${formatDateTime(task.end_at)} 截止。` : '这一场已经结束。'
+  }
+  if (task.status === 'PAUSED') return '这一场已由学校暂停，请等老师通知。'
+  return ''
+}
+
+/** 截止时间只在服务端给了的时候出现；`—` 不写在这里（那是「读不到」的占位，不是日期）。 */
+function deadlineLabel(task: StudentTask) {
+  return task.end_at ? `截止 ${formatDateTime(task.end_at)}` : ''
 }
 
 function targetLabel(task: StudentTask) {
@@ -77,23 +145,40 @@ onMounted(load)
       </div>
     </div>
 
+    <!-- 隐私与审计这一句是**一句话的承诺**（详细角色边界在右边那个弹层里）。
+         「每次敏感访问都会留下记录」那半句不能省：它是学生能对这套系统抱有的、
+         唯一一条可验证的保证。 -->
     <div class="notice" style="margin-bottom: 17px">
-      你的回答不会在班级中公开。正式系统仅允许授权人员按职责查看，每次敏感访问都会留下记录。
+      你的回答不会在班级中公开；只有经授权的工作人员能按职责查看，且每一次查看都会留下记录。
     </div>
 
     <SkeletonBlock v-if="loading" variant="cards" :rows="1" />
+    <ErrorState v-else-if="error" :message="error" :on-retry="load" />
 
-    <template v-if="!loading">
+    <template v-else>
+      <!-- 自动保存是**逐题**的（`choose()` 每选一次就调 `saveAssessmentAnswer`），
+           所以这句话有事实依据，不是安慰。它出现在首页是因为学生要在点进答题页
+           *之前*就知道「中途退出不会白做」——这是他不开始作答的头号原因。 -->
+      <p v-if="tasks.length" class="muted tiny auto-save-hint" style="margin-bottom: 10px">
+        作答时每选一题都会自动保存，中途可以退出，下次接着答。
+      </p>
+
       <div v-if="tasks.length" class="task-list">
         <article v-for="task in tasks" :key="task.id" class="task-card">
           <div class="task-info">
             <strong>{{ task.name }}</strong>
             <!-- target_status is this student's own progress; task.status is the
                  campaign's state (ACTIVE/CLOSED) and is not meaningful to them. -->
-            <span class="muted tiny">{{ answeredLabel(task) }} · {{ targetLabel(task) }}</span>
+            <span class="muted tiny">
+              {{ answeredLabel(task) }} · {{ targetLabel(task) }}
+              <template v-if="deadlineLabel(task)"> · {{ deadlineLabel(task) }}</template>
+              <template v-if="estimateLabel(task)"> · {{ estimateLabel(task) }}</template>
+            </span>
             <div class="progress" style="margin-top: 8px">
-              <i :style="{ width: `${task.answered_count}%` }"></i>
+              <i :style="{ width: `${progressPercent(task)}%` }"></i>
             </div>
+            <!-- 灰掉的按钮必须说得出为什么（§17：空态与「坏了」不是一回事）。 -->
+            <span v-if="blockedReason(task)" class="muted tiny">{{ blockedReason(task) }}</span>
           </div>
           <div class="task-actions">
             <!-- Gate on target_status (this student's state), not status (the
@@ -115,6 +200,7 @@ onMounted(load)
       </div>
       <p v-else class="muted-text">当前没有待完成测评任务。</p>
 
+      <StudentHelpDialog v-model:open="showHelpModal" />
       <button class="help-fab" type="button" @click="showHelpModal = true">我想找人聊聊</button>
     </template>
 
@@ -129,25 +215,12 @@ onMounted(load)
           <div class="detail-row"><span>系统管理员</span><b>默认不能查看心理内容</b></div>
         </div>
         <p class="muted tiny">
-          正式上线时，学校需配置数据保存期限、访问范围和紧急处置规则。
+          每次敏感访问都会留下记录，可以追溯；正式上线时，学校需配置数据保存期限、访问范围和紧急处置规则。
         </p>
       </div>
       <template #footer>
         <button class="btn primary" @click="showPrivacy = false">我知道了</button>
       </template>
-    </Modal>
-
-    <Modal :model-value="showHelpModal" title="我想找人聊聊" size="md" @update:model-value="showHelpModal = $event">
-      <div class="form-grid">
-        <div class="notice">
-          如果你现在感到不舒服，可以暂停填写，并联系学校心理老师、家长或一位你信任的成年人。
-        </div>
-        <div class="detail-grid" style="margin-top: 14px">
-          <div class="detail-row"><span>学校心理辅导室</span><b>{{ settings.org.counselling_room }}</b></div>
-          <div class="detail-row"><span>开放时间</span><b>{{ settings.org.counselling_hours }}</b></div>
-          <div class="detail-row"><span>校内联系</span><b>{{ settings.org.counselling_contact }}</b></div>
-        </div>
-      </div>
     </Modal>
 
   </div>

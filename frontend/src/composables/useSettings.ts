@@ -20,9 +20,12 @@ const FALLBACK: SystemSettings = {
     school_name: '青禾实验学校',
     brand_name: '心晴',
     brand_subtitle: '心理测评与关怀平台',
-    counselling_room: '综合楼3层305室',
-    counselling_hours: '周一至周五 12:30—17:30',
-    counselling_contact: '陈老师 · 分机8305'
+    // 与后端 DEFAULTS 一样**留空**：这三项是学校自己要填的联系方式，出厂时
+    // 一个示例值都不该有——空着时弹层出通用指引，而写一个示例值等于替学校
+    // 编一个不存在的辅导室与联系人给学生看。示例在 SettingsPage 的 placeholder 上。
+    counselling_room: '',
+    counselling_hours: '',
+    counselling_contact: ''
   },
   care: {
     follow_up_types: ['心理老师访谈', '支持性辅导', '一般观察', '复测沟通', '其他'],
