@@ -1,5 +1,12 @@
 import { test, expect, type Locator, type Page } from '@playwright/test';
-import { loginAs, type RoleName } from './helpers';
+import {
+  ROLES,
+  VIEWPORTS,
+  loginAs,
+  measureOverflow,
+  measureBottomNav,
+  type RoleName,
+} from './helpers';
 
 /**
  * 状态词汇契约的**渲染侧**回归网（CLAUDE.md §3）。
@@ -332,17 +339,55 @@ async function leakedCodes(scope: Locator): Promise<string[]> {
 }
 
 /**
+ * **被冻结掉的角色名**（V2.0.0 §5.14.6 第 7 条）。
+ *
+ * CLAUDE.md §1 的产品边界把角色冻结成四类：学生 / 心理老师 / 德育领导 / 系统管理员，
+ * 并明写「不得恢复『班主任』或『心理负责人』角色」。这一条在代码里没有别的东西守得住
+ * ——角色名是**中文散文**，`labels.ts` 那套映射表管的是枚举码，而界面上一句凭空多出来
+ * 的「心理专业负责人」既不是码、也不进导出文件，三个面全都不覆盖它。
+ * 2026-09-27 的历史遗留正是这个形状：`DimensionsPage.vue` 上一次「心理专业负责人」
+ * 挂了不知多久，它读起来完全像这套系统里的一个角色。
+ *
+ * **两个条目都要，因为它们互不包含**：「心理专业负责人」里没有连续的「心理负责人」
+ * 这四个字（中间隔着「专业」）。只写长的会漏掉短的，反之亦然。
+ *
+ * **只收这一族，不收「班主任」。** 那个词在本仓库里有一处**正确**用法：
+ * `StudentHelpDialog.vue` 让学生「直接问班主任或心理老师」——那是真实世界里的一个
+ * 指路人，不是这套系统里的角色。把它收进来，一条正确的文案就会让这条守卫变红，
+ * 而**会无故变红的守卫很快会被人关掉**（§24 移除 `STUDENT` 那条清单项的成因）。
+ *
+ * **用 `includes` 而不是像上面那样配词边界**：那套边界是为英文码设计的
+ * （`\bRETEST\b` 会命中任务编号 `TASK-2026-GRADE9-RETEST`），而中文角色名没有
+ * 「被嵌进别的标识符」这个形状。也不必写成 `(心理|德育…)负责人` 那样的正则——
+ * 「负责人」作为裸词是全站合法的（未分配负责人 / 转派负责人 / 负责人筛选），
+ * 靠前缀猜家族会在一条正确的中文上误报，而误报一次这条就废了。
+ */
+const FORBIDDEN_ROLE_NAMES = ['心理负责人', '心理专业负责人'];
+
+/** 给定区域内出现过的被冻结角色名（去重、保序）。 */
+async function leakedRoleNames(scope: Locator): Promise<string[]> {
+  const text = await scope.innerText();
+  return FORBIDDEN_ROLE_NAMES.filter((name) => text.includes(name));
+}
+
+/**
  * 走完一个角色的页面，把出现裸编码的页面收集起来一次性报告。
  *
  * 一页一断言会让第一个泄漏挡住后面的；这个契约是「全都不许漏」，一次看全更有用。
  */
 async function auditPages(page: Page, role: RoleName, paths: string[]) {
   const leaks: string[] = [];
+  // 与 `leaks` 分开收集、分开断言：两者是两条不同的契约（「视图有没有调用标签函数」
+  // 与「有没有用被冻结的角色名」），合成一条数组时红色的那句话会说错规矩。
+  const roleLeaks: string[] = [];
   for (const path of paths) {
     await page.goto(path);
     await page.waitForLoadState('networkidle');
     const codes = await leakedCodes(page.locator('body'));
     for (const code of codes) leaks.push(`${path} → ${code}`);
+    for (const name of await leakedRoleNames(page.locator('body'))) {
+      roleLeaks.push(`${path} → ${name}`);
+    }
     // 页签内容默认不渲染，只扫落地那一屏会漏掉后面几个页签。
     // 复测计划页签的 `{{ plan.status }}` 就是这样漏过第一遍扫描的。
     const tabs = page.locator('button.tab');
@@ -352,10 +397,82 @@ async function auditPages(page: Page, role: RoleName, paths: string[]) {
       for (const code of await leakedCodes(page.locator('body'))) {
         leaks.push(`${path} · ${label}页签 → ${code}`);
       }
+      for (const name of await leakedRoleNames(page.locator('body'))) {
+        roleLeaks.push(`${path} · ${label}页签 → ${name}`);
+      }
     }
   }
   expect(leaks, `${role} 的页面把后端编码原样显示了`).toEqual([]);
+  expect(roleLeaks, `${role} 的页面出现了被冻结的角色名`).toEqual([]);
 }
+
+/**
+ * 每个角色「全部页面」的路径清单（**一处定义**）。
+ *
+ * 两个读者共用它：上面 `auditPages` 的词汇扫描（§3 契约第二面）与文件末尾那条
+ * 「四角色 × 四档视口」的横向溢出扫描（§5.14.7 的 DoD「四档视口无页面级横向溢出」）。
+ * 写第二份清单就会有两条各自漂移的列表，而其中一条漏掉一页的样子只是「那一页没被
+ * 扫到」——不会有任何东西报错（CLAUDE.md §18 那族：**一个不报错的失败等于没有这一步**）。
+ */
+const ROLE_PAGES: Record<RoleName, string[]> = {
+  student: ['/student/home', '/student/history'],
+  counselor: [
+    '/counselor/workbench',
+    '/counselor/cases',
+    '/counselor/cases/1',
+    '/counselor/tasks',
+    '/counselor/data',
+    // 「统计分析」是一棵五个 view 的子树，而**父路径是一条 redirect**
+    // （`routes.ts:52`：`/counselor/analytics` → `.../overview`）。只写父路径时
+    // 扫描落在 `OverviewPage` 上，四个子页面一个都到不了——而它们在清单里
+    // **看不出缺席**：那一条读起来就像「统计分析这一块已经覆盖了」。
+    // 2026-09-27 撞出来的：`DimensionsPage.vue` 上一句「心理专业负责人」挂了不知多久，
+    // 四个角色用例一次都没红过，就是因为这个目录下除了 overview 之外没人去过。
+    '/counselor/analytics',
+    '/counselor/analytics/dimensions',
+    '/counselor/analytics/grades',
+    '/counselor/analytics/classes',
+    '/counselor/analytics/report',
+    // 导出中心（V1.2 阶段 8）。**这条路径守不住那三张词表**——没有作业行时这一页
+    // 是空态，一个格子都不渲染（实测过：把那三处标签函数换成裸字段，四条角色用例
+    // 全绿）。真正的覆盖是本文件末尾那条自成一套的用例，它先用接口建一份作业。
+    // 这一条留在这里，守的是这一页上不依赖数据的那部分像素。
+    '/counselor/exports',
+    '/counselor/audit',
+  ],
+  leader: [
+    '/leader/overview',
+    '/leader/progress',
+    // 与心理老师那一侧同一棵子树、同一个 redirect 陷阱（`routes.ts:65`）。四个子页面
+    // 是**共用组件**，但 `/leader/analytics/report` 走的是另一个组件
+    // （`LeaderAnalyticsReportPage`）——所以这一趟不是上一趟的重复。
+    '/leader/analytics',
+    '/leader/analytics/dimensions',
+    '/leader/analytics/grades',
+    '/leader/analytics/classes',
+    '/leader/analytics/report',
+    '/leader/tasks',
+    '/leader/audit',
+  ],
+  admin: [
+    // 系统概览（V2.0.0 §5.14.5，管理员的落点）。**这一趟在枚举码上扫不到东西**：
+    // 这一页只渲染账号数、批次计数、量表版本号与系统版本号，没有任何一处会输出
+    // 后端枚举码——所以它是这一组里唯一一条**恒绿**的清单项，留着只是因为
+    // 「按角色走完全部页面」这条契约要求路径清单是完整的。
+    // 真正守这一页的是 `app.spec.ts` 的「管理员系统概览」那一组（数字下钻、
+    // 不可点的项不装作能点、复制临时密码）——别把这一行读成那几条的替代。
+    '/admin/overview',
+    '/admin/system',
+    '/admin/organization',
+    '/admin/scale',
+    '/admin/settings',
+    // 导出中心（V1.2 阶段 8）。管理员看到的是**全部人的**作业、多一列「操作人」，
+    // 而「下载」那一列对他不出现——所以这一趟扫到的像素与心理老师那一趟并不重合。
+    // 与上面同一条：作业表是空的时候它一个格子也扫不到。
+    '/admin/exports',
+    '/admin/audit',
+  ],
+};
 
 /**
  * 弹窗内容只有点开才存在，而且往往是点开后才去请求数据的。
@@ -505,58 +622,22 @@ test.describe('状态词汇：界面上不得出现后端编码', () => {
 
   test('学生页面', async ({ page }) => {
     await loginAs(page, 'student');
-    await auditPages(page, 'student', ['/student/home', '/student/history']);
+    await auditPages(page, 'student', ROLE_PAGES.student);
   });
 
   test('心理老师页面', async ({ page }) => {
     await loginAs(page, 'counselor');
-    await auditPages(page, 'counselor', [
-      '/counselor/workbench',
-      '/counselor/cases',
-      '/counselor/cases/1',
-      '/counselor/tasks',
-      '/counselor/data',
-      '/counselor/analytics',
-      // 导出中心（V1.2 阶段 8）。**这条路径守不住那三张词表**——没有作业行时这一页
-      // 是空态，一个格子都不渲染（实测过：把那三处标签函数换成裸字段，四条角色用例
-      // 全绿）。真正的覆盖是本文件末尾那条自成一套的用例，它先用接口建一份作业。
-      // 这一条留在这里，守的是这一页上不依赖数据的那部分像素。
-      '/counselor/exports',
-      '/counselor/audit',
-    ]);
+    await auditPages(page, 'counselor', ROLE_PAGES.counselor);
   });
 
   test('德育领导页面', async ({ page }) => {
     await loginAs(page, 'leader');
-    await auditPages(page, 'leader', [
-      '/leader/overview',
-      '/leader/progress',
-      '/leader/analytics',
-      '/leader/tasks',
-      '/leader/audit',
-    ]);
+    await auditPages(page, 'leader', ROLE_PAGES.leader);
   });
 
   test('管理员页面', async ({ page }) => {
     await loginAs(page, 'admin');
-    await auditPages(page, 'admin', [
-      // 系统概览（V2.0.0 §5.14.5，管理员的落点）。**这一趟在枚举码上扫不到东西**：
-      // 这一页只渲染账号数、批次计数、量表版本号与系统版本号，没有任何一处会输出
-      // 后端枚举码——所以它是这一组里唯一一条**恒绿**的清单项，留着只是因为
-      // 「按角色走完全部页面」这条契约要求路径清单是完整的。
-      // 真正守这一页的是 `app.spec.ts` 的「管理员系统概览」那一组（数字下钻、
-      // 不可点的项不装作能点、复制临时密码）——别把这一行读成那几条的替代。
-      '/admin/overview',
-      '/admin/system',
-      '/admin/organization',
-      '/admin/scale',
-      '/admin/settings',
-      // 导出中心（V1.2 阶段 8）。管理员看到的是**全部人的**作业、多一列「操作人」，
-      // 而「下载」那一列对他不出现——所以这一趟扫到的像素与心理老师那一趟并不重合。
-      // 与上面同一条：作业表是空的时候它一个格子也扫不到。
-      '/admin/exports',
-      '/admin/audit',
-    ]);
+    await auditPages(page, 'admin', ROLE_PAGES.admin);
   });
 
   /**
@@ -1235,5 +1316,60 @@ test.describe('状态词汇：界面上不得出现后端编码', () => {
     await expect(page.getByText('该生尚未建档（重点题未命中）')).toBeVisible();
 
     expect(await leakedCodes(page.locator('body')), '测评记录页把后端编码原样显示了').toEqual([]);
+  });
+
+  /*
+   * §5.14.7 那条 DoD：「**四档视口无页面级横向溢出**」。
+   *
+   * 它与上面那四个角色用例共用 `ROLE_PAGES`，但扫的是**另一个面**：那四条断的是
+   * 「页面上没有裸编码」，这一条断的是「四档宽度下页面都不横向溢出，且窄档的底部
+   * 导航整块落在视口里」。两者互不代替——一个页面完全可能词汇干净而 375px 下溢出。
+   *
+   * 为什么在这里而不是 `app.spec.ts`（溢出断言的既有家）：路径清单是本文件的一处
+   * 定义（`ROLE_PAGES`），从另一个 spec 文件 import 它会把「谁是这份清单的出处」
+   * 变成两个 spec 之间的私事，而 spec 文件不是模块库。
+   *
+   * **此前只覆盖 2 个页面**（报告页与工作台）——「四档」说的是**宽度档位**，不是
+   * 页面覆盖。所以那条 DoD 的单数形式「四档视口无溢出」在只有两页时是成立的，
+   * 而它要回答的问题（还有 20 个页面呢）没有人问过。
+   *
+   * **先证明数据到位，再量**：骨架屏那一帧的布局往往比真实内容窄，在那一帧量溢出
+   * 等于什么都没量（CLAUDE.md 测试注意「先证明有东西可扫，再断言它干净」）。
+   * 判据用**全局**的 `.skeleton-line`：`SkeletonBlock` 是全站统一的那个组件，
+   * 不需要给 22 个页面各写一个「数据到了」的选择器——那种清单漏一页是没有信号的。
+   *
+   * **收集式，不逐页断言**：第一版是「量一页断言一页」，它在**第一个**坏页面就停下
+   * （实测：`/admin/system` @ 375px）。而这条用例的全部价值就是回答「还有哪几页」——
+   * 一次只报一页会让修的人跑第二轮、第三轮。与 `auditPages` 攒 leaks 是同一个形状。
+   */
+  test('四角色 × 四档视口：全部页面都不横向溢出，窄档底部导航仍在视口里', async ({ page }) => {
+    const overflows: string[] = [];
+    const navProblems: string[] = [];
+
+    for (const role of Object.keys(ROLES) as RoleName[]) {
+      await loginAs(page, role);
+      for (const path of ROLE_PAGES[role]) {
+        await page.goto(path);
+        await page.waitForLoadState('networkidle');
+        await page.waitForFunction(() => !document.querySelector('.skeleton-line'));
+
+        for (const { width, height, mobile } of VIEWPORTS) {
+          const label = `${role} 的 ${path} @ ${width}px`;
+          await page.setViewportSize({ width, height });
+          const { scrollWidth, clientWidth } = await measureOverflow(page);
+          if (scrollWidth > clientWidth) {
+            overflows.push(`${label}（scrollWidth ${scrollWidth} > clientWidth ${clientWidth}）`);
+          }
+          // `mobile` 是 780px 以下那两档——只有那时 `.sidebar` 才是固定底栏。
+          if (mobile) {
+            const problem = await measureBottomNav(page);
+            if (problem) navProblems.push(`${label}：${problem}`);
+          }
+        }
+      }
+    }
+
+    expect(overflows, `以下页面横向溢出：\n${overflows.join('\n')}`).toEqual([]);
+    expect(navProblems, `以下页面底部导航不在视口里：\n${navProblems.join('\n')}`).toEqual([]);
   });
 });

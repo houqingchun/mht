@@ -255,7 +255,11 @@ onMounted(load)
           <span class="muted tiny">先校验并预览，不会立即写入数据</span>
           <div class="actions" style="justify-content:center;margin-top:13px">
             <button class="btn" @click="downloadStudentTemplate">下载模板</button>
-            <label class="btn primary" style="cursor:pointer">
+            <!-- 「选择文件」降级为次要（V2.0.0 §5.14.6 第 5 条：每页最多一个主操作）。
+                 主操作是下面 `.import-summary` 里那枚「确认导入」——它才是写库的那一步；
+                 这一枚只把字节读进浏览器，服务端一行都不动。判据同全站：
+                 **改不改服务端状态**。 -->
+            <label class="btn" style="cursor:pointer">
               选择文件
               <input type="file" accept=".csv,.json" hidden @change="e => { const f = (e.target as HTMLInputElement).files?.[0]; if (f) handleStudentFile(f) }" />
             </label>

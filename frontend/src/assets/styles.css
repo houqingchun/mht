@@ -86,9 +86,41 @@
   100% { background-position: -200% 0; }
 }
 
+/*
+ * 降低动效（V2.0.0 §5.14.6 第 8 条）。
+ *
+ * 这一段是**全域的**，不是逐条列举。此前这里只有一条 `.skeleton-line { animation: none }`，
+ * 而全站的动效有十来处、散在六个文件里（本文件自身的 `.metric` 悬停抬升 / `.nav-chevron`
+ * 的旋转 / `.check-row` / 表单控件的边框色 / Toast 的进出场，以及 `AdminOverviewPage.vue`
+ * 的指标卡与 `ScoreBandBars.vue`、`CoverageColumns.vue` 两根图表的柱高）。
+ * 逐条列举的本子有个致命的性质：**新增一处动效时，没有任何东西会提醒你回来补它**——
+ * 它只会在需要它的那台机器上静默地不生效，而那台机器不在我们手上。
+ * 全域一条覆盖全部，包括还没写出来的那些。
+ *
+ * 三条声明各有各的作用，缺一条都留下一个洞：
+ *
+ * - **`0.01ms` 而不是 `none`**：`transition: none` 会让 `transitionend` 永远不触发。
+ *   Toast 用的是 Vue 的 `<Transition>`，它靠那个事件（或读计算时长的兜底）决定何时把
+ *   元素移出 DOM。今天的兜底读到 0 会立刻回调，所以两种写法都不会卡住——但 `0.01ms`
+ *   保住了「事件照发」这件事，以后谁换掉那个兜底也不会因为这一段而挂住。
+ * - **`animation-iteration-count: 1`** 是给**无限循环**那一条准备的：骨架屏那条是
+ *   `skeleton-sweep 1.4s ease-in-out infinite`。只压时长的话它会以十万次每秒的频率继续
+ *   重画（时长 0.01ms、次数无限），压到一次才真的停下。
+ * - **`scroll-behavior: auto`** 今天全站没有 `scroll-behavior`；它在这里是因为它属于
+ *   同一类「用户明确说了不要动」的东西，顺手收掉，以后加平滑滚动不必再回来补。
+ *
+ * **`!important` 不能省，理由不是行内样式，是特异性**：`*` 的特异性是 0，而上面那些
+ * 动效全都挂在类选择器上（`.toast-enter-active`、`.skeleton-line` …，特异性 0-1-0），
+ * 不加 `!important` 的话这一整段**一条都盖不住**。写成这样它还顺带盖住了行内声明。
+ */
 @media (prefers-reduced-motion: reduce) {
-  .skeleton-line {
-    animation: none;
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
 
@@ -130,9 +162,31 @@
 }
 
 /* ========== Layout primitives ========== */
+/* 单列轨道**显式写成 `minmax(0, 1fr)`**（V2.0.0 §5.14.6 第 8 条，2026-09-27）。
+ *
+ * 裸 `.grid` 此前只声明了 `display: grid`，列轨道走隐式的那一条 `auto`——而 `auto`
+ * 轨道的最小值是 item 的 min-content 尺寸。于是 `AdminSystemPage` 里那张
+ * `min-width: 820px` 的表把它所在的那一栏一路顶到 862px，`.table-wrap` 的
+ * `overflow: auto` **永远不生效**：祖先已经跟着内容变宽了，没有溢出可滚。
+ * 实测：`/admin/system` @375px 的 `documentElement.scrollWidth` 是 876，而包装它的
+ * `div.grid` 只有 347px——那一页在 375 / 768 / 1024 三档都横向溢出。
+ *
+ * 这一条与 `.table-wrap` 那段注释记的是同一件事的两半（「`min-width: 0` 与
+ * `overflow-x: auto` 是一对，缺一条就等于没有」）。**两条一起写**：`minmax(0, 1fr)`
+ * 压住轨道，`> *` 的 `min-width: 0` 压住 item——只改轨道不改 item 的话，item 自己的
+ * `min-width: auto` 照样按 min-content 算，在轨道里还撑得出去。
+ *
+ * 三个已命名的变体（`.metrics` / `.two` / `.main-side`）各有自己的
+ * `grid-template-columns`，权重更高，不受第一条影响；`> *` 对它们只有收紧作用，
+ * 不会让任何东西变宽。 */
 .grid {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 17px;
+}
+
+.grid > * {
+  min-width: 0;
 }
 
 .grid.metrics {
@@ -503,6 +557,53 @@ body {
   scrollbar-width: thin;
 }
 
+/*
+ * 窄屏底栏（V2.0.0 §5.14.6 第 3 条）。780px 以上整块不出现——那一档是完整侧栏。
+ *
+ * 与 `.account-menu` 同一个做法：**两套都在 DOM 里，媒体查询选一套**。`display:none`
+ * 的元素不在无障碍树里，所以桌面那一档 `getByRole('link', …)` 不会在同一个名字上
+ * 取到两个（`app.spec.ts` 里有两处不带 `.first()` 的这种定位）。
+ */
+.nav-mobile {
+  display: none;
+}
+
+/*
+ * 「更多」弹层里的入口清单。这些类名只在 `AppLayout.vue` 的那个弹层里出现，
+ * 而那个弹层只有 `.nav-mobile` 上的按钮打得开——所以它们在桌面尺寸下也「存在」，
+ * 但没有任何路径到得了（与 `.account-menu` 里那几个 `.acct-item` 同一处境）。
+ */
+.more-section + .more-section {
+  margin-top: 15px;
+}
+
+.more-title {
+  margin-bottom: 7px;
+  color: #8da3ba;
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+}
+
+.more-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 9px 11px;
+  border-radius: 10px;
+  color: #24405c;
+  text-decoration: none;
+}
+
+.more-item:hover {
+  background: #f2f6fa;
+}
+
+.more-item.active {
+  background: rgba(77, 139, 238, 0.12);
+  box-shadow: inset 3px 0 #4d8bee;
+}
+
 .nav-btn {
   border: 0;
   background: transparent;
@@ -805,13 +906,20 @@ body {
 
 .band-row {
   display: grid;
-  grid-template-columns: 1fr 90px 90px;
+  /* `minmax(0, 1fr)` 而不是 `1fr`（V2.0.0 §5.14.6 第 8 条，2026-09-27）：`1fr` 的自动
+     最小值是 min-content，而第一格是个 text input——它默认 `size=20`，min-content
+     约 170px，于是窄屏下它不肯缩，整行被顶到约 496px（实测 `/admin/scale` @375px 的
+     `scrollWidth` 是 425，超出的正是这几个输入框）。与 `.grid` 那条同一个形状：
+     轨道与 item 各压一次。 */
+  grid-template-columns: minmax(0, 1fr) 90px 90px;
   gap: 8px;
   margin-bottom: 8px;
   align-items: center;
 }
 
 .band-row input {
+  /* 同上一行的理由：item 自己的 `min-width: auto` 在轨道里照样按 min-content 算。 */
+  min-width: 0;
   height: 38px;
   border: 1px solid #c8d3df;
   border-radius: 8px;
@@ -1348,27 +1456,11 @@ h1 {
   color: #257553;
 }
 
-.import-summary {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.import-summary button {
-  min-height: 38px;
-  border: 1px solid #2f6edb;
-  border-radius: 8px;
-  background: #2f6edb;
-  color: #fff;
-  padding: 0 14px;
-  cursor: pointer;
-}
-
-.import-summary button:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
+/* `.import-summary` 在这里曾经有一份**逐字重复**的定义（V2.0.0 §5.14.6 删掉了它）：
+   两处同权重，靠后的那一处才是生效的，所以前面那份是死代码——改它不会红、
+   删它也不会红，而「主操作长什么样」于是有了第二个出处。
+   现在唯一的定义在下面（带 `margin: 14px 0` 的那一处），`.import-summary button`
+   是全站**实心蓝主操作**的两个出处之一（另一个是 `.btn.primary`，见 `.btn` 那一节）。 */
 
 /* ========== Tabs ========== */
 .tabs {
@@ -3088,20 +3180,55 @@ tbody tr:hover td {
     flex: 1 1 auto;
     overflow-y: hidden;
   }
-
-  .nav-group,
-  .nav-submenu {
-    display: contents;
-  }
-
-  .nav-group-trigger .nav-chevron {
+  /*
+   * 底栏的两种形态（V2.0.0 §5.14.6 第 3 条）：这一档只显示 `.nav-mobile`（4 项 + 更多），
+   * `.nav-desktop` 整块隐藏。此前是**全套入口摊在底栏里横向滚动**——心理老师那一栏
+   * 12 个按钮要滑三屏，而底栏横滑没有任何视觉提示说右边还有内容。
+   *
+   * 这两条 `display` 的**先后不能换**：`.nav` / `.nav-desktop` / `.nav-mobile` 特异性
+   * 相同（都是单类），落在这个媒体查询里时由书写次序决定胜负。写到上面那条 `.nav`
+   * 之前就会被它的 `display: flex` 盖掉，而屏幕上的表现只是「底栏里东西又变多了」。
+   */
+  .nav-desktop {
     display: none;
   }
-
-  .nav-subitem {
-    min-height: 53px;
-    padding: 5px 7px;
-    font-size: 0.68rem;
+  .nav-mobile {
+    display: flex;
+  }
+  /*
+   * 底栏按钮：**等分**，而不是 `.nav-btn` 基础区那条 `flex: 1 0 76px`。
+   * 那一条是给「可以横向滚动的长列表」用的——4 项时它把每个撑到 76px、5 项时
+   * 380px，而 375px 视口下正好差 5px 就开始滚，也就是**正好在最常见的那个宽度上**
+   * 破功。`flex: 1 1 0` + `min-width: 0` 让 4～5 个按钮始终等分整条底栏。
+   */
+  .nav-mobile .nav-btn {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 52px;
+    padding: 4px 6px;
+    justify-content: center;
+    flex-direction: column;
+    gap: 1px;
+    font-size: 0.66rem;
+  }
+  /*
+   * 375px 下 5 个按钮各约 64px，减掉内边距剩约 52px——「重点关注学生」6 个字放不进去，
+   * 所以它会**折行**。折行比省略号好：名字要看得全，而 `.nav-btn` 那条
+   * `text-align: left` 会让折行后的第二行贴着左边。
+   *
+   * `line-height: 1.1` 是量出来的余量，不是排版偏好：折成两行时按钮的总高 =
+   * 图标 20 + 间距 1 + 两行文字（2 × 0.66rem × 行高）+ 上下内边距 8。`.sidebar`
+   * 那一档是写死的 68px（减 padding 14 = 54px 可用），1.15 时算出来 53.3px，
+   * 离被裁掉只剩 0.7px——一个字号、一次字体回退就能吃掉它。1.1 把这一档降到 52.2px。
+   * 「有没有被裁掉」由 e2e 逐按钮比对 boundingBox 与底栏的框（不是靠这段算术）。
+   */
+  .nav-mobile .nav-text {
+    text-align: center;
+    line-height: 1.1;
+    overflow-wrap: anywhere;
+  }
+  .nav-mobile .nav-btn.active {
+    box-shadow: inset 0 3px #75dce2;
   }
   /* 窄屏的底栏里，品牌副标题与分区标签不承载导航信息，让位给按钮本身。 */
   .brand-sub,
@@ -3115,18 +3242,6 @@ tbody tr:hover td {
   }
   .brand-name {
     display: none;
-  }
-  .nav-btn {
-    flex: 1 0 76px;
-    min-height: 53px;
-    padding: 5px 7px;
-    justify-content: center;
-    flex-direction: column;
-    gap: 1px;
-    font-size: 0.68rem;
-  }
-  .nav-btn.active {
-    box-shadow: inset 0 3px #75dce2;
   }
   .topbar {
     padding: 10px 13px;

@@ -1,6 +1,11 @@
 import { test, expect, type APIResponse, type Locator, type Page, type Route } from '@playwright/test';
 import { readFileSync } from 'node:fs';
-import { loginAs } from './helpers';
+import {
+  loginAs,
+  VIEWPORTS,
+  expectNoHorizontalOverflow,
+  expectBottomNavInViewport
+} from './helpers';
 
 /**
  * Make specific endpoints answer 500, so a page's *failure* branch can be tested.
@@ -1131,49 +1136,11 @@ async function reportWithDraftOverPublished(page: Page): Promise<string> {
   return created.report_no
 }
 
-/**
- * 页面不许出现横向溢出（§5.13.8 ⑨；调用点覆盖 375 / 768 / 1024 / 1440 四档）。
- *
- * 判据是 `documentElement` 的 `scrollWidth > clientWidth`——它在溢出发生时立刻为真，
- * 而「某个元素被挤出视口」要逐个元素比对，会把本来就该横向滚动的表格一起报进来。
- * 两个数都写进失败消息：只说「溢出了」的话，下一个人还得回去自己量。
+/*
+ * `expectNoHorizontalOverflow` / `expectBottomNavInViewport` / `VIEWPORTS` 都住在
+ * `helpers.ts`（一处定义）——`vocabulary.spec.ts` 那条「四角色 × 四档视口 × 全部页面」
+ * 要共用它们，而这个文件里写第二遍就是两份会各自漂移的表。
  */
-async function expectNoHorizontalOverflow(page: Page, label: string) {
-  const { scrollWidth, clientWidth } = await page.evaluate(() => ({
-    scrollWidth: document.documentElement.scrollWidth,
-    clientWidth: document.documentElement.clientWidth
-  }))
-  expect(
-    scrollWidth,
-    `${label} 出现横向溢出（scrollWidth ${scrollWidth} > clientWidth ${clientWidth}）`
-  ).toBeLessThanOrEqual(clientWidth)
-}
-
-/**
- * 底部导航必须落在视口里（§5.13.8 ⑨，**只在 780px 以下的档位调用**）。
- *
- * `AppLayout.vue` 的 `.sidebar` 在 `@media (max-width: 780px)` 里变成
- * `position: fixed; left: 0; right: 0; bottom: 0`（`styles.css`），所以这两档都要断它
- * 整块落在视口内。**判据是几何量而不是类名**：类名写对了而 `bottom: 0` 被别处的
- * `height` / `transform` 顶出屏幕，屏幕上看不出、类名断言也看不出。
- *
- * **780px 以上不要调它**：那时 `.sidebar` 是普通侧栏、跟着页面滚动，它落在视口外是正常的。
- * 调用点按档位上的 `mobile` 标志分岔，理由写在那里。
- */
-async function expectBottomNavInViewport(page: Page, label: string) {
-  const nav = page.locator('.sidebar')
-  await expect(nav, `${label}：底部导航不在 DOM 里`).toHaveCount(1)
-  const box = await nav.boundingBox()
-  const size = page.viewportSize()
-  expect(box, `${label}：底部导航量不到尺寸`).toBeTruthy()
-  expect(size, `${label}：量不到视口尺寸`).toBeTruthy()
-  const b = box as { x: number; y: number; width: number; height: number }
-  const v = size as { width: number; height: number }
-  // 允许 1px 的取整误差；两个方向都断——横着跑出右边与竖着沉到屏幕底下是两种不同的坏法。
-  expect(b.x, `${label}：底部导航左边跑出视口（x=${b.x}）`).toBeGreaterThanOrEqual(-1)
-  expect(b.x + b.width, `${label}：底部导航右边跑出视口`).toBeLessThanOrEqual(v.width + 1)
-  expect(b.y + b.height, `${label}：底部导航沉到视口下方`).toBeLessThanOrEqual(v.height + 1)
-}
 
 /**
  * 一直按 `Tab` 直到焦点落到某个元素上（§5.13.8 ⑩）。
@@ -1955,12 +1922,7 @@ test.describe('专业报告工作台', () => {
     await expect(page.locator('.versions .row').first()).toBeVisible()
 
     // 四档（§5.13.9 的人工检查清单）：`mobile` 决定**要不要**断底部导航，理由见下。
-    for (const { width, height, mobile } of [
-      { width: 375, height: 812, mobile: true },
-      { width: 768, height: 1024, mobile: true },
-      { width: 1024, height: 768, mobile: false },
-      { width: 1440, height: 900, mobile: false }
-    ]) {
+    for (const { width, height, mobile } of VIEWPORTS) {
       const label = `${width}px 的报告页`
       await page.setViewportSize({ width, height })
       await expectNoHorizontalOverflow(page, label)
@@ -2313,10 +2275,21 @@ test.describe('Admin System Management', () => {
    */
   test('系统管理员的导航里没有测评任务', async ({ page }) => {
     await loginAs(page, 'admin');
-    const nav = page.locator('nav.nav');
+    // 定位到**桌面那一套**：§5.14.6 起侧栏里有两套导航（`.nav-desktop` /
+    // `.nav-mobile`），**两套都在 DOM 里、由媒体查询选一套**——所以裸的 `nav.nav`
+    // 会解析到两个元素（严格模式当场报错），而「窄屏那一套也不含它」是另一件事，
+    // 下一句单独断。
+    const nav = page.locator('nav.nav-desktop');
     await expect(nav).toBeVisible();
     await expect(nav.getByText('账号与权限')).toBeVisible();
     await expect(nav.getByText('测评任务')).toHaveCount(0);
+    // 窄屏底栏那一套同样不该有它。`display:none` 只把它挡在无障碍树之外，
+    // **CSS 定位器照样数得到它**——只断桌面那一套的话，底栏里混进「测评任务」
+    // 不会有任何东西看得见。
+    // 先证明这一套真的渲染出来了：它在 1280px 下 `display:none`，一个「根本没渲染」
+    // 的实现会让下面那条 `toHaveCount(0)` 变成恒真（§测试注意：先证明有东西可扫）。
+    await expect(page.locator('nav.nav-mobile').getByText('账号与权限')).toHaveCount(1);
+    await expect(page.locator('nav.nav-mobile').getByText('测评任务')).toHaveCount(0);
 
     // 直接敲 URL 也不会渲染出任务列表：路由表里已经没有这一条。
     await page.goto('/admin/tasks');
@@ -2648,12 +2621,7 @@ test.describe('Mobile Responsiveness', () => {
     // 溢出等于什么都没量（CLAUDE.md 测试注意「先证明有东西可扫，再断言它干净」）。
     await expect(reminderCard.locator('.timeline-item, .card-body > .muted').first()).toBeVisible()
 
-    for (const { width, height, mobile } of [
-      { width: 375, height: 812, mobile: true },
-      { width: 768, height: 1024, mobile: true },
-      { width: 1024, height: 768, mobile: false },
-      { width: 1440, height: 900, mobile: false }
-    ]) {
+    for (const { width, height, mobile } of VIEWPORTS) {
       const label = `${width}px 的工作台`
       await page.setViewportSize({ width, height })
       await expectNoHorizontalOverflow(page, label)
@@ -4271,6 +4239,62 @@ test.describe('心理老师工作台的行动优先', () => {
     return Number(matched![1]);
   }
 
+  /**
+   * 档案抽屉里那六枚工作入口并不等价：四枚各**加一条记录**、一枚把档案推回流程
+   * （重新打开）、只有「关闭档案」动的是档案的**存续**。此前六枚共用
+   * `.detail-actions button` 那一套白底灰边，于是「关闭档案」与「记录人工复核」
+   * 长得一模一样（V2.0.0 §5.14.6 第 5 条：危险操作分离并确认）。
+   *
+   * 判据取**计算值**而不是类名——与「布局完整性」那一组同一个道理：类名写对了而
+   * 颜色被别处的规则盖掉时，屏幕上照样看不出来，类名断言也照样是绿的。
+   * （这里确实有第二个人声明颜色：`.detail-actions button` 是 (0,1,1) 而
+   * `.btn.danger` 是 (0,2,0)——**加对了类名仍然可能不生效**，所以必须量。）
+   */
+  test('关闭档案与其余五枚工作入口长得不一样，且动手前先问一句', async ({ page }) => {
+    await loginAs(page, 'counselor');
+
+    // 队列是「未关闭 + 四档判据之一」，所以第一行必然有「关闭档案」而不是
+    // 「重新打开」。先证明它非空——空队列上下面每一条断言都无从谈起。
+    //
+    // 用 `toBeVisible()` 而不是 `count()`：后者**立即求值**，而页面的 `cases`
+    // 这一刻还在请求中，于是它数到 0 —— 那条断言会红在「队列是空的」上，而
+    // 队列并不空，只是还没到。同一页上方那条「全部学生」用例也是这么写的
+    // （先 `first()` 可见，再数行数）。
+    const rows = page.locator('.queue-row');
+    await expect(rows.first(), '优先队列是空的，这条用例会退化成空转').toBeVisible();
+    await rows.first().click();
+
+    const bar = page.locator('.detail-actions');
+    await expect(bar).toBeVisible();
+
+    const danger = bar.getByRole('button', { name: '关闭档案' });
+    const normal = bar.getByRole('button', { name: '记录人工复核' });
+    await expect(danger).toBeVisible();
+    await expect(normal).toBeVisible();
+
+    const colorOf = (locator: typeof danger) =>
+      locator.evaluate(el => getComputedStyle(el).color);
+    const [dangerColor, normalColor] = await Promise.all([colorOf(danger), colorOf(normal)]);
+    expect(
+      dangerColor,
+      `关闭档案与其余工作入口同色（${dangerColor}），危险操作没有分离出来`,
+    ).not.toBe(normalColor);
+
+    // 只断「不同」还不够：把其余五枚涂红也满足它。要的是**危险的那一枚**是红的那一支。
+    const [r, g, b] = dangerColor.match(/\d+/g)!.map(Number);
+    expect(r, `关闭档案的颜色 ${dangerColor} 不是红色系`).toBeGreaterThan(g + 30);
+    expect(r, `关闭档案的颜色 ${dangerColor} 不是红色系`).toBeGreaterThan(b + 30);
+
+    // 「分离」与「确认」是两半。关档那一步的确认本来就有（`closeCase` 里的
+    // `showConfirmation`），这一条钉住它不许被摘掉——取消之后弹层关掉、什么都不写。
+    await danger.click();
+    const confirm = page.getByRole('dialog', { name: '关闭关注档案' });
+    await expect(confirm).toBeVisible();
+    await expect(confirm).toContainText('关闭不会删除历史记录');
+    await confirm.getByRole('button', { name: '取消' }).click();
+    await expect(confirm).toHaveCount(0);
+  });
+
   test('负责人快捷筛选：条数、列表与空态说的是同一件事', async ({ page }) => {
     await loginAs(page, 'counselor');
     await page.goto('/counselor/cases');
@@ -4941,6 +4965,57 @@ test.describe('量表评分规则', () => {
     await expect(panel.getByRole('button', { name: '保存规则' })).toBeDisabled();
   });
 
+  /**
+   * 「放弃修改」点下去要先问一句（V2.0.0 §5.14.6 第 5 条：危险操作分离并确认）。
+   *
+   * 它此前是 `@click="load"`：按钮只在 `isDirty` 时可点，所以点它**一定**意味着
+   * 一批刚改的阈值会没——而拦住的那一步不存在。这条断言的两半正是那个区别：
+   * 取消之后**改动还在**（证明没有偷偷 load），确认之后**才**变回去。
+   *
+   * 全程只读：只改输入框、不点保存，所以不写任何规则版本（这一组是 serial，
+   * 且下一条收尾时会 `rule/reset` 回出厂值）。
+   */
+  test('放弃修改会先确认，取消之后改动还在', async ({ page }) => {
+    await page.goto('/admin/scale');
+
+    const panel = page.locator('section.card', { hasText: '评分规则' });
+    const threshold = panel.locator('input[type="number"]').first();
+    await expect(threshold).toBeVisible();
+    const original = await threshold.inputValue();
+
+    // 按钮是弹层唯一的入口，而 dialog 里的确认按钮**也叫这个名字**——两者靠
+    // `panel` 这个作用域分开（弹层 Teleport 到 body，不在 panel 里）。
+    const discard = panel.getByRole('button', { name: '放弃修改' });
+    // 干净的时候它是灰的：先证明这枚按钮认得「改没改过」。
+    await expect(discard).toBeDisabled();
+
+    // 改一个值。不假设服务端此刻是多少——这一条断的是「改动还在不在」，
+    // 而不是「出厂阈值是 7」（后者是上一条用例的主题）。
+    const changed = original === '7' ? '8' : '7';
+    await threshold.fill(changed);
+    await expect(discard).toBeEnabled();
+
+    await discard.click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toBeVisible();
+    // 代价只说草稿那一层：规则版本与历史结果都不动。少了后半句，改过阈值的人
+    // 会以为自己要放弃一个已生效的版本。
+    await expect(dialog).toContainText('不会保存');
+    await expect(dialog).toContainText('历史结果也不受影响');
+
+    await dialog.getByRole('button', { name: '取消' }).click();
+    await expect(dialog).toHaveCount(0);
+    // ★ 关键的一半：取消之后那个输入框里**还是刚填的值**。
+    // 直接 `@click="load"` 的实现在这里变红，而上面那句「弹层可见」在它上面是绿的。
+    await expect(threshold).toHaveValue(changed);
+
+    // 再来一次，这回确认：值回到服务端那一份。
+    await discard.click();
+    await page.getByRole('dialog').getByRole('button', { name: '放弃修改' }).click();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(threshold).toHaveValue(original);
+  });
+
   test('saving a published rule versions it rather than mutating in place', async ({ page }) => {
     await page.goto('/admin/scale');
 
@@ -4974,6 +5049,79 @@ test.describe('量表评分规则', () => {
     });
   });
 });
+
+// ========== 空态与说明不指向不可达动作 ==========
+
+/**
+ * 空态与说明不得把用户指向实际不可用的动作（V2.0.0 §5.14.6 第 6 条）。
+ *
+ * 这一组断的是**跨角色的指路**：同一句文案被两个角色共用，而它点名的页面只属于其中
+ * 一个。判据刻意不是「这句话该是哪几个字」，而是**那个入口该不该出现在他的屏幕上**
+ * ——文案随便改，把管理员指向 `/counselor/*` 就会红。
+ *
+ * 两处都在**多角色共用的组件**里（`frontend/src/app/routes.ts` 里被两个以上角色引用的
+ * 那 7 个，`rg` 数得出来）。该角色的路由表里没有那个页面 → `meta.role` 不匹配 →
+ * `AppLayout` 把他弹回登录页，所以他点过去得到的是「登出」，而不是那个页面。
+ *
+ * 两条都不依赖库里有没有数据，且都**先证明有东西可扫，再断言它干净**——少了那一句，
+ * 下面的 `not.toContainText` 在一个还在加载的页面上也成立，那就是一条恒绿的守卫。
+ */
+test.describe('空态与说明不指向不可达动作', () => {
+  test('导出中心的空态对管理员说他自己能做的事，不指向心理老师的页面', async ({ page }) => {
+    await loginAs(page, 'admin')
+    // 导出作业**没有删除接口**（§16.3：只有撤销），所以演示库里那些作业永远不会自己
+    // 消失，空态也就永远不出现。打桩把它清空是唯一可靠的办法，顺带不打真接口。
+    await page.route(
+      url => url.pathname.endsWith('/api/v1/export-jobs'),
+      route =>
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            success: true,
+            data: { items: [] },
+            request_id: 'stub',
+            error: null
+          })
+        })
+    )
+    await page.goto('/admin/exports')
+
+    // 只在**那一句空态**里断，不扫整页：整页扫的话，页头、页脚或哪一天新加的一句
+    // 无关文案里出现「工作台」三个字就会误报，而误报会让人把这条守卫关掉。
+    const empty = page.locator('main .empty').filter({ hasText: '还没有导出记录' })
+    await expect(empty, '空态没渲染出来，这一条会退化成空转').toBeVisible()
+
+    // 「重点关注学生」「工作台」「测评任务」三个入口全在 `/counselor/*` 下。
+    await expect(empty).not.toContainText('重点关注学生')
+    await expect(empty).not.toContainText('工作台')
+    await expect(empty).not.toContainText('测评任务')
+    // 属于他的那一半要在：作业由谁发起、他到时候能做什么（查看 / 撤销，不能下载）。
+    await expect(empty).toContainText('由心理老师在他的页面上发起')
+    await expect(empty).toContainText('替任何人撤销')
+  })
+
+  test('任务页的未匹配行说明只对心理老师讲重传，不把领导指向数据中心', async ({ page }) => {
+    await loginAs(page, 'leader')
+    await page.goto('/leader/tasks')
+
+    const firstRow = page.locator('tbody tr').first()
+    await expect(firstRow, '演示数据里应当至少有一场任务').toBeVisible()
+    await firstRow.getByRole('button', { name: '查看明细' }).click()
+
+    const modal = page.locator('.modal-panel').first()
+    await modal.getByRole('button', { name: '未匹配行' }).click()
+
+    // 这一句常挂（与有没有未匹配行无关），所以不必先造一条导入批次。
+    const note = modal.locator('p.muted').filter({ hasText: '为什么没进去' })
+    await expect(note, '未匹配行的说明没渲染出来，这一条会退化成空转').toBeVisible()
+
+    // 「数据中心」是 `/counselor/data`，而且补名册 / 补发目标学生 / 重传文件
+    // 三件事没有一件是领导的写权。
+    await expect(note).not.toContainText('数据中心')
+    await expect(note).toContainText('都由心理老师处理')
+  })
+})
 
 // ========== 布局完整性 ==========
 
@@ -5318,6 +5466,52 @@ test.describe('布局完整性', () => {
    * ④全屏那一支写成等价形态（`maxHeight: 'none'` 配一个行内 `height: '340px'`）→ 红在
    * `tableHeight > 340`（收到 340）。
    */
+  /**
+   * 每页最多一个主操作；「选择文件」是**输入**，不是**提交**（V2.0.0 §5.14.6 第 5 条）。
+   *
+   * 四处导入卡片上的「选择文件」此前是 `btn primary`，于是同一张卡片里并排两枚实心蓝
+   * 按钮——这一枚与「确认导入 / 创建草稿版本」（后者由 `.import-summary button` 涂色，
+   * 是主操作的**另一个出处**）。判据与全站一致：**改不改服务端状态**。选择文件只把字节
+   * 读进浏览器；真正写库的是确认那一枚。
+   *
+   * **判据刻意不写成「卡片里最多一枚实心蓝」**：`.import-summary` 整块只在预览出现之后
+   * 才渲染，所以初次进入这一页时一枚实心蓝都没有，那条断言恒成立——**一条恒绿的守卫
+   * 比没有更糟，它占着「这一条有人守」的位置**（CLAUDE.md §29）。这里断的是「这一枚
+   * 是白底」，它不需要预览出现就恒有牙。
+   *
+   * 走两个角色：`/counselor/data` 是心理老师的路由，另两条归管理员。不写死色值，
+   * 只断「不是实心」——改了品牌色不该让这条红，让它红的只能是**又变回主操作**。
+   */
+  test('导入卡片的「选择文件」是次要操作，不是实心主操作', async ({ page }) => {
+    const check = async (path: string) => {
+      await page.goto(path);
+      const pickers = page.locator('main .import-drop label.btn');
+      // 先证明这几枚真的在：一个都没扫到时，下面的 `toEqual([])` 会静默通过
+      // （「先证明有东西可扫，再断言它干净」）。
+      await expect(pickers.first(), `${path} 上没扫到「选择文件」，这条断言会退化成空转`)
+        .toBeVisible();
+      const solid = await pickers.evaluateAll(els =>
+        els
+          .filter(el => {
+            const bg = getComputedStyle(el).backgroundColor
+            return bg !== 'rgba(0, 0, 0, 0)' && bg !== 'rgb(255, 255, 255)'
+          })
+          .map(el => (el.textContent || '').trim()),
+      );
+      expect(
+        solid,
+        `${path} 上有 ${solid.length} 枚「选择文件」是实心主操作：${solid.join(' / ')}`,
+      ).toEqual([]);
+    };
+
+    await loginAs(page, 'counselor');
+    await check('/counselor/data');
+
+    await loginAs(page, 'admin');
+    await check('/admin/organization');
+    await check('/admin/scale');
+  });
+
   test('测评完成明细弹层可以铺满视口展示', async ({ page }) => {
     const login = await page.request.post('/api/v1/auth/login', {
       data: { account: '13800000001', password: '123456', role: 'counselor' },
@@ -5531,8 +5725,10 @@ test.describe('布局完整性', () => {
       }
     };
 
-    // ① 侧栏（counselor 实测 12 个图标位；`v-show` 收着的子菜单那几项也在 DOM 里）。
-    //    它在每一页都在。
+    // ① 侧栏。counselor 实测 17 个图标位 = 桌面那一套 12 个（7 个顶层 + `v-show` 收着的
+    //    5 个子页，它们也在 DOM 里）+ 窄屏那一套 5 个（4 个高频入口 + 「更多」）。
+    //    **两套都在 DOM 里、由媒体查询选一套**，而 `page.locator` 数的是 DOM，
+    //    与可见性无关——所以这个数不随视口变。它在每一页都在。
     await page.goto('/counselor/tasks');
     await expect(page.locator('.nav-icon').first()).toBeVisible();
     await assertIcons('.nav-icon', '侧栏导航');
@@ -5551,6 +5747,194 @@ test.describe('布局完整性', () => {
     await page.goto('/counselor/analytics/overview');
     await expect(page.locator('.kpi-icon').first()).toBeVisible();
     await assertIcons('.kpi-icon', '指标卡');
+  });
+
+  /**
+   * §5.14.6 第 3 条：窄屏底栏**只保留 4～5 个最高频入口**，其余进「更多」。
+   *
+   * 这一条钉的是底栏的**形态**。改动之前，780px 以下把整套导航摊进底栏再横向滚动
+   * （心理老师那一栏是 12 个按钮 × `flex: 1 0 76px`），而底栏横滑是全站唯一一处
+   * 「看不出还能滑」的交互——屏幕上没有任何东西提示右边还有内容，滑不滑得动只能靠猜。
+   * 所以判据不是「有没有滚动条」，是**那一排按钮各自是什么**。
+   *
+   * 四个角色逐一断，因为那张表是按角色写死的（`AppLayout.vue` 的 `MOBILE_PRIMARY`），
+   * 只断一个角色就漏掉另外三张。学生那一张**故意只有两项、且没有「更多」**：他本来
+   * 就只有两个目的地，摆一个点开是空的按钮比不摆更糟。
+   */
+  test('窄屏底栏只保留最高频入口，其余进「更多」', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 812 });
+
+    const BARS = [
+      // `labels` 里只放**真的能去的页面**，顺序也是判据（最高频的在最左边）。
+      // 「更多」不进来：它是一枚**按钮**、点开是一个弹层，不是目的地。把它混进这张
+      // 清单会让下面那两条断言互相遮蔽——少了它项数就不对，而项数不对就轮不到它那一条，
+      // 于是它看着被两条守着，其实一条都没守（§29 那条「占着『这一条有人守』的位置」）。
+      { role: 'counselor', labels: ['工作台', '重点关注学生', '测评任务', '统计分析'], more: true },
+      { role: 'leader', labels: ['领导总览', '重点进展', '测评任务', '学校统计'], more: true },
+      { role: 'admin', labels: ['系统概览', '账号与权限', '组织学生', '量表题库'], more: true },
+      { role: 'student', labels: ['我的测评', '完成记录'], more: false }
+    ] as const;
+
+    for (const { role, labels, more } of BARS) {
+      await loginAs(page, role);
+      const who = `${role} 的窄屏底栏`;
+
+      // 两套都在 DOM 里、媒体查询选一套（与 `.account-menu` 同一个做法，见 §5.14.4）。
+      // 所以这里要断的是「选中的是哪一套」，而桌面那一套必须真的不显示——一个只把
+      // 窄屏那套写出来、忘了藏桌面那套的实现，在 375px 下屏幕上并不明显。
+      await expect(page.locator('.nav-desktop'), `${who}：桌面导航没有让位`).toBeHidden();
+      await expect(page.locator('.nav-mobile'), `${who}：窄屏导航没有出现`).toBeVisible();
+
+      // `a.nav-btn` 而不是 `.nav-btn`：底栏里只有**目的地**是链接，「更多」是一枚
+      // `<button>`（它不导航，它开弹层）。这个区分不是为测试造出来的——它就是无障碍树里
+      // 的角色差别，而下面那一条断的正是它。不排除它的话，两条断言会互相遮蔽。
+      const items = page.locator('.nav-mobile a.nav-btn .nav-text');
+      await expect(items, `${who}：底栏项数与预期不符`).toHaveCount(labels.length);
+      expect(await items.allTextContents(), `${who}：底栏里的入口不对`).toEqual([...labels]);
+
+      // 「更多」**只在真有东西可收时才在**，而且它必须是一枚 button。
+      // 学生那一栏断它一个都没有——否则点开是一个空弹层，而「点了没反应」正是
+      // 这一条改动最容易造出来的形状。
+      await expect(
+        page.locator('.nav-mobile').getByRole('button', { name: '更多' }),
+        `${who}：「更多」不该在的时候在了（或该在的时候不在）`
+      ).toHaveCount(more ? 1 : 0);
+
+      // 每个按钮都必须落在底栏那个框里。**折行是允许的**（「重点关注学生」6 个字在
+      // 375px 下放不进一格，见 `styles.css` 里 `.nav-mobile .nav-text` 那段尺寸核算），
+      // **被裁掉不是**——而裁掉只看截图很难分辨：溢出的那半个字在有些字号下看不出来。
+      const bar = await page.locator('.sidebar').boundingBox();
+      expect(bar, `${who}：量不到底栏尺寸`).toBeTruthy();
+      for (const button of await page.locator('.nav-mobile .nav-btn').all()) {
+        const box = await button.boundingBox();
+        expect(box, `${who}：量不到按钮尺寸`).toBeTruthy();
+        expect(box!.y, `${who}：按钮从底栏上沿溢出`).toBeGreaterThanOrEqual(bar!.y - 1);
+        expect(
+          box!.y + box!.height,
+          `${who}：按钮被底栏下沿裁掉`
+        ).toBeLessThanOrEqual(bar!.y + bar!.height + 1);
+      }
+
+      await expectNoHorizontalOverflow(page, who);
+    }
+  });
+
+  /**
+   * 「更多」里必须真的装着**窄屏上本来到不了的那些**。
+   *
+   * 这一条钉的是那个弹层存在的**理由**，不是它的长相。以心理老师为例：底栏里只剩
+   * 「统计分析」这一格，而它是一个**分组**——点它进的是分组第一页（`routes.ts` 的
+   * redirect），另外四个子页在手机上**只有「更多」这一条路**。所以「底栏收窄」这件事
+   * 成立的前提，正是这个弹层能把它们接住；弹层里少一个子页，那一页在 375px 下就没有
+   * 任何入口了，而底栏那一排仍然看着很整齐。
+   */
+  test('窄屏的「更多」能走到窄屏装不下的那些入口', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 812 });
+    await loginAs(page, 'counselor');
+
+    await page.locator('.nav-mobile .nav-btn', { hasText: '更多' }).click();
+    const panel = page.locator('.modal-panel');
+    await expect(panel).toBeVisible();
+
+    // 分组那一节按分组名成节，五个子页一个不少。
+    for (const name of ['筛查关注概览', '八维度分析', '年级维度对比', '班级维度画像', '专业分析报告']) {
+      await expect(panel.getByRole('link', { name }), `「更多」里没有「${name}」`).toBeVisible();
+    }
+    // 不在底栏里的顶层项也在。
+    for (const name of ['数据中心', '导出中心', '审计日志']) {
+      await expect(panel.getByRole('link', { name }), `「更多」里没有「${name}」`).toBeVisible();
+    }
+    // 已经在底栏里的**可点**项不重复列：弹层是一张地图，不是第二条工具栏。
+    // 「统计分析」是分组、本身没有页面，所以它以那一节的形式在；而它的子页在。
+    await expect(panel.getByRole('link', { name: '工作台' })).toHaveCount(0);
+    await expect(panel.getByRole('link', { name: '重点关注学生' })).toHaveCount(0);
+
+    // 点一项：跳过去，并且弹层自己关掉。**不关会挡住刚跳过去的那一页**，
+    // 而这一条是全靠手感发现的——它不在任何计算值里。
+    await panel.getByRole('link', { name: '八维度分析' }).click();
+    await expect(page).toHaveURL(/\/counselor\/analytics\/dimensions$/);
+    await expect(page.locator('.modal-panel'), '跳转之后弹层还挡在前面').toHaveCount(0);
+  });
+
+  /**
+   * §5.14.6 第 8 条：`prefers-reduced-motion` 下全站动效停下。
+   *
+   * 判据是**计算值**，不是源码里有没有那一段。一段写对了但被更高特异性的规则盖住的
+   * CSS，在屏幕上与没写一模一样，而读源码看不出来——这正是这条要防的形状：
+   * 盖住它的那条规则挂在类选择器上（特异性 0-1-0），而这一段写在 `*` 上（特异性 0），
+   * 少一个 `!important` 就**一条都盖不住**，但那段代码看着完全正常。
+   *
+   * 断两样东西，因为它们是**两类**动效，各有一条会单独失效的声明：
+   * - `transition-duration`（指标卡的悬停抬升、分组箭头的旋转）；
+   * - `animation-iteration-count`（骨架屏那条是 `… infinite`，光压时长它会以十万次
+   *   每秒的频率继续重画，次数压到 1 才真的停下）。
+   */
+  test('prefers-reduced-motion 下过渡与动画都停下', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await loginAs(page, 'counselor');
+
+    /**
+     * 计算出来的时长（秒）。两处都踩过，都写在这里：
+     *
+     * ① **`getPropertyValue` 只认连字符写法**（`transition-duration`）。传 camelCase
+     *    回来的是空串，而 `parseFloat('') || 0` 是 `0` —— 于是「量不到」与「已经停下」
+     *    在断言里长得一模一样，整条用例恒绿。**实测过**：把全域 reduced-motion 整段
+     *    摘掉（M6），它照样 `1 passed`。「恒绿的守卫比没有更糟，它占着『这一条有人守』
+     *    的位置」（§29）说的就是这个形状，所以下面量不到时**当场红**，不回落成 0。
+     * ② **只比大小，不比字符串**：`0.01ms` 在 Chromium 上读回来是 `1e-05s`，写死
+     *    `'0.01ms'` 的断言会在换一个浏览器时红在一个与功能无关的地方。
+     */
+    const duration = async (
+      selector: string,
+      prop: 'transition-duration' | 'animation-duration'
+    ) => {
+      const raw = await page
+        .locator(selector)
+        .first()
+        .evaluate((el, p) => getComputedStyle(el).getPropertyValue(p), prop);
+      // 先证明量到了东西，再断言它够小 —— 少了这一句，上面那 ① 就会重演。
+      // 判据是「解析得出一个数」，**不是一个格式**：Chromium 把 `0.01ms` 读回来是
+      // `1e-05s`（写死 `/^[\d.]+m?s$/` 会被它绊倒——第一版就是这么红的）。
+      expect(raw, `${selector} 的 ${prop} 量不到，这一条就没有量到东西`).not.toBe('');
+      expect(
+        Number.isNaN(parseFloat(raw)),
+        `${selector} 的 ${prop} 读回来是 ${JSON.stringify(raw)}，解析不出时长`
+      ).toBe(false);
+      return raw.endsWith('ms') ? parseFloat(raw) / 1000 : parseFloat(raw);
+    };
+
+    await page.goto('/counselor/workbench');
+    await expect(page.locator('.metric').first()).toBeVisible();
+    expect(await duration('.metric', 'transition-duration'), '指标卡的过渡没有停下').toBeLessThan(0.01);
+    expect(await duration('.nav-chevron', 'transition-duration'), '分组箭头的过渡没有停下').toBeLessThan(0.01);
+
+    /*
+     * 骨架屏要**先让它出现**再量：它在数据回来那一刻就没了，直接 `goto` 之后的
+     * 那一帧量到的多半是「元素不存在」——那样 `.first().evaluate()` 会抛，
+     * 而把异常当判据的写法正是「一条会无故变红的守卫」。所以把 `/care-cases` 按住
+     * （它就是工作台那个 `loading` 的闸门），等骨架屏出来了再量，量完放行。
+     */
+    await page.route('**/api/v1/care-cases', async route => {
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      await route.continue();
+    });
+    await page.goto('/counselor/workbench');
+    const skeleton = page.locator('.skeleton-line').first();
+    await expect(skeleton, '骨架屏没有出现，这一条就没有量到东西').toBeVisible();
+    expect(await duration('.skeleton-line', 'animation-duration'), '骨架屏动画没有停下').toBeLessThan(0.01);
+    /*
+     * 这一条守的是**另一件事**，所以它单独存在：只压 `animation-duration` 而不管次数时，
+     * 一条 `… infinite` 的动画会以「每 0.01ms 一轮」的频率继续重画 —— 屏幕上看起来停了，
+     * 而它仍在满负荷烧 CPU。所以它断的是**次数**，与上面那三条断的时长是两回事
+     * （M6 把全域段摘掉时这一条**不该**红：`.skeleton-line` 落回 `animation: none`，
+     * 次数的计算值就是初始值 `1`）。
+     */
+    expect(
+      await page.locator('.skeleton-line').first().evaluate(
+        el => getComputedStyle(el).animationIterationCount
+      ),
+      '无限动画只压时长不停次数，它会以极高频率继续重画'
+    ).toBe('1');
   });
 });
 
@@ -5581,6 +5965,80 @@ test.describe('题库发布', () => {
     // test of nothing.
     await expect(publishedRow).not.toHaveCount(0);
     await expect(publishedRow.getByRole('button', { name: '发布' })).toHaveCount(0);
+  });
+
+  /**
+   * 「发布」点下去要真的发生点什么（V2.0.0 §5.14.6 第 5 条）。
+   *
+   * 上面那一条只证明了**已发布的行没有这枚按钮**，而它对这个缺陷是全绿的：
+   * `showPublish` 曾经只被赋值、模板里从来没有读过它，于是按钮在、点了没有任何反应，
+   * 而演示库里恰好没有草稿版本——**一个扫不到 DRAFT 行的用例，两半都证明不了**。
+   * 所以这一行草稿由桩喂进来。
+   */
+  test('发布草稿会先确认，取消之后一个请求都不发', async ({ page }) => {
+    await loginAs(page, 'admin');
+
+    // 两行都按真实形状喂：已发布那一条用的是**真 id**（1），这样 `current` 仍指向它、
+    // 旁边的评分规则面板照常加载；草稿那一条的 id 是编的，没有任何东西会去请求它。
+    const versions = [
+      {
+        id: 1, code: 'MHT', name: '中学生心理健康测验', version: 'MHT-1.1.0', status: 'PUBLISHED',
+        published_at: '2026-09-19T04:16:05', total_questions: 100, content_questions: 90,
+        validity_questions: 10, key_questions: 2, rule_version: 'MHT-RULE-1.1.90'
+      },
+      {
+        id: 999, code: 'MHT', name: '中学生心理健康测验', version: 'MHT-1.1.1', status: 'DRAFT',
+        published_at: null, total_questions: 100, content_questions: 90,
+        validity_questions: 10, key_questions: 2, rule_version: 'MHT-RULE-1.1.91'
+      }
+    ];
+    // 判定函数而不是字符串通配：`/scales/versions/1/rule` 同样以 `/scales/versions`
+    // 打头，按前缀匹配会把评分规则面板一起桩掉，而那条请求的失败会被读成「面板坏了」。
+    await page.route(
+      url => url.pathname.endsWith('/scales/versions'),
+      route =>
+        route.fulfill({
+          contentType: 'application/json',
+          body: JSON.stringify({
+            success: true, data: { items: versions }, request_id: 'e2e', error: null
+          })
+        })
+    );
+
+    let publishCalls = 0;
+    await page.route(
+      url => url.pathname.endsWith('/publish'),
+      route => {
+        publishCalls += 1;
+        return route.fulfill({
+          contentType: 'application/json',
+          body: JSON.stringify({
+            success: true,
+            data: { version: 'MHT-1.1.1', status: 'PUBLISHED', archived_versions: ['MHT-1.1.0'] },
+            request_id: 'e2e',
+            error: null
+          })
+        });
+      }
+    );
+
+    await page.goto('/admin/scale');
+
+    const draftRow = page.locator('tr', { hasText: 'MHT-1.1.1' });
+    // 先证明这枚按钮真的渲染出来了，再点它——一个「按钮在、点了什么都不发生」的实现
+    // 在这条断言上是绿的，抓住它的是下面那一段。
+    await expect(draftRow.getByRole('button', { name: '发布' })).toHaveCount(1);
+    await draftRow.getByRole('button', { name: '发布' }).click();
+
+    // 弹层要把代价说出来：旧版本归档（不是删除）、发布之后不能就地改。
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText('归档');
+    await expect(dialog).toContainText('不能就地修改');
+
+    await dialog.getByRole('button', { name: '取消' }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(publishCalls, '取消发布之后不该发出任何发布请求').toBe(0);
   });
 });
 
@@ -6169,6 +6627,9 @@ test.describe('失败与竞态不留下旧数据', () => {
 
     await failApiPathsMatching(page, /^\/api\/v1\/scales\/versions\/\d+\/rule$/, '读取评分规则失败');
     await panel.getByRole('button', { name: '放弃修改' }).click();
+    // §5.14.6 第 5 条起它先问一句，确认之后才真的重新拉。要按**弹层里那一颗**——
+    // 触发器与确认键同名，而 `page.getByRole('button', …)` 会同时命中两个（严格模式）。
+    await page.getByRole('dialog').getByRole('button', { name: '放弃修改' }).click();
 
     await expect(panel.locator('.form-error')).toBeVisible();
     // 留着那一行的话，标题栏写着 `MHT-RULE-1.1.0 · 生效中`、正文写着读取失败——

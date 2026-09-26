@@ -24,6 +24,23 @@ const draft = ref<Pick<ScaleRuleConfig, 'validity_retest_threshold' | 'total_lev
 
 const showConfirm = ref(false)
 
+/**
+ * 「放弃修改」的拦截（V2.0.0 §5.14.6 第 5 条：危险操作分离并确认）。
+ *
+ * 它此前是 `@click="load"`——按钮只在 `isDirty` 时可点，也就是说**点它一定意味着
+ * 有一批刚改的阈值会没**，而没有任何东西拦一下。改错一个数、手滑点到旁边那颗，
+ * 就只能凭记忆重填。
+ *
+ * 与 `showConfirm`（保存已发布规则会生成新版本）**是两个开关、两个问题**：
+ * 一个问「要不要创建新版本」，一个问「要不要丢掉草稿」。复用同一个 ref 时，
+ * 先点保存再点放弃会看到上一条的文案。
+ *
+ * `danger` 保持 false：它不动服务端任何东西，规则版本一个字都不变。涂成红色会说
+ * 出一件没有发生的事——与 `ScalePage.vue` 那条「发布不是删除、所以不涂红」同一条
+ * 判据（全站 `.btn-danger` 的判据是「改不改服务端状态」）。
+ */
+const showDiscard = ref(false)
+
 /** 版本下拉框连着切两次（`watch` 每次都会出发一次请求）就会撞上这个竞态。 */
 const latest = createLatestRequest()
 
@@ -84,6 +101,15 @@ function save() {
     return
   }
   void commit()
+}
+
+/**
+ * 确认放弃之后才真的丢。`load()` 会重新拉一次、把 `draft` 重置成服务端那一份，
+ * 于是 `isDirty` 自己变回 false——这里不需要额外清状态。
+ */
+function discardChanges() {
+  showDiscard.value = false
+  void load()
 }
 
 async function commit() {
@@ -181,7 +207,9 @@ const bandWarning = computed(() => {
       <p v-if="bandWarning" class="form-error" style="margin-top: 14px">{{ bandWarning }}</p>
 
       <div class="settings-actions">
-        <button class="btn" :disabled="!isDirty" @click="load">放弃修改</button>
+        <!-- 只在 `isDirty` 时可点，所以点它一定意味着有一批改动会没——因此走弹层，
+             不直接 `load`（V2.0.0 §5.14.6 第 5 条）。 -->
+        <button class="btn" :disabled="!isDirty" @click="showDiscard = true">放弃修改</button>
         <button class="btn primary" :disabled="!isDirty || saving || !!bandWarning" @click="save">
           {{ saving ? '正在保存…' : '保存规则' }}
         </button>
@@ -195,6 +223,17 @@ const bandWarning = computed(() => {
       confirm-text="创建新版本并保存"
       @confirm="commit"
       @update:open="showConfirm = $event"
+    />
+
+    <!-- 文案要说清代价**只落在草稿上**：规则版本一个字都不动，历史结果更不受影响。
+         只说「确认放弃？」的话，改过阈值的人会以为自己要放弃一个已生效的版本。 -->
+    <ConfirmDialog
+      :open="showDiscard"
+      title="放弃修改"
+      message="刚刚对分段与阈值的修改会全部丢失，不会保存。已保存的规则版本不受影响，历史结果也不受影响。"
+      confirm-text="放弃修改"
+      @confirm="discardChanges"
+      @update:open="showDiscard = $event"
     />
   </section>
 </template>

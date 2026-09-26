@@ -832,7 +832,13 @@ onUnmounted(() => {
           <span class="muted tiny">判定口径与系统内作答一致：命中重点题（85/97）会开出筛查信号与关怀档案</span>
           <div class="actions" style="justify-content:center;margin-top:14px">
             <button class="btn" @click="downloadAssessmentImportTemplate">下载模板</button>
-            <label class="btn primary" style="cursor:pointer">
+            <!-- 「选择文件」降级为次要（V2.0.0 §5.14.6 第 5 条：每页最多一个主操作）。
+                 它此前是 `btn primary`，于是这张卡片上有**两枚实心蓝按钮**：这一枚，
+                 与下面 `.import-summary` 里那枚「确认导入」。
+                 判据与全站一致——**改不改服务端状态**：选择文件只把字节读进浏览器，
+                 服务端一行都不动；真正写库的是「确认导入」。所以主操作是它。
+                 （`.import-summary button` 是主操作的**另一个出处**，见 styles.css。） -->
+            <label class="btn" style="cursor:pointer">
               选择文件
               <input type="file" accept=".csv" hidden @change="onAssessmentFile" />
             </label>
@@ -1009,7 +1015,9 @@ onUnmounted(() => {
           <span class="muted tiny">不会覆盖已发布题库或历史测评结果</span>
           <div class="actions" style="justify-content:center;margin-top:14px">
             <button class="btn" @click="downloadQuestionTemplate">下载模板</button>
-            <label class="btn primary" style="cursor:pointer">
+            <!-- 同上一张卡片：主操作是下面 `.import-summary` 里那枚「创建草稿版本」
+                 （它真的写库），「选择文件」只是把字节读进浏览器，所以降级。 -->
+            <label class="btn" style="cursor:pointer">
               选择文件
               <input type="file" accept=".csv,.json" hidden @change="onQuestionFile" />
             </label>

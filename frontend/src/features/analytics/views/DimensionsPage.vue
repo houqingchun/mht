@@ -184,7 +184,12 @@ async function exportValidityRetest() {
       :open="showForm" :title="formTitle" :fields="formFields" :submit-text="formSubmitText"
       @submit="onFormSubmit" @cancel="onFormCancel" @update:open="showForm = $event"/>
 
-    <div class="role-note"><b>样本说明</b><span class="minor">不同分析口径须由心理专业负责人确认。</span></div>
+    <!-- 这一句原本写的是「心理专业负责人」，而**那不是这套系统里的角色**（§4：角色已冻结为
+         学生 / 心理老师 / 德育领导 / 系统管理员，不得恢复「班主任」或「心理负责人」）。
+         它与 `OverviewPage.vue:126` 的「仅心理老师授权处理」是同一件事的两种写法，现在两处
+         同源：这一页由心理老师与德育领导共用，所以要用**读的人认得出的那一个名字**——
+         领导读完知道该找谁，心理老师读完知道说的就是他。（V2.0.0 §5.14.6 第 7 条。） -->
+    <div class="role-note"><b>样本说明</b><span class="minor">不同分析口径须由心理老师确认。</span></div>
 
     <div class="twocol">
       <section class="card">

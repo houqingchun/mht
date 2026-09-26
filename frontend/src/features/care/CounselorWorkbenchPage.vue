@@ -1247,7 +1247,16 @@ onMounted(load)
           <button type="button" @click="saveFollowUp">新增跟进</button>
           <button type="button" @click="saveFamilyContact">家庭回访</button>
           <button type="button" @click="saveRetest">安排复测</button>
-          <button v-if="detail.case_status !== 'CLOSED'" type="button" @click="closeCase">关闭档案</button>
+          <!-- 六枚并列的工作入口里，只有这一枚改的是档案的**存续**（其余四枚各加一条
+               记录、重开是把档案推回流程）。此前六枚共用 `.detail-actions button`
+               那一套白底灰边，于是「关闭档案」与「记录人工复核」长得一模一样
+               （V2.0.0 §5.14.6 第 5 条：危险操作分离并确认）。
+               确认那一步本来就有（`closeCase` 里的 `showConfirmation`），缺的只是
+               「看得出来」这一半——在按下之前就认得出哪一枚有代价。
+
+               `.btn.danger` 是**红字红边**而不是实心红：全站 `.btn-danger`（实心）
+               只用在 ConfirmDialog 的确认键上，那才是真正下手的时刻。 -->
+          <button v-if="detail.case_status !== 'CLOSED'" type="button" class="btn danger" @click="closeCase">关闭档案</button>
           <button v-else type="button" @click="reopenCase">重新打开</button>
         </div>
         <h3>筛查信号</h3>

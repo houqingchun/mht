@@ -4,6 +4,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { getMe, logout, type CurrentUser } from '../services/api'
 import { useSettings } from '../composables/useSettings'
 import AppIcon from '../components/AppIcon.vue'
+import Modal from '../components/Modal.vue'
 import Toast from '../components/Toast.vue'
 import ErrorState from '../components/ErrorState.vue'
 import ChangePasswordDialog from '../components/ChangePasswordDialog.vue'
@@ -114,6 +115,84 @@ function openNavGroup(item: NavItem) {
   if (analyticsExpanded.value && !route.path.startsWith(item.path + '/')) router.push(item.path)
 }
 
+/**
+ * 窄屏底栏只保留这几个入口，其余进「更多」（V2.0.0 §5.14.6 第 3 条）。
+ *
+ * 此前 780px 以下的处置是把**全部**入口摊进底栏再横向滚动：心理老师那一栏
+ * （7 个顶层 + 5 个子项）要滑三屏才看得完，而底栏横滑是全站唯一一处「看不出来
+ * 还能滑」的交互——屏幕上没有任何东西提示右边还有内容。
+ *
+ * 表里放的是 **key 而不是 path**：key 是导航项的身份，换路径（深链重排、加前缀）
+ * 不会让这张表悄悄指到别的地方去。认不出的 key 由 `filter` 丢掉——底栏少一项
+ * 比多一个空按钮好，而「这张表与导航脱节了」本身由 e2e 钉住（每个角色的底栏
+ * 项数 + 「更多」在不在）。
+ *
+ * 取哪四项的判据是**这一档上真的用得到**，不是「按侧栏顺序取前四个」：按顺序取的话
+ * 心理老师会拿到「工作台 / 重点关注学生 / 测评任务 / 数据中心」，而`统计分析`那五个页
+ * 在手机上就只剩「更多」里那一条路（`grep` 过：全站没有第二处指向
+ * `/analytics/dimensions` 这些路径的地方）。
+ */
+const MOBILE_PRIMARY: Record<string, string[]> = {
+  counselor: ['counselor/workbench', 'cases', 'tasks', 'analytics'],
+  leader: ['leader/overview', 'progress', 'tasks', 'analytics'],
+  admin: ['admin/overview', 'admin/system', 'organization', 'scale'],
+  // 学生只有两个入口，底栏就是全部——所以他没有「更多」。
+  student: ['student/home', 'student/history']
+}
+
+const mobilePrimary = computed<NavItem[]>(() => {
+  const nav = currentNav.value
+  const keys = user.value ? MOBILE_PRIMARY[user.value.role_code] : undefined
+  if (!nav || !keys?.length) return []
+  return keys
+    .map(key => nav.nav.find(item => item.key === key))
+    .filter((item): item is NavItem => Boolean(item))
+})
+
+/**
+ * 「更多」里放什么：**除底栏那几项之外的全部目的地**。
+ *
+ * 两半都要有，少一半就有东西在手机上不可达：
+ * - 不在底栏的顶层项（心理老师的`数据中心`/`导出中心`/`审计日志`那一类）；
+ * - 底栏里那个**分组**的子项。分组触发点进去是它的第一个子页（`routes.ts` 的
+ *   redirect），所以另外四个子页必须有第二条路。
+ *
+ * 反过来，已经在底栏里的**可点**项不重复列——弹层是一张地图，不是第二条工具栏。
+ */
+const mobileMore = computed<Array<{ title: string; items: NavItem[] }>>(() => {
+  const nav = currentNav.value
+  const keys = user.value ? MOBILE_PRIMARY[user.value.role_code] : undefined
+  if (!nav || !keys?.length) return []
+  const primary = new Set(keys)
+  const loose: NavItem[] = []
+  const groups: Array<{ title: string; items: NavItem[] }> = []
+  for (const item of nav.nav) {
+    if (item.children?.length) {
+      if (primary.has(item.key)) groups.push({ title: item.label, items: item.children })
+      continue
+    }
+    if (!primary.has(item.key)) loose.push(item)
+  }
+  // 「其他功能」排在最前面：它是这个弹层存在的理由（底栏放不下的那些），
+  // 分组子项是**顺带**补上的第二条路。
+  return loose.length ? [{ title: '其他功能', items: loose }, ...groups] : groups
+})
+
+/** 开合状态只管「更多」那个弹层；它由底栏上那枚按钮触发。 */
+const showMoreNav = ref(false)
+
+/**
+ * 底栏那一项算不算「当前」。
+ *
+ * 分组不能按 `activeNav === key` 判：`activeNav` 摊平之后拿到的是**子项**的 key
+ * （`analytics/overview`），而底栏上那一项的 key 是 `analytics`——照桌面那套写法，
+ * 站在任一报表页上底栏那一格都不会高亮，而用户会以为自己没在里面。
+ */
+function navItemActive(item: NavItem) {
+  if (item.children?.length) return route.path.startsWith(item.path + '/')
+  return activeNav.value === item.key
+}
+
 // Branding lives in settings so a school rename doesn't need a redeploy.
 const { settings, loadSettings } = useSettings()
 
@@ -198,7 +277,8 @@ load()
         </div>
       </div>
       <div class="nav-label">工作中心</div>
-      <nav class="nav" v-if="currentNav">
+      <!-- 桌面侧栏：完整导航，含分组与子菜单。780px 以下整块 `display:none`。 -->
+      <nav class="nav nav-desktop" v-if="currentNav">
         <template v-for="item in currentNav.nav" :key="item.key">
           <div v-if="item.children" class="nav-group">
             <button
@@ -232,6 +312,39 @@ load()
             <span class="nav-text">{{ item.label }}</span>
           </RouterLink>
         </template>
+      </nav>
+      <!--
+        窄屏底栏（V2.0.0 §5.14.6 第 3 条）：4 个最高频入口 + 「更多」。
+
+        与 `.account-menu` 同一个做法——**两套都在 DOM 里，媒体查询选一套**。
+        780px 以上这一块 `display:none`，所以它既不在无障碍树里（`display:none`
+        的元素不进 a11y tree），也不会让 `getByRole('link', { name: '重点关注学生' })`
+        这类定位在同一屏上取到两个元素。
+
+        「更多」只在**还有别的东西**时才出现：学生只有两个入口，他那一档既没有
+        分组也没有多余项，摆一个点开是空的按钮比没有更糟。
+      -->
+      <nav class="nav nav-mobile" v-if="currentNav">
+        <RouterLink
+          v-for="item in mobilePrimary"
+          :key="item.key"
+          :to="item.path"
+          :class="['nav-btn', { active: navItemActive(item) }]"
+        >
+          <span class="nav-icon"><AppIcon :name="item.icon" /></span>
+          <span class="nav-text">{{ item.label }}</span>
+        </RouterLink>
+        <button
+          v-if="mobileMore.length"
+          type="button"
+          class="nav-btn"
+          aria-haspopup="dialog"
+          :aria-expanded="showMoreNav"
+          @click="showMoreNav = true"
+        >
+          <span class="nav-icon"><AppIcon name="grid" /></span>
+          <span class="nav-text">更多</span>
+        </button>
       </nav>
       <div class="nav-spacer"></div>
     </aside>
@@ -307,6 +420,31 @@ load()
     />
 
     <SessionListDialog :open="showSessions" @update:open="showSessions = $event" />
+
+    <!--
+      「更多」：底栏放不下的入口（V2.0.0 §5.14.6 第 3 条）。
+
+      用 `Modal` 而不是自己写一层，是为了直接拿到弹层的焦点陷阱 / `aria-modal` /
+      焦点归还（CLAUDE.md §15 那条无障碍契约）——自己写就得把那三样各实现一遍，
+      而其中「面板在打开状态下被卸载也要解锁」正是那一节记着最容易漏的一条。
+
+      点一项就关掉它：弹层留着会挡住刚跳过去的那一页，而那一页正是他要去的地方。
+    -->
+    <Modal :model-value="showMoreNav" title="更多功能" @update:model-value="showMoreNav = $event">
+      <div v-for="section in mobileMore" :key="section.title" class="more-section">
+        <div class="more-title">{{ section.title }}</div>
+        <RouterLink
+          v-for="item in section.items"
+          :key="item.key"
+          :to="item.path"
+          :class="['more-item', { active: navItemActive(item) }]"
+          @click="showMoreNav = false"
+        >
+          <span class="nav-icon"><AppIcon :name="item.icon" /></span>
+          <span>{{ item.label }}</span>
+        </RouterLink>
+      </div>
+    </Modal>
 
     <Toast />
   </div>

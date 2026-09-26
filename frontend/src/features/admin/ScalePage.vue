@@ -80,6 +80,30 @@ function askPublish(version: ScaleVersion) {
   showPublish.value = true
 }
 
+/*
+ * 确认弹层上那段话（V2.0.0 §5.14.6 第 5 条：危险/不可逆动作要确认，并把代价说出来）。
+ *
+ * **这个弹层此前不存在。** `showPublish` 只被赋值、模板里从来没有读过它，
+ * `confirmPublish` 是一个完整实现却**零调用者**——于是「发布」是一枚点了没有任何
+ * 反应的死按钮，而它自 V1.0.0 起就是这样（`git log -S showPublish` 只有一个提交）。
+ * 量表发布是这条生命周期里唯一把草稿变成可用的动作（§7），所以它不可达等于
+ * 「导入进来的题库永远用不上」。
+ *
+ * 话里那三句各回答一个问题：**谁能用到它**（新建任务）、**旧版本会怎样**（归档，
+ * 不是删除）、**发布之后还能不能改**（不能就地改，会生成新版本）。第三句是这里
+ * 唯一一句「你之后会后悔」的提示——`danger` 仍然是 false，因为发布不删任何东西
+ * （§7：旧版本标 RETIRED 保留），把它涂成红色会说出一件没有发生的事。
+ */
+const publishMessage = computed(() => {
+  const target = publishTarget.value
+  if (!target) return ''
+  return (
+    `发布 ${target.version} 之后：新建的测评任务才能选到它，` +
+    '同一量器上当前已发布的版本会被归档（保留，不删除）。' +
+    '已发布的规则不能就地修改——要改会生成一个新版本。'
+  )
+})
+
 async function confirmPublish() {
   if (!publishTarget.value) return
   publishing.value = true
@@ -144,7 +168,9 @@ onMounted(load)
         <span class="muted tiny">导入只创建草稿版本，校验通过后仍需人工发布</span>
         <div class="actions" style="justify-content:center;margin-top:13px">
           <button class="btn" @click="downloadQuestionTemplate">下载模板</button>
-          <label class="btn primary" style="cursor:pointer">
+          <!-- 同 `DataCenterPage.vue` 那张题库导入卡片：主操作是下面 `.import-summary`
+               里那枚「创建草稿版本」（它真的写库），这一枚只是读字节，所以降级。 -->
+          <label class="btn" style="cursor:pointer">
             选择文件
             <input type="file" accept=".csv,.json" hidden @change="e => { const f = (e.target as HTMLInputElement).files?.[0]; if (f) handleQuestionFile(f) }" />
           </label>
@@ -264,6 +290,17 @@ onMounted(load)
       @submit="onDraftSubmit"
       @cancel="showDraftForm = false"
       @update:open="showDraftForm = $event"
+    />
+
+    <!-- `askPublish` 打开的那一层。少了它，「发布」就是一枚点了不动的按钮。 -->
+    <ConfirmDialog
+      :open="showPublish"
+      title="发布量表版本"
+      :message="publishMessage"
+      confirm-text="确认发布"
+      @confirm="confirmPublish"
+      @cancel="showPublish = false"
+      @update:open="showPublish = $event"
     />
 
   </div>

@@ -102,12 +102,25 @@ const filteredJobs = computed(() =>
     : jobs.value.filter((job) => job.status === statusFilter.value)
 )
 
-/** 空态按筛选分岔（§14）：空态是一句关于数据的话，不同的问题要说不同的话。 */
-const emptyText = computed(() =>
-  statusFilter.value === 'all'
-    ? '还没有导出记录。在重点关注学生、工作台或测评任务里点导出，这里就会出现一条。'
-    : `当前列出的作业里没有「${exportJobStatusLabel(statusFilter.value)}」的。`
-)
+/**
+ * 空态按筛选分岔（§14）：空态是一句关于数据的话，不同的问题要说不同的话。
+ *
+ * 「全部」那一档还要再按角色分岔一次（V2.0.0 §5.14.6 第 6 条：空态不得把用户指向
+ * 实际不可用的动作）。那一句原本两个角色共用，而它点名的三个入口——重点关注学生、
+ * 工作台、测评任务——**全是 `/counselor/*`**，管理员一个都到不了（`meta.role` 不匹配
+ * 会被 `AppLayout` 弹回登录页）。管理员在这一页是纯台账 + 撤销（下面那段
+ * `v-if="isAdmin"` 的说明写着这件事），所以他的空态只能说这件事的另一半：
+ * 作业由谁发起、他到时候能做什么。**不改成一句泛泛的「去发起一次导出」**——
+ * 他这一页根本没有发起入口，那会换成另一种不可达的指路。
+ */
+const emptyText = computed(() => {
+  if (statusFilter.value !== 'all') {
+    return `当前列出的作业里没有「${exportJobStatusLabel(statusFilter.value)}」的。`
+  }
+  return isAdmin.value
+    ? '还没有导出记录。导出作业由心理老师在他的页面上发起——发起之后这里会出现一条，你可以查看，也可以替任何人撤销。'
+    : '还没有导出记录。在重点关注学生、工作台或测评任务里点导出，这里就会出现一条。'
+})
 
 async function load() {
   loading.value = true
