@@ -46,6 +46,15 @@ import {
   type DataScopeSummary,
   type ReminderItem
 } from '../../services/api'
+// 「今天必须处理」与「我负责的 / 未分配 / 全部」两条判据与重点学生页共用一份定义
+// （§5.14.3 验收：切换后列表、数量、空态一致）。**别在本文件里再写一遍比较。**
+import {
+  isDueToday,
+  matchesOwner,
+  normalizeOwnerFilter,
+  OWNER_TABS,
+  type OwnerFilter
+} from '../../services/careQueue'
 
 const router = useRouter()
 
@@ -61,6 +70,30 @@ const cases = ref<CareCaseItem[]>([])
 const detail = ref<CareCaseDetail | null>(null)
 const loading = ref(true)
 const error = ref('')
+
+/**
+ * 当前登录者的 `user_account.id`，供「我负责的」那一档比对 `owner_id`。
+ *
+ * 取自已有的 `getMe()`（`load()` 为了 `role_code` 本来就要调一次），所以这是一次
+ * **已经在路上**的请求，不是为筛选器新加的一次往返。
+ *
+ * 取不到时留 `null`——`matchesOwner` 在 `null` 下让「我负责的」恒假（见
+ * `services/careQueue.ts` 那段），于是那一档会显示空列表而不是把「未分配」的档案
+ * 一起冒充成「我负责的」。
+ */
+const currentUserId = ref<number | null>(null)
+
+/**
+ * 「我负责的 / 未分配 / 全部」。
+ *
+ * **默认 `all`**：`owner_id` 为空的在办档案是真实存在的一档（工作台那条
+ * 「未分配负责人」的聚合就是为它写的），默认收成「我负责的」会让那些档案
+ * 在默认视图里消失——用户看不出是筛选器干的。
+ *
+ * 初始值可以来自地址栏（`?owner=mine`），因为工作台那条「查看全部」要把当前这一档
+ * 带到重点学生页去，回来时（浏览器后退）也该停在原来那一档上。
+ */
+const ownerFilter = ref<OwnerFilter>(normalizeOwnerFilter(router.currentRoute.value.query.owner))
 
 /**
  * 页头那行范围口径。
@@ -137,18 +170,81 @@ function onFormCancel() {
   if (formResolve) formResolve({})
 }
 
-// 优先工作队列：未关闭，且满足其一 ——
-//   1. 待人工复核（无论筛查等级，复核本身就是待办）
-//   2. 超出一般范围（需要持续关注）
-//   3. 已逾期
-// 「待人工复核」指标卡统计的正是第 1 类，二者口径必须一致，
-// 否则会出现「指标说 1 条、队列却说没有」的矛盾。
-const priorityQueue = computed(() =>
-  cases.value.filter(c =>
-    c.case_status !== 'CLOSED' &&
-    (c.case_status === 'PENDING_REVIEW' || c.total_level !== 'GENERAL_RANGE' || c.overdue)
-  )
+/**
+ * 负责人档位下的档案。队列与它那两条「另有 N 份」的句子都从这里派生，
+ * 所以「切到未分配之后列表 3 条、旁边还写着另有 9 份」这种各说各话不可能发生。
+ *
+ * 筛选是**客户端**的，输入是服务端已经按数据范围过滤过的数组（§9）：
+ * 它只会把结果集收得更小，不可能放宽——「按负责人筛」不是一条越权通道。
+ */
+const ownerScopedCases = computed(() =>
+  cases.value.filter(c => matchesOwner(c, ownerFilter.value, currentUserId.value))
 )
+
+/**
+ * 优先工作队列的档位。§5.14.3 第 1 条要求首屏按这个次序固定：
+ * 今天必须处理 → 已逾期 → 待人工复核 → 其他在办工作。
+ *
+ * 判据互斥（`isDueToday` 里排掉了已逾期的），所以次序不会因为两档同时成立而变得
+ * 取决于比较顺序；`sort` 是稳定排序，同一档内保留服务端给的
+ * `updated_at DESC, id DESC`——**不在这里重排同一档**，那会是同一件事的第二个
+ * 排序口径（与 `dueReminders` 那条注释同源）。
+ *
+ * 第 3 档是「其他在办工作」：进了队列、但既没到期也没逾期的那些
+ * （超出一般范围的在办档案、以及待复核里日期还没到的）。
+ */
+function priorityRank(c: CareCaseItem): number {
+  if (isDueToday(c)) return 0
+  if (c.overdue) return 1
+  if (c.case_status === 'PENDING_REVIEW') return 2
+  return 3
+}
+
+// 优先工作队列：未关闭，且满足其一 ——
+//   1. 今天必须处理（排了跟进日期、日期不晚于今天）
+//   2. 已逾期
+//   3. 待人工复核（无论筛查等级，复核本身就是待办）
+//   4. 超出一般范围（需要持续关注）
+// 第 3 档的那一类「待人工复核」指标卡统计的正是它，二者口径必须一致，
+// 否则会出现「指标说 1 条、队列却说没有」的矛盾——所以那张卡现在也从
+// `cases` 现算（见 `pendingReviewCount`），不再读服务端的另一个数。
+function rankedQueue(filter: OwnerFilter): CareCaseItem[] {
+  const ranked = cases.value
+    .filter(c => matchesOwner(c, filter, currentUserId.value))
+    .filter(
+      c =>
+        c.case_status !== 'CLOSED' &&
+        (isDueToday(c) ||
+          c.overdue ||
+          c.case_status === 'PENDING_REVIEW' ||
+          c.total_level !== 'GENERAL_RANGE')
+    )
+    .map((item, order) => ({ item, order, rank: priorityRank(item) }))
+  // `order` 那一段不是多余的：显式写出来，「同一档内保持服务端次序」就不再依赖
+  // 引擎的稳定排序，也不依赖读的人记得它是稳定的。
+  ranked.sort((a, b) => a.rank - b.rank || a.order - b.order)
+  return ranked.map(entry => entry.item)
+}
+
+const priorityQueue = computed(() => rankedQueue(ownerFilter.value))
+
+/**
+ * 三个页签各自的条数（§5.14.3 验收「切换后列表、数量、空态一致」）。
+ *
+ * **它们是「切过去会看到几条」，不是「这个负责人名下一共有几份档案」。** 两个数
+ * 不是一回事：队列是一张筛过的表（未关闭 + 四档判据之一），而页签右边那个
+ * `{{ priorityQueue.length }}` 条数的正是筛完之后的数。若页签上写的是「名下一共几份」，
+ * 切到「我负责的（12）」却只看到 3 行，读者会以为表格漏了 9 行。
+ *
+ * 所以三者共用同一个 `rankedQueue(...)`——同一份数组、同一组判据，
+ * 页签上的数与切过去之后表头上那个数**是同一个函数调用**，构造上不可能不一致。
+ * 代价是筛三遍（每遍几十行），换掉一整类「筛选器说 5 条、列表说 3 条」的矛盾。
+ */
+const ownerCounts = computed(() => {
+  const counts = {} as Record<OwnerFilter, number>
+  for (const tab of OWNER_TABS) counts[tab.key] = rankedQueue(tab.key).length
+  return counts
+})
 
 /**
  * 未进入队列、但仍在观察中的档案数。
@@ -163,7 +259,9 @@ const priorityQueue = computed(() =>
  * 说「9 + 3 ≠ 12」。
  */
 const observingElsewhere = computed(
-  () => cases.value.filter(c => c.case_status !== 'CLOSED').length - priorityQueue.value.length
+  () =>
+    ownerScopedCases.value.filter(c => c.case_status !== 'CLOSED').length -
+    priorityQueue.value.length
 )
 
 /** 「关注档案总数」脚下那一格的数。抽成 computed 而不是在模板里 `filter().length`：
@@ -204,6 +302,32 @@ function metricTone(count: number | undefined | null, tone: string) {
  * 那是「跟进中」而不是「逾期」：真实数据上读 10，而点进去的队列是 0 条。
  */
 const overdueCount = computed(() => cases.value.filter(c => c.overdue).length)
+
+/**
+ * 「今天必须处理」指标卡的数（§5.14.3 第 1 条：它是首屏的第一档）。
+ *
+ * 与 `priorityQueue` 的第 0 档共用 `isDueToday` 这一个判据——那张卡点进去的
+ * `/counselor/cases?filter=today` 用的是同一个函数（`CasesPage` 的 `matchQueue`），
+ * 所以「卡片说 3 件、点进去 0 条」在构造上不可能。
+ */
+const todayCount = computed(() => cases.value.filter(isDueToday).length)
+
+/**
+ * 「待人工复核」指标卡的数。
+ *
+ * 它此前读 `metrics.pending_review`（服务端一个专门的 COUNT），而这张卡点进去的是
+ * `/counselor/cases?filter=PENDING_REVIEW`，也就是 `cases` 里 `case_status` 等于
+ * 那个码的那一批。两者**今天**是同一个集合（同一条 `student_scope_predicate`、
+ * 同一个状态码），但那是两条各自的查询凑巧一致——同 §11 那条
+ * 「指标卡上的数必须与它点进去的那个列表同源」，所以它现在从 `cases` 现算，
+ * 与 `overdueCount` 同一个写法，构造上不可能漂。
+ *
+ * `metrics` 那三个字段仍然在用（`pending_risk_events` 与 `completion_rate`），
+ * 没有变成死代码。
+ */
+const pendingReviewCount = computed(
+  () => cases.value.filter(c => c.case_status === 'PENDING_REVIEW').length
+)
 
 // 主要维度分布 —— 来自报表端点的真实聚合，按高分占比降序。
 // 2026-09-22 起从 /analytics/dimensions 切换到 /analytics/report.dimensions，
@@ -337,6 +461,9 @@ async function load() {
       await router.push('/login')
       return
     }
+    // 这一次请求本来就是为 `role_code` 发的，`id` 顺手带上——「我负责的」那一档
+    // 要拿它比 `owner_id`，不另发一次 `/auth/me`。
+    currentUserId.value = current.id
     // 页头那行范围口径（见 `scopeText`）。**单独 try**：这一句话读不到不该把整张
     // 工作台一起拦下——它是口径说明，不是这一页的数据。
     try {
@@ -382,13 +509,74 @@ async function openDetail(studentId: number) {
 /**
  * The filter value is a QUEUE_TABS key (a status code), not a display label —
  * passing the Chinese label silently landed on an unfiltered list.
+ *
+ * `owner` 一起带过去（§5.14.3 验收：「切换后列表、数量、空态一致」）。
+ * 「查看全部」这件事此前只带状态档：一个把队列收在「我负责的」上的老师点进去，
+ * 看到的是**全部负责人**的档案，「查看全部」这四个字于是把筛选器悄悄摘掉了。
+ * 带上之后两屏说的是同一件事，而 `CasesPage` 认不出的值一律回退 `all`
+ * （`normalizeOwnerFilter`），所以 `owner=all` 与不带它同义，只是更明确。
  */
 function goCases(filter = 'all') {
-  router.push({ path: '/counselor/cases', query: { filter } })
+  router.push({ path: '/counselor/cases', query: { filter, owner: ownerFilter.value } })
+}
+
+/**
+ * 切换「我负责的 / 未分配 / 全部」。
+ *
+ * **写回地址栏**（`replace` 而不是 `push`）：切页签不是一次导航，把它记进历史会让
+ * 「后退」变成「退回上一个筛选档」，而用户想退回的是上一页。地址栏里留着它是为了
+ * 另一件事——点「查看全部」跳到重点学生页之后，`goCases` 会把当前这一档带过去
+ * （见那个函数），于是两屏说的是同一件事；回来时（浏览器后退）也停在原来那一档。
+ *
+ * 只动了 `query`，不重新请求：三个档判的是**同一份 `cases`**（服务端已经按数据范围
+ * 过滤过），换筛选不需要一次往返——而且重新请求会让列表闪一下。
+ */
+function setOwnerFilter(next: OwnerFilter) {
+  if (ownerFilter.value === next) return
+  ownerFilter.value = next
+  router.replace({ query: { ...router.currentRoute.value.query, owner: next } })
 }
 
 function goTasks() {
   router.push('/counselor/tasks')
+}
+
+/* ---------- 行操作：动词按当前阶段分 ---------- */
+
+/**
+ * 一行上的按钮写什么（§5.14.3 第 4 条：「避免所有行都叫『进入档案』」）。
+ *
+ * 此前每一行都是「进入档案」——而这一页的存在理由是**处理队列**：
+ * 一张全是「进入档案」的表，把「该做什么」这件事整个推回给读的人。三个动词
+ * 各自对应这一行此刻**缺的那一步**，而词表取的是这一页自己那四个动作的名字
+ * （`记录人工复核` / `新增跟进记录`），不是另起一套。
+ */
+function rowActionLabel(c: CareCaseItem): string {
+  if (c.case_status === 'PENDING_REVIEW') return '人工复核'
+  if (c.case_status === 'FOLLOWING') return '记录跟进'
+  return '查看档案'
+}
+
+/**
+ * 点了那一行按钮之后发生什么。**动词必须真的落到那个动作上**（§5.14.3 的验收：
+ * 「不能只换文案不带筛选/上下文」）——所以前两档不是「打开档案让用户自己找」，
+ * 而是打开这份档案之后**直接把那一步的表单端上来**（`saveReview` / `saveFollowUp`
+ * 都是弹表单的那两个函数，与详情里的按钮调的是同一个）。
+ *
+ * `detail.value` 为空说明取数失败（`openDetail` 已经 toast 过一句），
+ * 此时**不叠一个表单**：对着一个还没读到的档案填复核记录，填完提交才会失败，
+ * 而失败的原因是另一个。
+ */
+async function runRowAction(c: CareCaseItem) {
+  await openDetail(c.student_id)
+  if (!detail.value) return
+  if (c.case_status === 'PENDING_REVIEW') {
+    await saveReview()
+    return
+  }
+  if (c.case_status === 'FOLLOWING') {
+    await saveFollowUp()
+  }
 }
 
 /* ---------- 业务操作 ---------- */
@@ -629,7 +817,14 @@ onMounted(load)
 </script>
 
 <template>
-  <div>
+  <!-- `workbench` 这个类只为一件样式存在：这一页的指标卡是**五张**，而全站
+       `.grid.metrics` 的基础规则是四列。它不做成全局改动，因为那条规则同时喂着
+       `SkeletonBlock.vue` 与 `LeaderOverviewPage.vue`（§5.14.3 第 1 条只要求
+       这一页有固定的优先顺序，没有任何一句要求别处跟着变成五列）。
+       三段式的原因见 `styles.css` 里那两条媒体查询——`.workbench .grid.metrics`
+       的权重比媒体查询里那条 `.grid.metrics` 高，不在查询里重写一遍的话
+       五列会一路漏到 375px。 -->
+  <div class="workbench">
     <div class="page-head">
       <div>
         <div class="eyebrow">心理工作中心</div>
@@ -656,9 +851,13 @@ onMounted(load)
              不是把它降级成次要，是**这一页没有主操作**——三件事各有各的场合，
              没有一个比另外两个更该被首先点到，那就谁也别假装是。 -->
 
-        <!-- 学生导入属于账号与组织治理，仅管理员可做，故此处不再提供入口。
-             题库导入产出草稿、不改变任何判定，心理老师可在此准备。 -->
-        <button class="btn" @click="router.push('/counselor/data')">题库导入</button>
+        <!-- 「题库导入」2026-09-26 从这一行里挪走了（§5.14.3 第 5 条：「从每日工作台
+             主操作区移除或降级为数据中心入口；工作台主操作围绕当天处置」）。
+             它挪到了下面「工作边界」卡里，仍然是一个 `<button>`、仍然叫「题库导入」，
+             所以它没有消失、也没有变成另一个东西——只是不再和「今天要处置什么」
+             挤在同一行里。
+
+             学生导入属于账号与组织治理，仅管理员可做，此处本来就没有入口。 -->
         <!-- 2026-09-17 修：这里此前**只有一个**写着「受控导出」的按钮，而它传的是
              `openExport(true)`——于是它永远走**高度关注导出**那条分支：弹层标题说
              「高度关注导出」、导的是全范围的 KEY_ATTENTION、弹层上那行「导出人数」
@@ -676,7 +875,12 @@ onMounted(load)
       </div>
     </div>
 
-    <SkeletonBlock v-if="loading" variant="metrics" :rows="4" />
+    <!-- `:columns` 而不是 `:rows`：`variant="metrics"` 那一支渲染的是
+         `v-for="i in columns"`（`SkeletonBlock.vue`），`rows` 对它不起作用——
+         这一行此前写着 `:rows="4"`，也就是「四张卡的骨架」这件事当时**没有任何东西
+         在保证**，它恰好与卡片数相同靠的是 `rows` 的默认值 4 而不是这个 prop。
+         2026-09-26 加第五张卡时才发现，所以一并改成真正生效的那一个。 -->
+    <SkeletonBlock v-if="loading" variant="metrics" :columns="5" />
     <ErrorState v-if="error && !loading" :message="error" :on-retry="load" />
 
     <!-- `&& !error` 是必要的：少了它，加载失败时红条与「0 项 / 尚无已提交的测评数据」
@@ -689,13 +893,18 @@ onMounted(load)
            默认样式（字体、对齐、背景、边框）都要一条条复位，而这四张卡的版式有
            「布局完整性」用例按计算值盯着。 -->
       <div class="grid metrics">
-        <article class="metric" :data-tone="metricTone(metrics?.pending_review, 'red')" role="button" tabindex="0" @click="goCases('PENDING_REVIEW')" @keydown.enter.prevent="goCases('PENDING_REVIEW')" @keydown.space.prevent="goCases('PENDING_REVIEW')">
-          <div class="metric-label">待人工复核</div>
-          <div class="metric-value">{{ metrics?.pending_review ?? 0 }}</div>
-          <!-- 单位是**条**不是人：`pending_risk_events` 数的是 `risk_event` 的行，
-               而引擎对每一道**命中的重点题**各写一行（MHT 有两道：85 / 97）。
-               一道是 / 两道也是的学生在这张卡上会读成 2 人，而档案只有一份。 -->
-          <div class="metric-foot">重点题命中 {{ metrics?.pending_risk_events ?? 0 }} 条</div>
+        <!-- 首屏第一格是「今天必须处理」（§5.14.3 第 1 条的次序：今天 → 逾期 → 待复核）。
+             它的作用不止是多一个数：队列里的第 0 档此前**没有入口**——一条排了今天
+             跟进的档案在最上面一行，而没有任何地方能回答「今天一共几件」。
+             与 `overdueCount` 同一个写法（从 `cases` 现算），所以它与点进去的那个
+             列表同源（`CasesPage` 的 `today` 档调的是同一个 `isDueToday`）。 -->
+        <article class="metric" :data-tone="metricTone(todayCount, 'red')" role="button" tabindex="0" @click="goCases('today')" @keydown.enter.prevent="goCases('today')" @keydown.space.prevent="goCases('today')">
+          <div class="metric-label">今天必须处理</div>
+          <div class="metric-value">{{ todayCount }}</div>
+          <!-- 「今天」与「逾期」互斥（`isDueToday` 里排掉了已逾期的），所以这一格
+               不需要再减一遍逾期数——那一档有它自己那张卡，在右边。
+               与「逾期跟进」脚下那句一样，这里说清**它没算谁**。 -->
+          <div class="metric-foot">不含已逾期 · 按本地日期</div>
         </article>
         <article class="metric" :data-tone="metricTone(overdueCount, 'amber')" role="button" tabindex="0" @click="goCases('overdue')" @keydown.enter.prevent="goCases('overdue')" @keydown.space.prevent="goCases('overdue')">
           <div class="metric-label">逾期跟进</div>
@@ -711,6 +920,25 @@ onMounted(load)
                两处此前都没有写单位，读者只能自己猜，猜错的那一半会以为其中一个是坏的。
                所以这一格把单位写出来（点击进的是档案队列，单位就是档案）。 -->
           <div class="metric-foot">跟进中 {{ metrics?.following ?? 0 }} 份 · 逾期按档案计</div>
+        </article>
+        <!-- 第三格。它在 2026-09-26 之前排在第二格，而 §5.14.3 第 1 条给的次序是
+             「今天必须处理 → 已逾期 → 待人工复核」——顺序在那一句里是**判据的一部分**：
+             它说的是「先看今天要动手的、再看已经拖了的，然后才是复核」。 -->
+        <article class="metric" :data-tone="metricTone(pendingReviewCount, 'red')" role="button" tabindex="0" @click="goCases('PENDING_REVIEW')" @keydown.enter.prevent="goCases('PENDING_REVIEW')" @keydown.space.prevent="goCases('PENDING_REVIEW')">
+          <div class="metric-label">待人工复核</div>
+          <!-- 这个数从 `cases` 现算，不再读 `metrics.pending_review`（§5.14.3 第 7 条：
+               指标卡上的数必须与它点进去的那个列表同源）。服务端那个数走的是
+               `count(StudentCareCase) where status == PENDING_REVIEW`，而这张卡点进去的
+               `CasesPage` 是按**每一行**的 `case_status` 筛的——两者今天算的是同一批档案，
+               但它们各写一遍判据，而 `overdueCount` 那一处已经证过一次这种写法会漂
+               （卡片读 `metrics.following`、列表按 `c.overdue`，真实数据上一个读 10 一个 0 条）。
+               所以按同一处教训处理：从 `cases` 现算，构造上不可能与列表不一致。
+               `metrics.pending_review` 仍在响应里、本文件不再取用它。 -->
+          <div class="metric-value">{{ pendingReviewCount }}</div>
+          <!-- 单位是**条**不是人：`pending_risk_events` 数的是 `risk_event` 的行，
+               而引擎对每一道**命中的重点题**各写一行（MHT 有两道：85 / 97）。
+               一道是 / 两道也是的学生在这张卡上会读成 2 人，而档案只有一份。 -->
+          <div class="metric-foot">重点题命中 {{ metrics?.pending_risk_events ?? 0 }} 条</div>
         </article>
         <article class="metric" data-tone="teal" role="button" tabindex="0" @click="goCases('all')" @keydown.enter.prevent="goCases('all')" @keydown.space.prevent="goCases('all')">
           <div class="metric-label">关注档案总数</div>
@@ -745,6 +973,49 @@ onMounted(load)
             <button class="btn small" @click="goCases('all')">查看全部</button>
           </div>
           <div class="card-body">
+            <!-- 「我负责的 / 未分配 / 全部」（§5.14.3 第 3 条）。
+                 归在**队列这一块**而不是页头：它筛的是这份队列，不筛上面那五张卡
+                 （那些是聚合，其中完成率连负责人这一维都没有）。这一条口径必须
+                 写在界面上（§9），否则「完成率 75%」与「只看我负责的」会读成互相矛盾。
+
+                 每一档后面那个数是 `ownerCounts`——**「切过去会看到几条」**，
+                 与切过去之后表头那个 `{{ priorityQueue.length }}` 同源（同一个
+                 `rankedQueue` 调用），所以「我负责的（3）」点进去必然就是 3 条。
+                 空态与「另有 N 份」跟着一起走：三处都从筛完的数组派生。
+
+                 样式与 `CasesPage` 的状态档共用一组声明（`styles.css` 里
+                 `.queue-tab, .owner-tab { … }` 那条），但**类名不共用**：
+                 `e2e/app.spec.ts` 按 `.queue-tab` 数状态档、按 `.queue-tab.active`
+                 断当前档，同用一类会让那两个定位器一次命中两个元素（严格模式直接红）。 -->
+            <div class="owner-tabs" role="group" aria-label="按负责人筛选队列">
+            <!-- 内容与收尾标签写在**同一行**：中间换行会被 Vue 的 whitespace:condense 压成
+               一个尾随空格，于是 `textContent` 是「全部（20） 」——`toHaveText(/^全部（\d+）$/)`
+               这类逐字断言会因此红在一个与文案无关的地方（`getByRole` 的 accessible name
+               会归一化，所以只有逐字断言看得见）。 -->
+              <button
+                v-for="tab in OWNER_TABS"
+                :key="tab.key"
+                type="button"
+                :class="['owner-tab', { active: ownerFilter === tab.key }]"
+                :aria-pressed="ownerFilter === tab.key"
+                @click="setOwnerFilter(tab.key)"
+              >{{ tab.label }}（{{ ownerCounts[tab.key] }}）</button>
+            </div>
+            <!-- 口径句（§9）。两件事分开说：
+                 ① 这一档筛的是什么——`all` 也要说，因为「全部」这四个字会被读成
+                    「全校」，而它其实是「我的数据范围内、全部负责人」；
+                 ② 筛的只是这份队列，上面那五张卡不受它影响。 -->
+            <p class="muted tiny" style="margin:8px 0 12px">
+              <template v-if="ownerFilter === 'all'">
+                范围：我的数据范围内全部负责人的在办档案（不受上方指标卡影响）。
+              </template>
+              <template v-else-if="ownerFilter === 'mine'">
+                范围：只列负责人是我的在办档案（不受上方指标卡影响）。
+              </template>
+              <template v-else>
+                范围：只列尚未分配负责人的在办档案——它们不会出现在任何人的「我负责的」里。
+              </template>
+            </p>
             <div class="table-wrap queue-scroll">
               <table>
                 <thead>
@@ -766,8 +1037,9 @@ onMounted(load)
 
                        **不给这一行加 `role="button"`**，也不加 `tabindex`：`<tr>` 是
                        表格的行，改成按钮会让读屏软件读不出「第 3 行，共 9 行」，
-                       也会让 `getByRole('button', { name: '进入档案' })` 撞上重复匹配
-                       （`e2e/vocabulary.spec.ts` 正是用它开档案弹层的）。
+                       也会让 `getByRole('button', { name: … })` 撞上重复匹配
+                       （`e2e/vocabulary.spec.ts` 正是用右边那枚按钮开档案弹层的，
+                       它按 `.queue-scroll tbody tr button` 取第一枚、读出它的名字再用）。
                        键盘这条路一直有，就是右边那个按钮——**它留着**，
                        而且它现在不再是唯一的路。 -->
                   <tr v-for="c in priorityQueue" :key="c.case_id" class="queue-row" @click="openDetail(c.student_id)">
@@ -797,13 +1069,24 @@ onMounted(load)
                     <td>
                       <!-- `@click.stop` 不能省：整行已经挂了同一个 `openDetail`，
                            不拦住冒泡就是同一个学生连着取两次详情（弹层闪一下、
-                           多一个请求），而失败时还会弹两条一模一样的 toast。 -->
-                      <button class="btn small" @click.stop="openDetail(c.student_id)">进入档案</button>
+                           多一个请求），而失败时还会弹两条一模一样的 toast。
+                           这一处尤其不能省：`runRowAction` 会接着弹表单，冒泡上去
+                           等于同一个学生取两次详情、再开两次表单。 -->
+                      <button class="btn small" @click.stop="runRowAction(c)">{{ rowActionLabel(c) }}</button>
                     </td>
                   </tr>
+                  <!-- 空态是一句**关于数据**的话，所以它得说清是哪一档筛出来的空
+                       （§5.14.3 验收：「切换后列表、数量、空态一致」）。
+                       三句话都只描述数据，不带「请稍后再试」那类别的意思——
+                       失败是上面那条 `ErrorState` 的活（整个 body 在 `!error` 之下，
+                       所以这里不会在读取失败时冒出来，见 `:839` 那个 `v-if`）。 -->
                   <tr v-if="!priorityQueue.length">
                     <td colspan="6">
-                      <div class="empty">没有待复核或高优先级的档案。</div>
+                      <div class="empty">
+                        <template v-if="ownerFilter === 'mine'">你名下没有待处理的档案。</template>
+                        <template v-else-if="ownerFilter === 'unassigned'">没有未分配的待处理档案。</template>
+                        <template v-else>没有待复核或高优先级的档案。</template>
+                      </div>
                     </td>
                   </tr>
                 </tbody>
@@ -913,6 +1196,22 @@ onMounted(load)
             <div class="detail-row"><span>原始答卷</span><b>强审计</b></div>
             <div class="detail-row"><span>管理员</span><b>默认无权查看</b></div>
           </div>
+          <!-- 「题库导入」降级到这里（§5.14.3 第 5 条）。归在「工作边界」这一块而不是
+               页头，是因为它回答的问题是关于**边界**的：导入产出的是草稿、不参与评分、
+               不改变任何判定（§7「草稿不生效，发布归管理员」），所以它不属于
+               「今天要处置什么」——把它和「导出优先队列」摆在同一行，会让一件
+               一周做一次、做完什么都不变的准备工作读成当天的动作。
+
+               它仍然**留在这一页**面而不是只靠侧边栏那个「数据中心」入口，理由与
+               `CasesPage` 那条一致：这一页是这个角色落地的地方，一条只存在于导航里的路
+               等于让每个人都得先知道它在那儿。也不在页头 `.actions` 里加小字说明
+               （那行在 1280px 下会被挤到第二排）。
+               按钮文案与路由都**没变**，`e2e/app.spec.ts` 那条「题库导入 → 数据中心」
+               仍然按名字找得到它。 -->
+          <p class="muted tiny" style="margin-top:14px">
+            题库导入产出的是草稿，不参与评分、不改变任何判定（发布归管理员）：
+            <button class="btn small" @click="router.push('/counselor/data')">题库导入</button>
+          </p>
         </article>
       </div>
     </template>

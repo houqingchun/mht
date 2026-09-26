@@ -33,6 +33,15 @@ import {
   type DataScopeSummary,
   type StudentResultItem
 } from '../../services/api'
+// 「今天必须处理」与「我负责的 / 未分配 / 全部」两条判据与工作台共用一份定义
+// （V2.0.0 §5.14.3 验收：「切换后列表、数量、空态一致」）。**别在本文件里再写一遍比较。**
+import {
+  isDueToday,
+  matchesOwner,
+  normalizeOwnerFilter,
+  OWNER_TABS,
+  type OwnerFilter
+} from '../../services/careQueue'
 
 const route = useRoute()
 const router = useRouter()
@@ -44,6 +53,22 @@ const error = ref('')
 const query = ref('')
 const riskFilter = ref('all')
 const queueFilter = ref('all')
+/**
+ * 负责人档（§5.14.3 第 3 条「我负责的 / 未分配 / 全部」）。
+ *
+ * 默认 `all`。**改成 `mine` 会让未分配的档案在默认视图里消失**——而那是本项目里
+ * 真实存在的一档（工作台那条「未分配负责人」的聚合就是为它写的）。判据与三档文案
+ * 都在 `services/careQueue.ts`，与工作台是同一份定义。
+ */
+const ownerFilter = ref<OwnerFilter>('all')
+/**
+ * 当前登录者的 `user_account.id`，用来判「负责人是我」。
+ *
+ * 取不到时保持 null —— `matchesOwner` 在 null 下让 `mine` 恒假（而不是回退成
+ * 「全部」），所以那一档会显示空列表并说出自己的空态，而不是把所有人的档案
+ * 都算成「我负责的」。
+ */
+const currentUserId = ref<number | null>(null)
 /**
  * 选中的行 —— **装的是 `case_id`，不是 `student_id`**。
  *
@@ -66,7 +91,7 @@ const selected = ref<Set<number>>(new Set())
 // The workbench metric tiles deep-link here with ?filter=<queue-tab key>.
 // Validate against the known keys: an unrecognised value used to fall through
 // to the "all" branch, which looked like the filter had simply been ignored.
-// ?tab= is validated the same way, for the same reason.
+// ?tab= and ?owner= are validated the same way, for the same reason.
 onMounted(() => {
   const incoming = route.query.filter
   if (typeof incoming === 'string' && QUEUE_TABS.some(tab => tab.key === incoming)) {
@@ -76,19 +101,57 @@ onMounted(() => {
   if (typeof incomingTab === 'string' && TOP_TABS.some(tab => tab.key === incomingTab)) {
     activeTab.value = incomingTab
   }
+  ownerFilter.value = normalizeOwnerFilter(route.query.owner)
 })
 
-const filtered = computed(() => {
-  return cases.value.filter(c => {
-    const matchQuery = !query.value || `${c.student_name}${c.student_no}${c.grade}${c.class_name}`
-      .toLowerCase().includes(query.value.toLowerCase())
-    const matchRisk = riskFilter.value === 'all' || c.total_level === riskFilter.value
-    const matchQueue =
-      queueFilter.value === 'all' ||
-      (queueFilter.value === 'overdue' ? c.overdue === true : c.case_status === queueFilter.value)
-    return matchQuery && matchRisk && matchQueue
-  })
+/**
+ * 一条档案过不过当前这一组筛选。
+ *
+ * 抽成函数是为了让 `ownerCounts` 能用**同一个**判据把三档各算一遍——
+ * 页签上那个数说的是「切过去会看到几条」，与切过去之后表里那几行必须同源
+ * （§11：指标卡上的数必须与它点进去的那个列表同源）。写成两处的话，
+ * 「我负责的（3）」点进去 3 条这件事只在数据不变时才成立。
+ */
+function matchesFilters(c: CareCaseItem, owner: OwnerFilter): boolean {
+  const matchQuery = !query.value || `${c.student_name}${c.student_no}${c.grade}${c.class_name}`
+    .toLowerCase().includes(query.value.toLowerCase())
+  const matchRisk = riskFilter.value === 'all' || c.total_level === riskFilter.value
+  // 「今天」与「已逾期」都是**推出来的**档，不是后端的状态码：
+  // 前者的判据在 `careQueue.isDueToday`（「今天必须处理」那一张卡用的是同一个函数），
+  // 后者读服务端算好的 `overdue`。少了这两支，`?filter=today` 会掉进最后那句
+  // `c.case_status === 'today'`——那是一个任何一行都不匹配的比较，界面表现为
+  // 「这一档一条都没有」，而它看起来只是那天刚好没有待办。
+  let matchQueue = true
+  if (queueFilter.value === 'overdue') matchQueue = c.overdue === true
+  else if (queueFilter.value === 'today') matchQueue = isDueToday(c)
+  else if (queueFilter.value !== 'all') matchQueue = c.case_status === queueFilter.value
+  return matchQuery && matchRisk && matchQueue && matchesOwner(c, owner, currentUserId.value)
+}
+
+const filtered = computed(() => cases.value.filter(c => matchesFilters(c, ownerFilter.value)))
+
+/** 三档各有多少条（见 `matchesFilters` 的注释：与切换之后那个列表同源）。 */
+const ownerCounts = computed(() => {
+  const counts = {} as Record<OwnerFilter, number>
+  for (const tab of OWNER_TABS) {
+    counts[tab.key] = cases.value.filter(c => matchesFilters(c, tab.key)).length
+  }
+  return counts
 })
+
+/**
+ * 切负责人档。写进地址栏是为了能分享/刷新（与 `selectTab` 的做法一致），
+ * 用 `replace` 而不是 `push`：切一个筛选器不是一次导航，`push` 之后浏览器
+ * 的后退键要从每一次点击退回去。**不重新取数**——三档筛的是已经到手的数组。
+ */
+function setOwnerFilter(next: OwnerFilter) {
+  if (ownerFilter.value === next) return
+  ownerFilter.value = next
+  const nextQuery = { ...route.query }
+  if (next === 'all') delete nextQuery.owner
+  else nextQuery.owner = next
+  router.replace({ query: nextQuery })
+}
 
 // ---------------------------------------------------------------------------
 // 「全部学生」页签：名册 + 每人最近一场测评结果
@@ -258,6 +321,11 @@ const LEVEL_FILTER_CODES = ['KEY_ATTENTION', 'NEEDS_ATTENTION', 'GENERAL_RANGE']
 
 const QUEUE_TABS = [
   { key: 'all', label: '全部' },
+  // 「今日待办」与「已逾期」一样是**推出来的**档，不是后端的状态码
+  // （判据在 `services/careQueue.ts::isDueToday`，工作台那张「今天必须处理」
+  // 的卡用的是同一个函数），所以 `matchesFilters` 里必须有它自己那一支。
+  // 它排在状态码之前：「今天要动手的」这一档是这一页的第一入口。
+  { key: 'today', label: '今日待办' },
   { key: 'PENDING_REVIEW', label: '待复核' },
   { key: 'FOLLOWING', label: '跟进中' },
   { key: 'overdue', label: '已逾期' },
@@ -332,6 +400,9 @@ async function load() {
       await router.push('/login')
       return
     }
+    // 「我负责的」那一档的判据（`matchesOwner`）。这一页此前只要角色码，
+    // 所以拿到了也没地方放——现在它是那一档筛选的输入。
+    currentUserId.value = currentUser.id
     // 页头那行范围口径（见 `scopeText`）。**单独 try**：这一句话读不到不该把整张
     // 重点学生列表一起拦下——它是口径说明，不是这一页的数据。
     try {
@@ -568,6 +639,34 @@ onMounted(load)
             {{ tab.label }}
           </button>
         </div>
+        <!-- 负责人档（§5.14.3 第 3 条）——与上面那一排是**两个轴**，可以叠加：
+             先按阶段筛、再按负责人筛。类名不与 `.queue-tab` 共用是有意的：
+             `e2e/app.spec.ts` 按 `.queue-tab` 数状态档的条数、按 `.queue-tab.active`
+             断当前档，两类同名会让那两个定位器一次命中两个元素。
+             每一档后面那个数是「切过去会看到几条」（`ownerCounts`，与 `filtered`
+             同一个 `matchesFilters` 判据）——所以它必然等于切过去之后表里的行数，
+             而不是「这个负责人名下总共有几份」。 -->
+        <div class="owner-tabs" role="group" aria-label="按负责人筛选" style="margin-top:10px">
+          <!-- 内容与收尾标签写在**同一行**：中间换行会被 Vue 的 whitespace:condense 压成
+               一个尾随空格，于是 `textContent` 是「全部（20） 」——`toHaveText(/^全部（\d+）$/)`
+               这类逐字断言会因此红在一个与文案无关的地方（`getByRole` 的 accessible name
+               会归一化，所以只有逐字断言看得见）。 -->
+          <button
+            v-for="tab in OWNER_TABS"
+            :key="tab.key"
+            type="button"
+            :class="['owner-tab', { active: ownerFilter === tab.key }]"
+            :aria-pressed="ownerFilter === tab.key"
+            @click="setOwnerFilter(tab.key)"
+          >{{ tab.label }}（{{ ownerCounts[tab.key] }}）</button>
+        </div>
+        <!-- 口径句（§9）。「未分配」那一档要说清它为什么不在任何人的「我负责的」里；
+             而三档筛的都是**你数据范围内的**档案——这一页的行本来就过
+             `student_scope_predicate`（后端那一侧），前端这里不重复实现它，
+             但也不能让「全部」被读成「全校」。 -->
+        <p v-if="ownerFilter === 'unassigned'" class="muted tiny" style="margin:8px 0 0">
+          这些档案还没有负责人——它们不会出现在任何人的「我负责的」里。
+        </p>
         <div class="toolbar" style="margin-top:12px">
           <div class="search-box">
             <input v-model="query" placeholder="搜索姓名、学号、年级或班级" />

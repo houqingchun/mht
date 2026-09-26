@@ -562,8 +562,17 @@ test.describe('状态词汇：界面上不得出现后端编码', () => {
     await page.goto('/counselor/workbench');
     await page.waitForLoadState('networkidle');
 
+    // 行内动词按当前阶段变（V2.0.0 §5.14.3 第 4 条：「人工复核 / 记录跟进 / 查看档案」），
+    // 所以**不能写死某一个**：第一行是哪个阶段由演示数据决定，写死会在某一天红在一个
+    // 与功能无关的地方。这里先从页面上读出那一枚按钮的名字，再拿它去开弹层——
+    // 顺带把「行内动词只用这三个」也变成一条判据。
+    const rowAction = page.locator('.queue-scroll tbody tr button').first();
+    await expect(rowAction).toBeVisible();
+    const actionName = (await rowAction.innerText()).trim();
+    expect(['人工复核', '记录跟进', '查看档案']).toContain(actionName);
+
     const leaks: string[] = [];
-    await auditModal(page, '进入档案', '工作台', leaks, page.locator('.modal-panel dl').first());
+    await auditModal(page, actionName, '工作台', leaks, page.locator('.modal-panel dl').first());
     expect(leaks, '工作台档案弹层把后端编码原样显示了').toEqual([]);
   });
 

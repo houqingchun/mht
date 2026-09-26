@@ -63,6 +63,12 @@ const loading = ref(true)
 const error = ref('')
 const activeTab = ref('overview')
 
+// 档案已关闭时，四个登记动作全部不可用——服务端 `care_service._ensure_open`
+// 对复核 / 跟进 / 家庭回访 / 复测这四条路一律回 409（CLAUDE.md §28：对一条 CLOSED
+// 档案写记录等于隐式复活它，学生会撞上「同时只能有一条在办档案」那个唯一键）。
+// 所以这里不是「界面先藏起来」，而是**把服务端那道门写在按钮上**：置灰 + 说得出为什么。
+const caseClosed = computed(() => detail.value?.case_status === 'CLOSED')
+
 // Modal state
 const showForm = ref(false)
 const formTitle = ref('')
@@ -524,6 +530,45 @@ onMounted(loadComparison)
         </button>
       </div>
 
+      <!-- 下一步操作区（V2.0.0 §5.14.3 第 6 条）。
+           这一页有七个页签，而登记复核 / 跟进 / 回访 / 复测这四个动作此前各住在自己
+           那个页签里——老师得先想到「这件事属于哪个页签」才找得到入口，而他在个案会上
+           要回答的是「这个学生下一步做什么」。现在四个入口集中在这一条里，并且**贴着
+           顶栏停住**（`position: sticky`，样式见 `styles.css` 的 `.case-next-actions`），
+           切到任何一个页签都看得见。
+           **「关闭关注档案」不在这一条里**，它在页头（`.btn danger` + 危险操作确认）：
+           那是一个终止性动作，与日常登记摆在一起早晚会被误点。 -->
+      <div class="case-next-actions">
+        <div class="case-next-head">
+          <b>下一步操作</b>
+          <span class="muted tiny">
+            登记的内容会追加在对应页签里，已有的复核、跟进与回访记录不会被覆盖。
+          </span>
+        </div>
+        <div
+          class="toolbar"
+          role="group"
+          aria-label="下一步操作"
+          :aria-describedby="caseClosed ? 'case-next-closed-note' : undefined"
+        >
+          <button class="btn" :disabled="caseClosed" @click="saveReview">人工复核</button>
+          <button class="btn" :disabled="caseClosed" @click="addFollowUp">记录跟进</button>
+          <button class="btn" :disabled="caseClosed" @click="addFamilyContact">家庭回访</button>
+          <button class="btn" :disabled="caseClosed" @click="addRetest">安排复测</button>
+        </div>
+        <!-- 灰掉的按钮必须说得出为什么（CLAUDE.md §27 那条），所以这一段不是 tooltip：
+           置灰时它**就显示在按钮下面**，读屏软件也能读到（那一组按钮上的
+           `aria-describedby` 指着这个 id）。 -->
+        <p
+          v-if="caseClosed"
+          id="case-next-closed-note"
+          class="muted tiny case-next-closed"
+        >
+          这份档案已经关闭，四项登记都不能新增。要接着记录，先用页头的「重新打开档案」把它打开；
+          历史记录不会被删除。
+        </p>
+      </div>
+
       <!-- 测评概览 -->
       <div v-if="activeTab === 'overview'" class="grid two" style="margin-top: 17px">
         <div class="card pad">
@@ -629,22 +674,23 @@ onMounted(loadComparison)
           <div class="notice danger" style="margin-top:14px">
             命中学校重点关注规则，需由授权心理老师人工复核。提示不等同于诊断结论。
           </div>
+          <!-- 这里此前还有一枚「记录人工复核」（2026-09-27 移到页签上方那条
+               「下一步操作」里）。同一页上两枚同名的按钮不只是重复：`getByRole
+               ('button', { name: '…' })` 会一次命中两个，e2e 的严格模式直接红
+               （CLAUDE.md §测试注意那条「一条会无故变红的守卫很快会被人关掉」）。
+               留在这一页上的只有「二次查看重点题」——它是**读**，不属于那四项登记。 -->
           <div class="actions" style="margin-top:14px">
             <button class="btn" @click="viewKeyQuestions">二次查看重点题</button>
-            <button class="btn primary" @click="saveReview">记录人工复核</button>
           </div>
         </div>
       </div>
 
       <!-- 跟进记录 -->
       <div v-if="activeTab === 'follow'" class="card pad" style="margin-top: 17px">
-        <!-- `.toolbar` 而不是 `.actions`：`.actions` 没有基础规则（只在 `.page-head` /
-             `.question-foot` 两个限定选择器下存在），所以它是个 `display:block` 的 div，
-             写在上面的 `justify-content` 一直是空转的——标题与按钮各占一行（CLAUDE.md §17）。 -->
-        <div class="toolbar" style="justify-content:space-between">
-          <h2>连续跟进时间线</h2>
-          <button class="btn primary" @click="addFollowUp">新增跟进</button>
-        </div>
+        <!-- 这块标题旁此前是「新增跟进」，2026-09-27 移到页签上方那条「下一步操作」里
+             （同一页两枚同名的按钮会让 `getByRole(...)` 撞上重复匹配）。这一页现在
+             只管把已经登记过的记录列出来。 -->
+        <h2>连续跟进时间线</h2>
         <div class="timeline" style="margin-top:21px">
           <div v-for="record in detail.follow_ups" :key="record.id" class="timeline-item">
             <div class="timeline-dot"></div>
@@ -659,9 +705,10 @@ onMounted(loadComparison)
       <!-- 家庭回访 -->
       <div v-if="activeTab === 'family'" style="margin-top: 17px">
         <div class="card">
+          <!-- 「新增回访」2026-09-27 移到页签上方那条「下一步操作」里（理由同「跟进记录」
+               那一处）。`card-head` 保留：它的内边距与标题样式归它管。 -->
           <div class="card-head">
             <h2>家庭回访记录</h2>
-            <button class="btn primary" @click="addFamilyContact">新增回访</button>
           </div>
           <div class="card-body">
             <div class="table-wrap">
@@ -757,11 +804,10 @@ onMounted(loadComparison)
         </div>
 
         <div class="card pad" style="margin-top:17px">
-          <!-- 同上一处：换成 `.toolbar` 那句 `justify-content` 才真的生效（CLAUDE.md §17）。 -->
-          <div class="toolbar" style="justify-content:space-between">
-            <h2>复测计划</h2>
-            <button class="btn primary" @click="addRetest">安排复测</button>
-          </div>
+          <!-- 「安排复测」2026-09-27 移到页签上方那条「下一步操作」里。这条页签本身
+               仍然叫「历次趋势」，而页签里的**复测计划卡片保留**——学校仍然用它登记
+               「下学期再看一次」（见 `tabs` 里那一段注释）。 -->
+          <h2>复测计划</h2>
           <div class="checklist" style="margin-top:14px">
             <div v-for="plan in detail.retest_plans" :key="plan.id" class="check-row">
               <span>

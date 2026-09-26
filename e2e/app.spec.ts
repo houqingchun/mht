@@ -2414,7 +2414,14 @@ test.describe('已接通的后端数据', () => {
     await loginAs(page, 'counselor');
     await page.goto('/counselor/cases');
     await expect(page.getByRole('heading', { name: '重点关注学生与长期跟踪' })).toBeVisible();
-    await expect(page.locator('.queue-tab')).toHaveCount(6);
+    // 状态档是**七**个（V2.0.0 §5.14.3 加了「今日待办」；它此前是六个）。
+    await expect(page.locator('.queue-tab')).toHaveCount(7);
+    // 负责人档是**另一个轴**，与状态档可以叠加，所以它自己一个类名、自己一条断言：
+    // 「全部 / 我负责的 / 未分配」三档。
+    await expect(page.locator('.owner-tab')).toHaveCount(3);
+    // 数字**不写死**：它是「切过去会看到几条」，随演示数据而变（与「不要给账号表加
+    // 精确行数断言」同一条）。这里钉的是形状——默认档是「全部」，且后面跟着一个数。
+    await expect(page.locator('.owner-tab.active')).toHaveText(/^全部（\d+）$/);
   });
 
   /**
@@ -3733,6 +3740,406 @@ async function resetOrgSettings(page: ReturnType<typeof test.extend>) {
     });
   });
 }
+
+// ---------------------------------------------------------------------------
+// V2.0.0 §5.14.3 心理老师行动优先（COUNSELOR-UX）
+//
+// 这一组守的是**一处口径的四个消费者**：工作台的五张指标卡、工作台的优先队列、
+// 重点学生页的三档负责人页签、以及点卡片之后的落点。它们必须说同一件事——
+// 「卡上写 3、点进去列表里 0 条」是这一族里最容易出现、也最难发现的一种错
+// （CLAUDE.md §11：指标卡上的数必须与它点进去的那个列表同源），而它**不会让
+// 任何一条既有用例变红**：后端发的是对的，两个页面各自也是对的，错的只是它们
+// 之间的关系。所以下面几条**按两处互相比来断**，而不是各自断一个死数。
+//
+// 三条写法上的讲究，与这一组的每条断言都有关：
+//
+// 1. **一个数都不写死**。演示库里的档案数、谁名下有几份，都会随任何一次
+//    `make seed-demo` / 人工操作而变——写死会让用例某一天红在一个与功能无关的
+//    地方（CLAUDE.md 测试注意：「数行数要问接口要，不要写死」）。所以下面的期望值
+//    一律**从页签自己印出来的那个数**读回来，再去比列表。
+// 2. **先证明有东西可扫**。「三档都是 0 条」时每一条一致性断言都成立，而它什么都没
+//    证明——CLAUDE.md 测试注意里那条已经栽过五次。所以每组前面都有一条
+//    `toBeGreaterThan(0)`。
+// 3. **不碰共享数据**。这一组全部是只读的；唯一需要「一份已关闭的档案」的那一条
+//    走 `page.route` 桩，不用界面去真关一份（那条路会与 `缺陷回归` 里那条关闭用例
+//    抢同一条数据，见那一条自己的注释）。
+// ---------------------------------------------------------------------------
+test.describe('心理老师工作台的行动优先', () => {
+  /** 心理老师的 API 会话。浏览器那一路另走 `loginAs`，两条互不影响。 */
+  async function counselorHeaders(page: Page) {
+    const login = await page.request.post('/api/v1/auth/login', {
+      data: { account: '13800000001', password: '123456', role: 'counselor' },
+    });
+    await expectOk(login, '这一条失去了取数的手段：POST /auth/login');
+    return { Authorization: `Bearer ${(await login.json()).data.access_token}` };
+  }
+
+  /** 页签上印着的那个数（`全部（12）` → `12`）。 */
+  function countOnLabel(text: string, what: string): number {
+    const matched = text.match(/（(\d+)）/);
+    expect(matched, `${what}的数量没有印在页签上：「${text}」`).not.toBeNull();
+    return Number(matched![1]);
+  }
+
+  test('负责人快捷筛选：条数、列表与空态说的是同一件事', async ({ page }) => {
+    await loginAs(page, 'counselor');
+    await page.goto('/counselor/cases');
+
+    const tabs = page.locator('.owner-tab');
+    await expect(tabs).toHaveCount(3);
+
+    const counts: number[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      counts.push(countOnLabel((await tabs.nth(index).innerText()).trim(), `第 ${index + 1} 档`));
+    }
+    // 先证明这一屏有东西可筛。三档全 0 时下面每一条一致性断言都成立，而它什么都没证明。
+    expect(counts[0], '演示数据里一份档案都没有，这条用例会退化成空转').toBeGreaterThan(0);
+
+    const counter = page.locator('.toolbar .row-select span');
+    const bodyRows = page.locator('.table-wrap tbody tr');
+    const pager = page.locator('.table-pager');
+    const ownerCells = page.locator('.table-wrap tbody tr td:nth-child(4)');
+
+    for (let index = 0; index < 3; index += 1) {
+      await tabs.nth(index).click();
+      await expect(tabs.nth(index)).toHaveClass(/active/);
+
+      // 工具栏上的人数是**筛完之后**的人数，与页签上印的那个数同源
+      // （`ownerCounts` 与 `filtered` 共用 `matchesOwner`）。用整串匹配而不是
+      // `toContainText`：`1 人` 是 `21 人` 的子串，包含匹配会把 21 读成 1。
+      await expect(counter).toHaveText(new RegExp(`^${counts[index]} 人 · 已选 \\d+ 份档案$`));
+
+      if (counts[index] > 0) {
+        await expect(pager).toContainText(new RegExp(`共 ${counts[index]} 条`));
+        // 每页 20 条：数量说的是筛完的总数，表里渲染的是当前这一页——两者相等
+        // 只在演示库不到 20 份时成立，所以取 `min` 而不是直接比。
+        await expect(bodyRows).toHaveCount(Math.min(counts[index], 20));
+      } else {
+        await expect(page.locator('.table-wrap .empty')).toHaveText('没有符合条件的学生');
+        // 空态与分页器互斥：0 条时不该还留着一个「共 0 条 · 第 1 / 0 页」。
+        await expect(pager).toHaveCount(0);
+      }
+
+      // 条数对上了不等于筛对了——一个恒返回 `true` 的 `matchesOwner` 也能让上面
+      // 每一句成立（三档都等于「全部」）。所以这两档还要看**行里的字**：
+      // 「未分配」那一列是这个筛选器唯一看得见的结果。
+      const owners = await ownerCells.evaluateAll((cells) =>
+        cells.map((cell) => (cell.textContent ?? '').trim())
+      );
+      if (index === 1) {
+        expect(
+          owners.filter((owner) => owner === '未分配'),
+          '「我负责的」这一档里混进了没有负责人的档案'
+        ).toHaveLength(0);
+      }
+      if (index === 2) {
+        expect(
+          owners.every((owner) => owner === '未分配'),
+          `「未分配」这一档里混进了有负责人的档案：${JSON.stringify(owners)}`
+        ).toBe(true);
+      }
+    }
+  });
+
+  test('工作台首屏就看得到逾期与今天的入口，点进去落到已筛选的列表', async ({ page }) => {
+    await loginAs(page, 'counselor');
+
+    const viewport = page.viewportSize();
+    expect(viewport, '这条用例要靠 1280×720 这个视口判断「首屏」，量不到它就没法判').not.toBeNull();
+
+    // §5.14.3 验收：「有逾期时首屏无需滚动即可看到逾期数量及入口」。两档一起断——
+    // 只断逾期那一张的话，一个把「今天必须处理」排到第二屏的排版照样是绿的。
+    for (const [label, filter, tabLabel] of [
+      ['逾期跟进', 'overdue', '已逾期'],
+      ['今天必须处理', 'today', '今日待办'],
+    ] as const) {
+      await page.goto('/counselor/workbench');
+      const card = page.locator('article.metric', { hasText: label });
+      await expect(card).toBeVisible();
+
+      const box = await card.boundingBox();
+      expect(box, `指标卡「${label}」量不出位置`).not.toBeNull();
+      expect(box!.y, `指标卡「${label}」在视口上方（y = ${box!.y}）`).toBeGreaterThanOrEqual(0);
+      expect(
+        box!.y + box!.height,
+        `指标卡「${label}」落到了首屏之外（y = ${box!.y}、高 ${box!.height}、视口 ${viewport!.height}）`
+      ).toBeLessThanOrEqual(viewport!.height);
+
+      // 卡上那个数，点进去之前先读回来——下面要拿它跟列表对。
+      const shown = Number((await card.locator('.metric-value').innerText()).trim());
+      expect(Number.isFinite(shown), `指标卡「${label}」上的数读不出来`).toBe(true);
+
+      // 入口可见不等于点了有用：卡上的数必须是**点进去那个列表**按同一档筛出来的。
+      // `goCases` 会把当前那一档负责人也带过去，所以只断言 filter 这一个键。
+      await card.click();
+      await expect(page).toHaveURL(new RegExp(`[?&]filter=${filter}`));
+      await expect(page.locator('.queue-tab.active')).toHaveText(tabLabel);
+
+      // ★ 这一条才是「同一筛选口径」那句话的判据（§5.14.3 第 7 条、CLAUDE.md §11）。
+      // 只断「地址栏里有 filter=overdue」+「页签写着已逾期」的话，一个把指标卡读
+      // **另一个字段**的实现照样是绿的——而那正是这一页历史上真实出过的错
+      // （`overdueCount` 从前读 `metrics.following`，卡上说 10、点进去 0 条）。
+      // 所以两处**互相比**：卡上的数 == 列表分页器上那个数。
+      if (shown > 0) {
+        await expect(
+          page.locator('.table-pager'),
+          `指标卡「${label}」写着 ${shown}，点进去的列表却不是 ${shown} 条`
+        ).toContainText(`共 ${shown} 条`);
+      } else {
+        // 0 条时两处也要一致：分页器整块不出现（0 条不该留一个「共 0 条 · 第 1 / 0 页」），
+        // 留下的是一句空态。
+        await expect(page.locator('.table-pager')).toHaveCount(0);
+        await expect(page.locator('.table-wrap .empty')).toBeVisible();
+      }
+    }
+
+    // 再钉一次「这一屏真的有东西可对」：两档都是 0 时上面每一条都成立，而它什么都没证明。
+    // 演示数据里逾期与今日各按构造产出（`seed_demo` 的跟进日期落在过去与今天），
+    // 所以这一条红了要先去看数据，不是先改断言。
+    const overdueCard = page.locator('article.metric', { hasText: '逾期跟进' });
+    await page.goto('/counselor/workbench');
+    expect(
+      Number((await overdueCard.locator('.metric-value').innerText()).trim()),
+      '演示数据里没有一份逾期的关注档案，这条对账用例会退化成空转——先跑 make seed-demo'
+    ).toBeGreaterThan(0);
+  });
+
+  test('首屏与优先队列都按「今天 → 逾期 → 待复核 → 其他」排', async ({ page }) => {
+    await loginAs(page, 'counselor');
+    await page.goto('/counselor/workbench');
+
+    // 第一半：三张卡片的**阅读次序**。指标区是一个多列的 CSS grid，所以「谁在前」
+    // 不等于「谁的 y 更小」——同一行的两张卡 y 完全相等（实测 1280px 下这两张都是
+    // y=245.1875）。按 (y, x) 排序才是这个网格真正的阅读次序，而顺序正是这一条
+    // 要求的东西：一个把「今天必须处理」排到最后的排版照样让每一张卡都「可见」。
+    const labels = ['今天必须处理', '逾期跟进', '待人工复核'];
+    const placed: Array<{ label: string; y: number; x: number }> = [];
+    for (const label of labels) {
+      const card = page.locator('article.metric', { hasText: label });
+      await expect(card).toBeVisible();
+      const box = await card.boundingBox();
+      expect(box, `指标卡「${label}」量不出位置`).not.toBeNull();
+      placed.push({ label, y: box!.y, x: box!.x });
+    }
+    const readingOrder = [...placed]
+      .sort((a, b) => a.y - b.y || a.x - b.x)
+      .map((one) => one.label);
+    expect(
+      readingOrder,
+      `指标卡的阅读次序是 ${readingOrder.join(' → ')}，不是 ${labels.join(' → ')}`
+    ).toEqual(labels);
+
+    // 第二半：队列的行序。阶段药丸与「下次处理」那一格足以把 `priorityRank` 那四档
+    // **重推一遍**，所以这里从 DOM 现推一次、断言这个序列不递减——「今天与逾期的
+    // 工作排在最前面」这句话这才是一条判据，而不是组件自己的一句声称。
+    const today = await page.evaluate(() => {
+      const d = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    });
+    const rows = page.locator('.queue-scroll tbody tr.queue-row');
+    await expect(rows.first()).toBeVisible();
+    const ranks = await rows.evaluateAll(
+      (trs, todayText) =>
+        trs.map((tr) => {
+          const status = (tr.querySelector('td:nth-child(2) .pill')?.textContent ?? '').trim();
+          const due = (tr.querySelector('td:nth-child(5)')?.textContent ?? '').trim();
+          if (due === '已逾期') return 1;
+          if (due && due !== '—' && due <= todayText) return 0;
+          if (status === '待复核') return 2;
+          return 3;
+        }),
+      today
+    );
+    expect(ranks.length, '优先队列是空的，这条用例会退化成空转').toBeGreaterThan(0);
+    expect(
+      ranks[0],
+      `队列第一行不是「今天 / 逾期」那一档（重推出来是第 ${ranks[0]} 档）`
+    ).toBeLessThanOrEqual(1);
+    for (let i = 1; i < ranks.length; i += 1) {
+      expect(
+        ranks[i],
+        `第 ${i + 1} 行（第 ${ranks[i]} 档）排在了上一行（第 ${ranks[i - 1]} 档）前面`
+      ).toBeGreaterThanOrEqual(ranks[i - 1]);
+    }
+  });
+
+  test('工作台队列的行操作按当前阶段给出具体动词', async ({ page }) => {
+    await loginAs(page, 'counselor');
+
+    const rows = page.locator('.queue-scroll tbody tr.queue-row');
+    await expect(rows.first()).toBeVisible();
+
+    // 一次读回（阶段药丸 / 操作按钮）两个字段：分两次读的话，两次之间队列可能
+    // 因为一次后台刷新而变过，配对就错位了。
+    const pairs = await rows.evaluateAll((trs) =>
+      trs.map((tr) => ({
+        status: (tr.querySelector('td:nth-child(2) .pill')?.textContent ?? '').trim(),
+        verb: (tr.querySelector('td:last-child button')?.textContent ?? '').trim(),
+      }))
+    );
+    expect(pairs.length, '优先队列是空的，这条用例会退化成空转').toBeGreaterThan(0);
+
+    // 判据是**阶段 → 动词**这个映射，不是「按钮上有字」：一个所有行都写
+    // 「进入档案」的实现要在这里红（§5.14.3 验收：「不能只换文案不带筛选/上下文」）。
+    const expectedVerb = (status: string) =>
+      status === '待复核' ? '人工复核' : status === '跟进中' ? '记录跟进' : '查看档案';
+    for (const row of pairs) {
+      expect(row.verb, `「${row.status}」这一行的操作写的是「${row.verb}」`).toBe(
+        expectedVerb(row.status)
+      );
+    }
+
+    // 再断动词**真的落到那个动作上**：点了之后弹出来的是那一张表单，而不是
+    // 一个「请自己去找」的档案页。优先挑「记录跟进」——它是唯一一个不依赖
+    // 这名学生有没有待复核信号的（`saveReview` 在一条风险事件都没有时才放弃）。
+    let target = pairs.findIndex((row) => row.verb === '记录跟进');
+    let heading = '新增跟进记录';
+    if (target < 0) {
+      target = pairs.findIndex((row) => row.verb === '人工复核');
+      heading = '记录人工复核';
+    }
+    expect(
+      target,
+      `优先队列里没有一条需要动手的行，这条用例会退化成空转：${JSON.stringify(pairs)}`
+    ).toBeGreaterThanOrEqual(0);
+
+    await rows.nth(target).locator('button').click();
+    await expect(page.getByRole('heading', { name: heading, exact: true })).toBeVisible();
+  });
+
+  test('工作台三档负责人筛选与队列行数一致，且真的筛掉了别人', async ({ page }) => {
+    await loginAs(page, 'counselor');
+
+    const tabs = page.locator('.owner-tabs .owner-tab');
+    await expect(tabs).toHaveCount(3);
+
+    const counts: number[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      counts.push(countOnLabel((await tabs.nth(index).innerText()).trim(), `第 ${index + 1} 档`));
+    }
+    expect(counts[0], '优先队列是空的，这条用例会退化成空转').toBeGreaterThan(0);
+
+    const rows = page.locator('.queue-scroll tbody tr.queue-row');
+    for (let index = 0; index < 3; index += 1) {
+      await tabs.nth(index).click();
+      await expect(tabs.nth(index)).toHaveClass(/active/);
+      // 页签上的数与切过去之后表里的行数是**同一个函数调用**（`ownerCounts` 与
+      // `priorityQueue` 共用 `rankedQueue`），所以这里断相等是断「它没被绕开」。
+      await expect(rows).toHaveCount(counts[index]);
+
+      const owners = await rows.evaluateAll((trs) =>
+        trs.map((tr) => (tr.querySelector('td:nth-child(4)')?.textContent ?? '').trim())
+      );
+      if (index === 1) {
+        expect(
+          owners.filter((owner) => owner === '未分配'),
+          '「我负责的」这一档里混进了没有负责人的行'
+        ).toHaveLength(0);
+      }
+      if (index === 2) {
+        expect(
+          owners.every((owner) => owner === '未分配'),
+          `「未分配」这一档里混进了有负责人的行：${JSON.stringify(owners)}`
+        ).toBe(true);
+      }
+    }
+  });
+
+  test('档案详情的下一步操作区吸附在顶栏下，且不含关闭档案', async ({ page }) => {
+    await loginAs(page, 'counselor');
+    const headers = await counselorHeaders(page);
+    const listed = await page.request.get('/api/v1/care-cases', { headers });
+    await expectOk(listed, '这一条失去了取数的手段：GET /care-cases');
+    const cases = (await listed.json()).data.items as Array<{
+      student_id: number;
+      case_status: string;
+    }>;
+    const open = cases.find((item) => item.case_status !== 'CLOSED');
+    expect(
+      open,
+      `重点学生列表里没有一条在办档案（共 ${cases.length} 条），这条用例会退化成空转`
+    ).toBeTruthy();
+
+    await page.goto(`/counselor/cases/${open!.student_id}`);
+    const bar = page.locator('.case-next-actions');
+    await expect(bar).toBeVisible();
+
+    // 「保持可见」是靠 sticky 做到的，所以判据取的是**计算值**而不是文案
+    // （与「布局完整性」那一组同一条：文案断言看不见整块样式被丢掉）。
+    // 视口是 1280×720，780px 那条媒体查询不生效，所以这里必须是 sticky。
+    expect(
+      await bar.evaluate((el) => getComputedStyle(el).position),
+      '下一步操作区不再吸附在顶栏下面（切到第七个页签就找不到了）'
+    ).toBe('sticky');
+
+    for (const name of ['人工复核', '记录跟进', '家庭回访', '安排复测']) {
+      await expect(bar.getByRole('button', { name, exact: true })).toBeEnabled();
+    }
+
+    // 「关闭关注档案」是终止性动作，与这四项分开放：它在页头、走危险操作确认。
+    // 两处都断——只断「页头有」的话，一个把关闭按钮同时抄进操作区的实现照样是绿的，
+    // 而那正是这一条要求挡住的（日常登记与终止动作摆一起，早晚被误点）。
+    await expect(bar.getByRole('button', { name: /关闭关注档案|重新打开档案/ })).toHaveCount(0);
+    await expect(
+      page.locator('.page-head').getByRole('button', { name: /^(关闭关注档案|重新打开档案)$/ })
+    ).toHaveCount(1);
+  });
+
+  test('已关闭的档案把四项登记置灰，并指出重新打开的出路', async ({ page }) => {
+    await loginAs(page, 'counselor');
+    const headers = await counselorHeaders(page);
+    const listed = await page.request.get('/api/v1/care-cases', { headers });
+    await expectOk(listed, '这一条失去了取数的手段：GET /care-cases');
+    const cases = (await listed.json()).data.items as Array<{ student_id: number }>;
+    expect(cases.length, '重点学生列表是空的，这条用例会退化成空转').toBeGreaterThan(0);
+    const studentId = cases[0].student_id;
+
+    // 取一份**真实**的详情，只把 `case_status` 换成 CLOSED 再发回浏览器。
+    //
+    // 为什么不用界面真去关一份：那要改共享演示库里的数据，而「缺陷回归」组里那条
+    // 关闭用例（`closing a case asks for the review it asserts`）正在同一批档案上
+    // 跑，`fullyParallel` 下两条会互相把对方的前置撬掉——它的第一句就是把库里那条
+    // CLOSED 档案先打开回去。桩比真关一份更准（要断的正是「服务端说是 CLOSED 时
+    // 界面怎么表现」），也不会留下痕迹。
+    await page.route(
+      (url) => url.pathname === `/api/v1/care-cases/${studentId}`,
+      async (route) => {
+        const response = await route.fetch();
+        const body = await response.json();
+        body.data.case_status = 'CLOSED';
+        await route.fulfill({ response, json: body });
+      }
+    );
+
+    await page.goto(`/counselor/cases/${studentId}`);
+    const bar = page.locator('.case-next-actions');
+    await expect(bar).toBeVisible();
+
+    // 四项都要置灰：`care_service._ensure_open` 对这四个入口一律回 409（CLAUDE.md §28），
+    // 界面这一层做的是**把那道门写在按钮上**，而不是让用户点进去吃一个错误。
+    // 四个名字逐个断，不写成「至少一个」——一个只置灰了复核的实现在后者下是绿的。
+    for (const name of ['人工复核', '记录跟进', '家庭回访', '安排复测']) {
+      await expect(bar.getByRole('button', { name, exact: true })).toBeDisabled();
+    }
+
+    // 灰掉的按钮必须说得出为什么（§17：空态是一句关于数据的话）。
+    const note = page.locator('#case-next-closed-note');
+    await expect(note).toBeVisible();
+    await expect(note).toContainText('重新打开档案');
+    // 那一句是**关联**在那组按钮上的（`aria-describedby`），不是飘在旁边的另一段字：
+    // 读屏软件走到第一个灰按钮时要能听见它。
+    await expect(bar.locator('[role="group"]')).toHaveAttribute(
+      'aria-describedby',
+      'case-next-closed-note'
+    );
+
+    // 出路必须还在页头，而且是能点的——「四项都灰了」不该等于「这一页没有出口」。
+    await expect(
+      page.locator('.page-head').getByRole('button', { name: '重新打开档案' })
+    ).toBeEnabled();
+  });
+});
 
 test.describe('系统配置', () => {
   // Serial: every case mutates the same `org` namespace, so parallel workers

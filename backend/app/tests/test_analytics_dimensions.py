@@ -9,12 +9,30 @@ capability scoping as the rest of the case surface.
 from datetime import date, timedelta
 
 from app.services.analytics_service import REMINDER_LIMIT
+from app.services.assessment_service import now_utc_naive
 from app.tests.conftest import auth_headers
 from app.tests.test_assessment_api import create_student_session, save_answers
 
 # 这里的窗口按**今天**算，不写死日期（2026-09-17 改）：`effective_task_status` 现在会读
 # `end_at`，写过期日期的话，下面那句「学生开一份新卷子」会在这条用例自己过期的日子
 # 拿到 404——而红的原因不是功能坏了。同一条教训见 CLAUDE.md 的测试注意。
+def reminder_today():
+    """服务端算 `days` / `when` 时用的那一口钟的「今天」。
+
+    `analytics_service` 的提醒面板写的是 `today = datetime.now(UTC).date()`（UTC，
+    那一行就是它的口径），而本机在 UTC+8——本地 00:00–08:00 之间两者差一天。
+    下面那条断言 `[days] == [-3, 5, 10]` 的用例此前拿 **本地** `date.today()`
+    构造输入，于是**那八个小时里它必红**：报出来是 `[-2, 6, 11] != [-3, 5, 10]`
+    ——每一个数都差一，看起来像排序坏了（2026-09-27 00:20 实测）。
+
+    改的**只是构造输入的那一口钟**，断言一个字没动：`days` 与输入日期之间那个
+    「差几天」的关系仍然是它要钉的东西。同一条成例见
+    `test_assessment_import_api.py:407`（那里也写着「这两个在 UTC+8 的下午到凌晨
+    之间差一天」）。**服务端哪天换口径，这一处要跟着换**——它是一处同步点。
+    """
+    return now_utc_naive().date()
+
+
 TASK_WINDOW = {
     "start_at": (date.today() - timedelta(days=7)).isoformat(),
     "end_at": (date.today() + timedelta(days=90)).isoformat(),
@@ -212,7 +230,7 @@ def test_reminders_carry_the_distance_as_a_number_sorted_by_it(client):
             json={
                 "record_type": "心理老师访谈",
                 "confirmed_facts": f"约定 {offset} 天后再谈。",
-                "next_follow_up_date": (date.today() + timedelta(days=offset)).isoformat(),
+                "next_follow_up_date": (reminder_today() + timedelta(days=offset)).isoformat(),
             },
         )
         assert created.status_code == 200, created.text
@@ -223,7 +241,7 @@ def test_reminders_carry_the_distance_as_a_number_sorted_by_it(client):
         json={
             "record_type": "心理老师访谈",
             "confirmed_facts": "这条已经过期了。",
-            "next_follow_up_date": (date.today() - timedelta(days=3)).isoformat(),
+            "next_follow_up_date": (reminder_today() - timedelta(days=3)).isoformat(),
         },
     )
     assert overdue.status_code == 200, overdue.text
