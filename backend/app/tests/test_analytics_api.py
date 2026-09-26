@@ -1,3 +1,5 @@
+from datetime import date
+
 from app.tests.conftest import auth_headers
 from app.tests.test_assessment_api import create_student_session, save_answers
 from app.tests.test_care_api import create_risk_case
@@ -85,3 +87,42 @@ def test_leader_progress_lists_only_open_cases(client):
     detail = client.get(f"/api/v1/care-cases/{case_item['student_id']}", headers=counselor_headers)
     assert detail.status_code == 200
     assert detail.json()["data"]["case_status"] == "CLOSED"
+
+
+def test_the_retest_kpi_counts_the_rows_the_drilldown_lists(client):
+    """「计划复测」卡片那个数 = 「重点进展」里 `?filter=retest` 筛出来的行数。
+
+    2026-09-27（§5.14.4 第 1 条）。此前它是 `count(RetestPlan.id)`——**数计划条数**，
+    而那张卡下钻到「重点进展」、那里**一行一名学生**：一名学生可以挂多份计划
+    （一次初测之后既排了学期末、又排了寒假前），于是卡片说 2、点进去 1 行，
+    **两边看起来都对**（§11：指标卡上的数必须与它点进去的那个列表同源）。
+    开发库上实测过 6 条计划 / 4 名学生。
+
+    判据是**两处相等**，不是「它等于某个数字」：写死一个期望值只能证明其中一处
+    此刻等于它，证明不了它们同源。
+
+    夹具（同一名学生两份计划）**是这条用例的主题**：只造一份计划时两种实现给出
+    同一个数（1），变异验证不会红——`test_care_api.py` 里已有的一条正是那样的夹具。
+    """
+    counselor_headers = create_risk_case(client)
+    case_item = client.get("/api/v1/care-cases", headers=counselor_headers).json()["data"]["items"][0]
+    for planned in (date(2026, 10, 15), date(2026, 12, 20)):
+        created = client.post(
+            f"/api/v1/care-cases/{case_item['case_id']}/retests",
+            headers=counselor_headers,
+            json={"planned_date": str(planned), "reason": "阶段性复测"},
+        )
+        assert created.status_code == 200
+
+    headers = auth_headers(client, "leader", "13800000002")
+    items = client.get("/api/v1/leader/progress", headers=headers).json()["data"]["items"]
+    flagged = [item for item in items if item["retest_planned"]]
+
+    # 先证明有东西可数：两份计划落在**同一名**学生身上，所以「数计划」与「数学生」
+    # 在这一刻是两个不同的数——少了这一句，一个两边都是 0 的实现也能过。
+    assert len(flagged) == 1, "这条用例的前提是这名学生有未完成的复测计划"
+
+    overview = client.get("/api/v1/analytics/overview", headers=headers).json()["data"]
+    assert overview["planned_retests"] == len(flagged), (
+        "「计划复测」卡片上的数必须与「重点进展」里 retest_planned 的行数同源"
+    )

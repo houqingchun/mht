@@ -24,8 +24,20 @@ import {
   statusLabel,
   statusTone
 } from '../../services/labels'
+import { PROGRESS_FILTERS, type ProgressFilter } from './progressFilters'
 
 const router = useRouter()
+
+/**
+ * 下钻到「重点进展」并把筛选带上（§5.14.4 第 1 / 3 条）。
+ *
+ * 每一个能下钻的项都走这一个函数，`ProgressPage.vue` 按 `query.filter` 用**同一组
+ * 谓词**（`progressFilters.ts`）筛同一份名单——所以「卡片上那个数」与「点进去那几行」
+ * 构造上不可能漂（§11）。不带筛选的项**不调用它**，也**不长成可点的样子**。
+ */
+function drillToProgress(filter?: ProgressFilter) {
+  router.push({ path: '/leader/progress', query: filter ? { filter } : {} })
+}
 
 // 阈值由系统配置提供：此前一处是常量、另一处是裸字面量
 const { settings } = useSettings()
@@ -100,21 +112,71 @@ function needsAttention(rate: number) {
   return rate < LOW_COMPLETION.value
 }
 
-/** 管理提醒来自真实聚合，而不是写死文案。 */
-const managementAlerts = computed(() => {
-  const overdue = progress.value.filter(p => p.overdue).length
-  const unassigned = progress.value.filter(p => !p.owner_id).length
+// 两张待办卡上的数**从那份名单现算**，谓词与「重点进展」页筛的**同一个**
+// （`progressFilters.ts`）——卡片说几条、点进去几行，构造上不可能漂（§11）。
+// 逾期那一个此前是就地写一遍 `p.overdue`，与页面上别处的写法各写各的。
+const overdueCount = computed(() => progress.value.filter(PROGRESS_FILTERS.overdue).length)
+const unassignedCount = computed(() => progress.value.filter(PROGRESS_FILTERS.unassigned).length)
+
+/**
+ * 管理提醒来自真实聚合，而不是写死文案。
+ *
+ * ★ 2026-09-27（§5.14.4 第 3 条）：每一项带上**它的去处**，让「这一行说有几条」
+ * 与「点进去看到几行」是同一件事。三档取值，各自对应一种渲染（模板里按 `filter`
+ * 在不在分岔）：
+ *
+ * | `filter` | 含义 | 渲染成 |
+ * |---|---|---|
+ * | 一个筛选键 | 有去处、并且筛到对应那几条 | `<button class="check-row">` |
+ * | `null` | 有去处，但「对应结果」就是整份名单（没有更细的筛法） | `<button class="check-row">` |
+ * | **不写这一项** | **没有去处** | 普通 `<div>`，没有手型也没有 hover 抬升 |
+ *
+ * 第三档只有一项（年级完成率），而**它是刻意的**：`GradesPage.vue` 没有按完成率
+ * 筛选的能力，所以给它一个能点的样子就是「计划复测」那张卡原来的毛病再犯一次
+ * （`.metric[role="button"]` 那条注释点的就是那一次）。它的答案就在这一行里——
+ * 是哪几个年级由 `detail` 直接列出来，读者不必点进任何地方。
+ */
+type ManagementAlert = {
+  label: string
+  value: number
+  tone: string
+  /** 下钻的筛选键；`null` = 有去处但不筛；**不写** = 没有去处（不可交互）。 */
+  filter?: ProgressFilter | null
+  /** 只在没有去处的那一项上出现：把「是哪几个」直接写在这一行。 */
+  detail?: string
+}
+
+const managementAlerts = computed<ManagementAlert[]>(() => {
   const behind = grades.value.filter(g => needsAttention(g.completion_rate))
   return [
-    { label: '逾期未跟进', value: overdue, tone: overdue > 0 ? 'bad' : 'ok' },
-    { label: '未分配负责人', value: unassigned, tone: unassigned > 0 ? 'bad' : 'ok' },
-    { label: `完成率低于 ${LOW_COMPLETION.value}% 的年级`, value: behind.length, tone: behind.length ? 'bad' : 'ok' },
+    {
+      label: '逾期未跟进',
+      value: overdueCount.value,
+      tone: overdueCount.value > 0 ? 'bad' : 'ok',
+      filter: 'overdue'
+    },
+    {
+      label: '未分配负责人',
+      value: unassignedCount.value,
+      tone: unassignedCount.value > 0 ? 'bad' : 'ok',
+      filter: 'unassigned'
+    },
+    {
+      label: `完成率低于 ${LOW_COMPLETION.value}% 的年级`,
+      value: behind.length,
+      tone: behind.length ? 'bad' : 'ok',
+      // 没有 `filter`：`GradesPage.vue` 没有完成率筛选，做一个能点的样子就是
+      // 假可点击。是哪几个年级直接写在后面（同一次 computed 算出来的，不是另查）。
+      detail: behind.map(g => g.grade).join('、')
+    },
     // 这个数就是「重点进展」那一页的行数，所以它**只数在办的档案**（2026-09-17 起
     // 后端不再下发 CLOSED）。标签不能写「重点关注档案」：「重点关注」是本产品里
     // `KEY_ATTENTION` 那个等级的**名字**（§3 那张表），而这里数的是任何等级的在办
     // 档案。一个字面的等级名配一个不是它的数，读的人只会得出「这所学校有 N 个
     // 重点关注学生」——那是另一个数（见上面那三档）。
-    { label: '在办关注档案', value: progress.value.length, tone: 'plain' }
+    //
+    // `filter: null`：它的去处是整份名单，没有更细的筛法。
+    { label: '在办关注档案', value: progress.value.length, tone: 'plain', filter: null }
   ]
 })
 
@@ -165,16 +227,15 @@ onMounted(load)
     <ErrorState v-if="error && !loading" :message="error" :on-retry="load" />
 
     <template v-if="!loading && !error">
-      <!-- 可点的那三张带 `role="button"` 与 Enter/Space（同心理老师工作台那一处，
-           见那边的注释）。第四张「计划复测」没有去处，所以只是 `<article>`：
-           它的 `cursor: pointer` 来自 `.metric` 的公共样式，是**假**的。 -->
+      <!-- 次序（§5.14.4 第 2 条）：**要动手的排在前面，常规完成率排在最后**。
+           异常（需关注 / 在办档案 / 计划复测）→ 常规（完成率）。此前完成率打头，
+           而它是四个数里唯一一个「不需要额外做什么」的数。
+           四张都带 `role="button"` 与 Enter/Space（同心理老师工作台那一处）。
+           第四张曾经是**假可点击**——它长着 `.metric[role="button"]` 的手型光标与
+           hover 抬升，却没有去处（`styles.css` 的注释点的就是它）；现在它下钻到
+           已筛选的复测名单，不再是装饰。 -->
       <div class="grid metrics">
-        <article class="metric" data-tone="green" role="button" tabindex="0" @click="router.push('/leader/analytics')" @keydown.enter.prevent="router.push('/leader/analytics')" @keydown.space.prevent="router.push('/leader/analytics')">
-          <div class="metric-label">测评完成率</div>
-          <div class="metric-value">{{ overview?.completion_rate ?? 0 }}%</div>
-          <div class="metric-foot">{{ overview?.completed_targets ?? 0 }} / {{ overview?.total_targets ?? 0 }} 人</div>
-        </article>
-        <article class="metric" data-tone="red" role="button" tabindex="0" @click="router.push('/leader/progress')" @keydown.enter.prevent="router.push('/leader/progress')" @keydown.space.prevent="router.push('/leader/progress')">
+        <article class="metric" data-tone="red" role="button" tabindex="0" @click="drillToProgress()" @keydown.enter.prevent="drillToProgress()" @keydown.space.prevent="drillToProgress()">
           <div class="metric-label">需关注摘要</div>
           <div class="metric-value">{{ overview?.attention_count ?? 0 }}</div>
           <div class="metric-foot">
@@ -186,15 +247,100 @@ onMounted(load)
              会让人以为是两个东西。此前它写「重点档案」，而「重点」是本产品里
              `KEY_ATTENTION` 等级的名字——上面那三档才是真的按等级数人。
              这个数是在办的**档案**数（一名学生一条），与等级无关。 -->
-        <article class="metric" data-tone="amber" role="button" tabindex="0" @click="router.push('/leader/progress')" @keydown.enter.prevent="router.push('/leader/progress')" @keydown.space.prevent="router.push('/leader/progress')">
+        <article class="metric" data-tone="amber" role="button" tabindex="0" @click="drillToProgress()" @keydown.enter.prevent="drillToProgress()" @keydown.space.prevent="drillToProgress()">
           <div class="metric-label">在办关注档案</div>
           <div class="metric-value">{{ progress.length }}</div>
-          <div class="metric-foot">其中逾期 {{ progress.filter(p => p.overdue).length }} 项</div>
+          <div class="metric-foot">其中逾期 {{ overdueCount }} 项</div>
         </article>
-        <article class="metric" data-tone="teal">
+        <!-- 这一个数**按学生去重**（`overview.planned_retests`）：一名学生可以挂多份
+             复测计划，而「重点进展」一行一名学生——数计划行时卡片说 6、点进去 4 行。
+             口径与那个列表逐字对齐，由 `test_analytics_api.py` 里的一条用例钉住。 -->
+        <article class="metric" data-tone="teal" role="button" tabindex="0" @click="drillToProgress('retest')" @keydown.enter.prevent="drillToProgress('retest')" @keydown.space.prevent="drillToProgress('retest')">
           <div class="metric-label">计划复测</div>
           <div class="metric-value">{{ overview?.planned_retests ?? 0 }}</div>
-          <div class="metric-foot">待完成的复测计划</div>
+          <div class="metric-foot">在办档案名下待完成的复测计划（按学生去重）</div>
+        </article>
+        <article class="metric" data-tone="green" role="button" tabindex="0" @click="router.push('/leader/analytics')" @keydown.enter.prevent="router.push('/leader/analytics')" @keydown.space.prevent="router.push('/leader/analytics')">
+          <div class="metric-label">测评完成率</div>
+          <div class="metric-value">{{ overview?.completion_rate ?? 0 }}%</div>
+          <div class="metric-foot">{{ overview?.completed_targets ?? 0 }} / {{ overview?.total_targets ?? 0 }} 人</div>
+        </article>
+      </div>
+
+      <!-- 次序（§5.14.4 第 2 条）：**要动手的排在前面**。左侧「管理提醒」是这一页
+           唯一一件**告诉读者接下来做什么**的事，右侧的年级条形图是背景；而这一整块
+           又排在「关注等级分布」之前——那一块回答的是「整体什么水平」，属于事后
+           描述。此前顺序恰好相反（分布 → 年级 → 提醒），读者要滚过两块图才看见
+           待办。 -->
+      <div class="grid two" style="margin-top:17px">
+        <article class="card pad">
+          <h2>管理提醒</h2>
+          <!-- 三档渲染（见 script 里 `ManagementAlert` 那段注释）：有去处的
+               `<button role="button">`，没有去处的普通 `<div>`。两者外观相同，
+               差别只在光标与悬停——判据与 `.metric` 那一处一致。 -->
+          <div class="checklist" style="margin-top:15px">
+            <template v-for="alert in managementAlerts" :key="alert.label">
+              <button
+                v-if="alert.filter !== undefined"
+                type="button"
+                class="check-row"
+                role="button"
+                @click="drillToProgress(alert.filter ?? undefined)"
+              >
+                <span>{{ alert.label }}</span>
+                <strong :class="alert.tone === 'bad' ? 'status-bad' : alert.tone === 'ok' ? 'status-ok' : ''">
+                  {{ alert.value }} 项
+                </strong>
+              </button>
+              <!-- 没有去处的那一项（完成率低于阈值的年级）：`GradesPage.vue` 没有
+                   按完成率筛选的能力，所以点不动。是哪几个年级直接写在标签后面
+                   ——它的答案就在这一行里，不必点进任何地方。 -->
+              <div v-else class="check-row">
+                <span>
+                  {{ alert.label }}
+                  <span v-if="alert.detail" class="muted tiny">· {{ alert.detail }}</span>
+                </span>
+                <strong :class="alert.tone === 'bad' ? 'status-bad' : alert.tone === 'ok' ? 'status-ok' : ''">
+                  {{ alert.value }} 项
+                </strong>
+              </div>
+            </template>
+          </div>
+        </article>
+
+        <article class="card pad">
+          <h2>年级完成与关注情况</h2>
+          <!-- 两条口径，都写在这一块的数据旁边（§5.14.4 第 4 / 6 条）：
+               ①「样本过小」是下面那个 `rateText` 的取值，四字之外没有任何解释，
+               而它说的是**比率不给、计数照给**——不说清会被读成「没有数据」；
+               ②不提供环比：这一页按全部有效测评累计，系统里没有「周期」这一层，
+               编一个「比上学期」出来比不给更糟。
+
+               ★ 刻意**不写那个阈值数字**（「不足 5 人」）。`MIN_COHORT_FOR_AGGREGATE`
+               住在 `analytics_service.py` 里、不在任何配置表里，也不出现在这一页的
+               响应里——在模板里写一个 5 就是这本文件反复记着的那个形状（同一件事的
+               第二个定义），而它漂了不会有任何东西看得见。本项目已有的做法是
+               **阈值一律从服务端来**（同页的 `LOW_COMPLETION` 就读 `settings.ui`），
+               所以在那之前这里只说清语义、不说数字。 -->
+          <p class="muted tiny" style="margin:6px 0 0">
+            「样本过小」= 该群体已测评人数太少，比率不足为凭（人数照给，比率不给）。
+            本页按全部有效测评累计（每名学生取最近一场已计算的结果），
+            系统里没有「周期」这一层，因此不提供环比 / 同比。
+          </p>
+          <div class="bar-list" style="margin-top:16px">
+            <div v-for="g in grades" :key="g.grade_id" class="bar-row">
+              <span>{{ g.grade }}</span>
+              <div class="bar">
+                <i :class="needsAttention(g.completion_rate) ? 'high' : 'medium'" :style="{ width: `${g.completion_rate}%` }"></i>
+              </div>
+              <b>{{ g.completion_rate }}%</b>
+              <!-- 第二行：关注占比。完成率相同的两个年级，问题可能差十倍。 -->
+              <span class="bar-sub" :class="rateClass(g.attention_rate, g.cohort_too_small)">
+                关注 {{ rateText(g.attention_rate, g.cohort_too_small) }}
+              </span>
+            </div>
+            <div v-if="!grades.length" class="empty">暂无年级数据</div>
+          </div>
         </article>
       </div>
 
@@ -223,44 +369,22 @@ onMounted(load)
         <div v-if="!assessedCount" class="empty" style="margin-top:12px">尚无已提交的测评</div>
       </article>
 
-      <div class="grid two" style="margin-top:17px">
-        <article class="card pad">
-          <h2>年级完成与关注情况</h2>
-          <div class="bar-list" style="margin-top:19px">
-            <div v-for="g in grades" :key="g.grade_id" class="bar-row">
-              <span>{{ g.grade }}</span>
-              <div class="bar">
-                <i :class="needsAttention(g.completion_rate) ? 'high' : 'medium'" :style="{ width: `${g.completion_rate}%` }"></i>
-              </div>
-              <b>{{ g.completion_rate }}%</b>
-              <!-- 第二行：关注占比。完成率相同的两个年级，问题可能差十倍。 -->
-              <span class="bar-sub" :class="rateClass(g.attention_rate, g.cohort_too_small)">
-                关注 {{ rateText(g.attention_rate, g.cohort_too_small) }}
-              </span>
-            </div>
-            <div v-if="!grades.length" class="empty">暂无年级数据</div>
-          </div>
-        </article>
-
-        <article class="card pad">
-          <h2>管理提醒</h2>
-          <div class="checklist" style="margin-top:15px">
-            <div v-for="alert in managementAlerts" :key="alert.label" class="check-row">
-              <span>{{ alert.label }}</span>
-              <strong :class="alert.tone === 'bad' ? 'status-bad' : alert.tone === 'ok' ? 'status-ok' : ''">
-                {{ alert.value }} 项
-              </strong>
-            </div>
-          </div>
-        </article>
-      </div>
-
       <article class="card" style="margin-top:17px">
         <div class="card-head">
           <h2>重点进展摘要</h2>
           <span class="muted tiny">{{ progress.length }} 人</span>
         </div>
         <div class="card-body">
+          <!-- 姓名是**遮蔽名**（姓 + 「同学」），服务端现算下发，**没有学号**
+               （§5.14.4 第 7 条）。此前这一格渲染的是 `row.student_name` ·
+               `row.student_no`，而 `student_no` 已经不在响应里了——写一个拿不到的
+               字段会让整格显示成「林同学 · undefined」。德育领导的
+               `STUDENT_PSYCH_DETAIL` 是 `SUMMARY`、`ORG_ACCOUNT` 是
+               `READ_SUMMARY`，学号与真名都不在他的授权范围内（§4）；这一列
+               只是**不假装有一个拿不到的字段**，真正的守卫在服务端。 -->
+          <p class="muted tiny" style="margin:0 0 10px">
+            学生姓名按「姓 + 同学」遮蔽显示。需要个体身份的场景请走心理老师。
+          </p>
           <!-- 只读摘要：德育领导不进入学生敏感档案，故不提供行内操作 -->
           <DataTable
             :columns="progressColumns"
@@ -269,7 +393,7 @@ onMounted(load)
             :page-size="10"
             empty-text="当前没有重点进展。"
           >
-            <template #student_name="{ row }">{{ row.student_name }} · {{ row.student_no }}</template>
+            <template #student_name="{ row }">{{ row.student_name }}</template>
             <template #grade="{ row }">{{ row.grade }}{{ row.class_name }}</template>
             <template #total_level="{ row }">
               <span :class="['pill', levelTone(row.total_level)]">{{ levelLabel(row.total_level) }}</span>
@@ -293,6 +417,13 @@ onMounted(load)
           <span class="muted tiny">{{ classes.length }} 个班级</span>
         </div>
         <div class="card-body">
+          <!-- 「关注占比」那一列可能是「样本过小」——与年级块同一个取值、同一个
+               理由（§5.14.4 第 6 条）。同一句话在两处都要有：读者会单独打开
+               这一段，而只在前一处解释等于只对看完整页的人解释。
+               同样不写那个阈值数字，理由见上面年级块那一段注释。 -->
+          <p class="muted tiny" style="margin:0 0 10px">
+            「样本过小」= 该班已测评人数太少，关注占比不足为凭（需关注人数照给）。
+          </p>
           <DataTable
             :columns="classColumns"
             :rows="classes"

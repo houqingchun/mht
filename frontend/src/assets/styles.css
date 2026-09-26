@@ -1479,6 +1479,35 @@ h1 {
   background: #fff;
 }
 
+/*
+ * 可点的检查行（V2.0.0 §5.14.4 第 3 条）。
+ *
+ * 判据与上面 `.metric[role="button"]` **同一条**：`role="button"`，不是类名。
+ * 德育领导页「管理提醒」里的每一项此前都是普通 `<div>`：一部分有去处（逾期、
+ * 未分配负责人），一部分没有（完成率低于阈值的年级——统计分析页没有按完成率
+ * 筛选的能力）。给全部四项都加手型光标就是「计划复测」那张卡原来的毛病
+ * （上面那条注释点的就是那一次），所以现在按**有没有去处**分岔：有去处的渲染成
+ * `<button class="check-row" role="button">`，没有的仍是 `<div>`，两者外观相同、
+ * 区别只在光标与悬停——与 `.metric` 那一处一模一样。
+ *
+ * `button` 元素自带 role=button，这里显式写出来是为了**让判据是同一个**：CSS 里
+ * 选择器如果不写 `[role="button"]` 而按元素名判，同一个文件里就会出现两种判据，
+ * 下一个加可点检查行的人会照着错的那种写。
+ */
+.check-row[role="button"] {
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  width: 100%;
+  transition: 0.18s;
+}
+
+.check-row[role="button"]:hover {
+  border-color: var(--blue);
+  box-shadow: 0 6px 18px rgba(20, 43, 69, 0.07);
+}
+
 /* 工作台「优先工作队列」：这一块是预览，不是清单本体（旁边就有「查看全部」）。
    不设上限时行数完全跟着数据走——2026-09-17 量到 40 条时整栏 4127px。 */
 .queue-scroll {

@@ -828,11 +828,21 @@ export interface ClassComparison {
   items: ComparisonItem[]
 }
 
+/**
+ * 「重点进展」一行（德育领导）。
+ *
+ * **没有 `student_no`，`student_name` 是遮蔽名**（V2.0.0 §5.14.4 第 7 条，
+ * 2026-09-27）。这两件事都是服务端决定的（`analytics_service.leader_progress`
+ * 那一行的注释写着理由），前端**不要**在这里另加学号字段去补回来：德育领导的
+ * `STUDENT_PSYCH_DETAIL` 是 `SUMMARY`、`ORG_ACCOUNT` 是 `READ_SUMMARY`，学号与
+ * 真名都不在他的授权范围内，而「前端隐藏不是安全措施」（§4）——真正的守卫在
+ * 服务端，这里只是不假装有一个拿不到的字段。
+ */
 export interface LeaderProgressItem {
   case_id: number
   student_id: number
+  /** 姓 + 「同学」，服务端现算；**不是** `student.masked_name` 那一列的字面值。 */
   student_name: string
-  student_no: string
   grade: string
   class_name: string
   case_status: string
@@ -842,6 +852,8 @@ export interface LeaderProgressItem {
   owner_name: string | null
   next_follow_up_date: string | null
   overdue: boolean
+  /** 这条档案名下还有没有未完成的复测计划（`?filter=retest` 按它筛）。 */
+  retest_planned: boolean
   opened_at: string | null
   updated_at: string | null
 }

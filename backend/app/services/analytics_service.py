@@ -29,6 +29,10 @@ from app.scale_engine.engine import rule_config_from_json
 from app.security.data_scope import ensure_student_in_scope, student_scope_predicate
 from app.services.assessment_service import latest_session, latest_session_order
 from app.services.export_document import ExportDocument
+# 姓名遮蔽**只有这一个实现**（`export_service.mask_student_name`，读取时现算）。
+# 这里 import 它而不是就地写一句 `name[0] + "同学"`：同一件事第二个定义漂了不会有
+# 任何东西看得见，而这一句读的正是「领导该看到谁」（§5.14.4 第 7 条）。
+from app.services.export_service import mask_student_name
 # 导出侧的中文一律走 `export_labels` 这份 `labels.ts` 的镜像（§3 第三面）：这一份 CSV 的
 # 性别 / 来源 / 学籍状态三列在服务端拼出来，界面上那三列是 `labels.ts` 出的中文，两处
 # 各写一份就会漂，而漂了没有任何东西看得见（`test_export_labels_match_frontend.py` 就是
@@ -632,11 +636,39 @@ def analytics_overview(db: Session, user: UserAccount) -> dict:
     assessed_count = sum(bands.values())
     attention_count = sum(bands.get(level, 0) for level in ATTENTION_LEVELS)
 
+    # ★ 2026-09-27（§5.14.4 第 1 条）：补上 `StudentCareCase` 这一次连接。
+    #
+    # 此前这条查询只 join 了 `Student`，于是**已关闭档案**名下仍未完成的复测计划
+    # 照旧被数进去——而同一个屏幕上那张「重点进展」表是按「档案非 CLOSED」筛的
+    # （`leader_progress`），两处口径不一致：领导看到「计划复测 3」，点进去（或
+    # 照着下面的表找）只找得到 2 条，而**两边看起来都对**。
+    #
+    # §1 记着这一页的三处取舍（哪三处列表过滤 CLOSED、各自的理由），而这一处不属于
+    # 那三处里的任何一个——它是**漏掉的第四处**：`leader_progress` 有这一句、
+    # 这里没有。复测计划挂在档案上（`retest_plan.care_case_id` 是那一列的外键
+    # 一半），档案关了这条计划就不再是谁的待办，与「重点进展不列 CLOSED」同源。
+    #
+    # 口径因此从「计划条数」变成「**在办档案名下未完成的复测计划**」，而这一格
+    # 与它下钻的那个列表**必须同源**（§11），所以要**按学生去重**、不是数计划行：
+    # `retest_plan` 上一名学生可以挂多份计划（一次初测之后既排了学期末、又排了
+    # 寒假前），而「重点进展」一行一名学生。数计划行时卡片说 6、点进去 4 行，
+    # **两边看起来都对**——实测过（开发库 6 条计划 / 4 名学生）。
+    #
+    # 判据与 `leader_progress` 里那一个 `retest_planned` 逐字对齐（同一个
+    # `care_case_id` 内连接 + 同一个 `status != "CLOSED"`）；两处相等由
+    # `test_analytics_api.py::test_the_retest_kpi_counts_the_rows_the_drilldown_lists`
+    # 钉住——它拿这个数与「下钻列表里 `retest_planned` 为真的行数」比。
+    # 界面上那一格下面的脚注跟着改（`LeaderOverviewPage.vue`）。
     planned_retests = (
         db.scalar(
-            select(func.count(RetestPlan.id))
+            select(func.count(func.distinct(RetestPlan.student_id)))
             .join(Student, Student.id == RetestPlan.student_id)
-            .where(RetestPlan.status == "PLANNED", scope)
+            .join(StudentCareCase, StudentCareCase.id == RetestPlan.care_case_id)
+            .where(
+                RetestPlan.status == "PLANNED",
+                StudentCareCase.status != "CLOSED",
+                scope,
+            )
         )
         or 0
     )
@@ -1488,9 +1520,35 @@ def leader_progress(db: Session, user: UserAccount) -> list[dict]:
                 select(latest_followup_subq).where(latest_followup_subq.c.rn == 1)
             ).all()
         }
+
+        # 批量取「这名学生有没有未完成的复测计划」（§5.14.4 第 1 条的下钻要按它筛）。
+        # 与上面两块同一条理由：逐个学生查就是 N 条额外 SELECT。
+        #
+        # 判据与 `planned_retests` **逐字对齐**（`care_case_id` 内连接 + 档案非
+        # CLOSED 且 `status == "PLANNED"`）——那个数坐在卡片上、这一列决定这个列表
+        # 筛出几行，两处各写一份迟早会各说各话（§11：「指标卡上的数必须与它点进去
+        # 的那个列表同源」）。
+        #
+        # 这里是**另一个查询**，不是把那一个数拆开用：跨层的同源（SQL 一个数、
+        # 客户端一份名单）不可能靠「同一段代码」保证，只能靠**同一个判据 + 一条
+        # 守卫**——`test_analytics_api.py::test_the_retest_kpi_counts_the_rows_the_drilldown_lists`
+        # 拿 `planned_retests` 与「本列表里 `retest_planned` 为真的行数」比。
+        # 少了那条，这两个数漂了不会有任何东西看得见。
+        retest_subq = (
+            select(RetestPlan.student_id)
+            .join(StudentCareCase, StudentCareCase.id == RetestPlan.care_case_id)
+            .where(
+                RetestPlan.student_id.in_(student_ids),
+                RetestPlan.status == "PLANNED",
+                StudentCareCase.status != "CLOSED",
+            )
+            .distinct()
+        )
+        retest_students = set(db.scalars(retest_subq).all())
     else:
         results_by_student = {}
         followups_by_student = {}
+        retest_students = set()
 
     today = datetime.now(UTC).date()
     items = []
@@ -1501,8 +1559,24 @@ def leader_progress(db: Session, user: UserAccount) -> list[dict]:
             {
                 "case_id": care_case.id,
                 "student_id": student.id,
-                "student_name": student.masked_name,
-                "student_no": student.student_no,
+                # ★ 2026-09-27（§5.14.4 第 7 条）两处「最小化个体暴露」，都在这一行上：
+                #
+                # ① 姓名**现算遮蔽**，不读 `student.masked_name`。那一列不是隐私控制
+                #    ——三条写入路径（seed / seed_demo / student_import_service）写的
+                #    都是真名（§1），所以此前这里发出去的就是**真名**，而德育领导的
+                #    `STUDENT_PSYCH_DETAIL` 是 `SUMMARY`（§4：那只是聚合，不是逐人
+                #    明细）。`export_service.mask_student_name` 是这件事唯一的实现，
+                #    这里复用它（同一个 import，不另写一份）。
+                # ② **去掉 `student_no`**。学号属于「组织与账号」那一档
+                #    （`ORG_ACCOUNT`），而领导是 `READ_SUMMARY`——他在 `/students` 上
+                #    连按行姓名都拿不到。这与缺口 12 是同一个形状：载荷里同时有身份列
+                #    与等级列，而两列都不是这一页授权范围内的东西。
+                #
+                # 代价如实记：同为「林同学」的两名同班学生在领导这一页上认不出来。
+                # 这是 §5.14.4 第 7 条选的那条路——「姓名/学号仅在现有授权允许且确有
+                # 工作必要的详情或二次展开中显示」，而领导**没有**个体心理详情授权，
+                # 所以没有那个「详情」。班级 · 阶段 · 负责人 · 是否逾期够他安排工作。
+                "student_name": mask_student_name(student.name),
                 "grade": grade.name,
                 "class_name": class_group.name,
                 "case_status": care_case.status,
@@ -1512,6 +1586,12 @@ def leader_progress(db: Session, user: UserAccount) -> list[dict]:
                 "owner_name": owner.display_name if owner else None,
                 "next_follow_up_date": next_follow_up.isoformat() if next_follow_up else None,
                 "overdue": bool(next_follow_up and next_follow_up < today and care_case.status != "CLOSED"),
+                # 「这名学生还有没做完的复测计划吗」——总览那张「计划复测」卡下钻到
+                # 本页时按它筛（`/leader/progress?filter=retest`）。这是**这一行自己的
+                # 属性**，与 `overdue` 同一类：它由上面那个批量预取的集合回答，而不是
+                # 由读者是谁决定（要按读者收缩的是**哪些行出现在这里**，那件事已经由
+                # `student_scope_predicate` 做了）。
+                "retest_planned": student.id in retest_students,
                 "opened_at": care_case.opened_at.isoformat() if care_case.opened_at else None,
                 "updated_at": care_case.updated_at.isoformat() if care_case.updated_at else None,
             }

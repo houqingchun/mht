@@ -480,6 +480,170 @@ test.describe('Leader Overview', () => {
     await expect(header).toContainText('需关注');
     await expect(header).toContainText('关注占比');
   });
+
+  /**
+   * 「要动手的排在前面」（V2.0.0 §5.14.4 第 2 条）。
+   *
+   * 这一页此前把「测评完成率」摆在第一张，而它是四个数里唯一一个**不需要额外做什么**
+   * 的数；三块内容的次序也是反的（分布 → 年级 → 提醒），读者要滚过两块图才看见待办。
+   *
+   * 排序**不断言「可见」**：一个把最重要的那块排到最后的排版，每一块照样都「可见」——
+   * 所以判据是**阅读次序**，由 `boundingBox()` 现量。
+   *
+   * ★ 指标区与中间那一块都是**多列 CSS grid**，同一行的两个元素 y 完全相等
+   * （心理老师工作台那一条在 1280px 下实测过两张卡都是 y=245.1875），所以次序按
+   * `(y, x)` 排，不是按 `y` 排——后者的结果取决于 `Array.prototype.sort` 对相等键
+   * 是否稳定，而那不是页面上的次序。
+   */
+  test('领导总览按「要动手的」优先排', async ({ page }) => {
+    await loginAs(page, 'leader');
+
+    const measure = async (names: string[], locate: (name: string) => Locator) => {
+      const placed: Array<{ name: string; y: number; x: number }> = [];
+      for (const name of names) {
+        const el = locate(name);
+        await expect(el).toBeVisible();
+        const box = await el.boundingBox();
+        expect(box, `「${name}」量不出位置`).not.toBeNull();
+        placed.push({ name, y: box!.y, x: box!.x });
+      }
+      return [...placed].sort((a, b) => a.y - b.y || a.x - b.x).map((one) => one.name);
+    };
+
+    // 异常（要动手的）排在常规（完成率）前面。
+    const kpiLabels = ['需关注摘要', '在办关注档案', '计划复测', '测评完成率'];
+    const kpiOrder = await measure(kpiLabels, (name) =>
+      page.locator('article.metric', { hasText: name })
+    );
+    expect(
+      kpiOrder,
+      `四张指标卡的阅读次序是 ${kpiOrder.join(' → ')}，不是 ${kpiLabels.join(' → ')}`
+    ).toEqual(kpiLabels);
+
+    // 管理提醒（要动手）→ 年级（背景）→ 分布（事后描述）。
+    const sectionLabels = ['管理提醒', '年级完成与关注情况', '关注等级分布'];
+    const sectionOrder = await measure(sectionLabels, (name) =>
+      page.getByRole('heading', { name, exact: true })
+    );
+    expect(
+      sectionOrder,
+      `三块内容的阅读次序是 ${sectionOrder.join(' → ')}，不是 ${sectionLabels.join(' → ')}`
+    ).toEqual(sectionLabels);
+  });
+
+  /**
+   * 每一处可点击都真的到达它指向的那一页（V2.0.0 §5.14.4 第 1 / 3 条）。
+   *
+   * 「计划复测」那张卡此前是**假可点击**：它长着 `.metric[role="button"]` 的手型光标
+   * 与 hover 抬升（`styles.css` 里那条注释点的就是它），却没有去处。所以判据是
+   * **点了之后落在哪**，不是它有没有 `cursor: pointer`、也不是它有没有 `role`。
+   *
+   * 三档去处各验一次，因为它们在实现上是三条不同的路：带筛选（`?filter=retest`）、
+   * 带另一个筛选（`?filter=overdue`）、**有去处但不筛**（整份在办名单，`filter: null`）。
+   * 第三种最容易写成「顺手也给它加个筛选」——那会让「点进去看到的」与「卡上说
+   * 的那个数」不再是同一批人。
+   */
+  test('领导总览的每一处可点击都真的到达它指向的那一页', async ({ page }) => {
+    await loginAs(page, 'leader');
+
+    // ① 「计划复测」→ 已筛选的复测名单。先读卡上那个数，再点。
+    const retestCard = page.locator('article.metric', { hasText: '计划复测' });
+    await expect(retestCard).toBeVisible();
+    const retestCount = Number((await retestCard.locator('.metric-value').innerText()).trim());
+    // 先证明有东西可对：0 条时下面那条对账（0 == 0）什么都不证明。红了先去看数据
+    // （`make seed-demo` 会种出带复测计划的档案），不是先改断言。
+    expect(
+      retestCount,
+      '演示数据里没有待完成的复测计划，这条对账用例会退化成空转——先跑 make seed-demo'
+    ).toBeGreaterThan(0);
+
+    await retestCard.click();
+    await expect(page).toHaveURL(/\/leader\/progress\?filter=retest$/);
+    // 只断 URL 的话，一个「URL 变了、列表没筛」的实现照样过——所以再断那一页说得出
+    // 自己筛的是什么，以及**行数与卡上那个数相等**（§11：指标卡上的数必须与它点进去
+    // 的那个列表同源）。这也是「数计划条数 vs 数学生」那个缺陷的界面侧判据。
+    await expect(page.locator('.toolbar')).toContainText('有未完成的复测计划');
+    await expect(page.locator('.table-pager')).toContainText(`共 ${retestCount} 条`);
+
+    // ② 「管理提醒 → 逾期未跟进」→ 同一个下钻动作的另一档筛选。
+    await page.goto('/leader/overview');
+    await page.locator('button.check-row', { hasText: '逾期未跟进' }).click();
+    await expect(page).toHaveURL(/\/leader\/progress\?filter=overdue$/);
+    await expect(page.locator('.toolbar')).toContainText('逾期未跟进');
+
+    // ③ 「管理提醒 → 未分配负责人」→ 第三档筛选。前两步各覆盖一项，**剩下这一项的
+    //    `filter: 'unassigned'` 此前没有任何东西读**：它与 `progressFilters.ts` 里
+    //    `PROGRESS_FILTERS` 的键是两处定义（一处是字符串字面量、一处是对象键），
+    //    漂了不会有任何东西红——而这正是这一期的原报告缺陷（「计划复测」那张假可
+    //    点击的卡）同一个形状：一个指向不复存在的目的地的下钻。
+    //    它只断 URL 与筛选条文案，不断行数：这一档在演示数据里可能是 0 条
+    //    （档案都有负责人），而 0 条**不影响它是否到达了正确的地方**。
+    await page.goto('/leader/overview');
+    await page.locator('button.check-row', { hasText: '未分配负责人' }).click();
+    await expect(page).toHaveURL(/\/leader\/progress\?filter=unassigned$/);
+    await expect(page.locator('.toolbar')).toContainText('未分配负责人');
+
+    // ④ 「管理提醒 → 在办关注档案」→ 整份名单，**不带筛选**。
+    await page.goto('/leader/overview');
+    await page.locator('button.check-row', { hasText: '在办关注档案' }).click();
+    await expect(page).toHaveURL(/\/leader\/progress$/);
+    // 那一页此时不该有筛选条——它列的就是全部在办档案。
+    await expect(page.locator('.toolbar')).toHaveCount(0);
+  });
+
+  /**
+   * 没有去处的提醒不装出可点击的样子，页面也不假装有拿不到的字段
+   * （V2.0.0 §5.14.4 第 3 / 4 / 6 / 7 条）。
+   *
+   * 「管理提醒」四项里三项有去处（逾期 / 未分配 / 整份在办名单），一项没有
+   * （完成率低于阈值的年级——`GradesPage.vue` 没有按完成率筛选的能力）。给四项
+   * 都加手型光标就是「计划复测」那张卡原来的毛病，所以判据落在 `role="button"`
+   * 这个**属性**上，与 `.metric` 那一处是同一处判据。
+   */
+  test('领导总览不装没有的去处，也不假装有拿不到的字段', async ({ page }) => {
+    await loginAs(page, 'leader');
+
+    // 四项，其中恰好三项有去处。写死这两个数是有意的：四项是组件的构造
+    // （`managementAlerts` 的数组长度），不是数据——数据只影响每一项的**值**。
+    await expect(page.locator('.check-row')).toHaveCount(4);
+    await expect(page.locator('.check-row[role="button"]')).toHaveCount(3);
+    // 第三项是唯一没有去处的那一项。它的标签带动态阈值（`完成率低于 60% 的年级`），
+    // 所以按位置取，不按文本。这一句只断**内容**（哪一项没有去处）；「它点不动」
+    // 那些属性与计算值归「无障碍契约」组的 `指标卡键盘到得了…`——两处断同一个
+    // 元素，分工是内容 / 计算值，不重复。
+    const notClickable = page.locator('.check-row').nth(2);
+    await expect(notClickable).toContainText('完成率低于');
+
+    // 第 4 条：口径要写进界面。不说的话，读者会拿这一页去和上学期比。
+    await expect(page.getByText('不提供环比 / 同比')).toBeVisible();
+    // 第 6 条：「样本过小」这个取值在两处出现（年级块与班级下钻），所以两处都要有
+    // 解释——只在前一处解释等于只对看完整页的人解释。
+    await expect(page.getByText('该群体已测评人数太少')).toBeVisible();
+    await expect(page.getByText('该班已测评人数太少')).toBeVisible();
+
+    // 第 7 条：重点进展摘要那一列是**遮蔽名**，而且这一页**没有学号**。此前那一格
+    // 渲染 `row.student_name · row.student_no`，而 `student_no` 已经不在响应里了
+    // ——整格会显示成「林同学 · undefined」，而屏幕上看起来只是有点怪。
+    const summary = page.locator('article.card', { hasText: '重点进展摘要' }).first();
+    // 先证明有东西可扫（演示数据里有在办档案），否则下面那一条在空表上也成立。
+    await expect(summary.locator('tbody tr').first()).toBeVisible();
+    // ★ 判据落在**每一行的学生单元格**上，形状是「姓 + 同学」。第一版不是这样，
+    //   被两次变异验证连着打掉，两条都记在这里（2026-09-27）：
+    //   ① 拿**整块卡片**的 `innerText` 去 `toContain('同学')` 是恒真的——这一块里
+    //      有一句静态说明（「学生姓名按「姓 + 同学」遮蔽显示…」）**本身就含这两个字**。
+    //      把服务端的 `mask_student_name` 换成真名（M2d），它照样绿。
+    //   ② `not.toMatch(/\b\d{8,}\b/)`（「不该出现学号」）在**演示库上**恒真——
+    //      演示学号是 `S001` 这种，永远匹配不上 8 位数字（§32 那条「数据依赖的脆弱
+    //      判据」）。M2f 把 `student_no` 加回服务端**并**让模板渲染它，它照样绿。
+    //   现在这一条边界清楚：那一格除了「姓 + 同学」不许有别的东西，多渲染任何一个
+    //   字段都会让它不等（M2f 下红在 `卫同学 · S008`）。
+    //   §29：一条恒绿的守卫比没有更糟，它占着「这一条有人守」的位置。
+    const cells = await summary.locator('tbody tr td:first-child').allInnerTexts();
+    expect(cells.length, '演示数据里应当有在办档案').toBeGreaterThan(0);
+    for (const cell of cells) {
+      expect(cell.trim(), '学生列应当只有「姓 + 同学」，不夹带别的字段').toMatch(/^\S+同学$/);
+    }
+  });
 });
 
 /**
@@ -4335,7 +4499,7 @@ test.describe('无障碍契约', () => {
     await expect(live).toContainText('请选择导出用途');
   });
 
-  test('指标卡键盘到得了，只有真点得动的才有手型光标', async ({ page }) => {
+  test('指标卡键盘到得了，没有去处的检查项不装作能点', async ({ page }) => {
     await loginAs(page, 'counselor');
     const card = page.locator('.metric', { hasText: '待人工复核' });
     await expect(card).toHaveAttribute('role', 'button');
@@ -4346,9 +4510,20 @@ test.describe('无障碍契约', () => {
     await page.keyboard.press('Enter');
     await expect(page).toHaveURL(/\/counselor\/cases/);
 
-    // 德育领导页第四张「计划复测」没有去处：它不该装作能点。
+    // 没有去处的那一项不该装作能点。
+    // ★ 2026-09-27（§5.14.4 第 7 条）：这一半的**活体换了地方**。领导页第四张
+    //   「计划复测」此前正是这一条的活体——它长着 `role="button"` 的手型光标与
+    //   hover 抬升却没有去处，`styles.css` 的注释点的就是它。§5.14.4 给了它去处
+    //   （下钻到已筛选的复测名单），于是**全站 `.metric` 现在都带 role**：继续按
+    //   「有没有 role」断，这条在「所有卡都有去处」之后就成了恒真（§29：一条恒绿的
+    //   守卫比没有更糟，它占着「这一条有人守」的位置）。
+    //   现在守的是 `.check-row` 那一对（`LeaderOverviewPage.vue`：两者外观相同，
+    //   差别只在光标与悬停——判据与 `.metric` 那一处一致）：第三项「完成率低于 N%
+    //   的年级」点不动，因为 `GradesPage.vue` 没有按完成率筛选的能力，而它的答案
+    //   就写在那一行里。
     await loginAs(page, 'leader');
-    const inert = page.locator('.metric', { hasText: '计划复测' });
+    const inert = page.locator('.check-row').nth(2);
+    await expect(inert).toContainText('完成率低于');
     expect(await inert.getAttribute('role')).toBeNull();
     expect(await inert.getAttribute('tabindex')).toBeNull();
     await expect(inert).toHaveCSS('cursor', 'auto');
