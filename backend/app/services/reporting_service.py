@@ -117,6 +117,89 @@ def _actor_names(db: Session, ids) -> dict[int, str]:
     return {row[0]: row[1] for row in rows}
 
 
+def _versions_of(db: Session, report_id: int) -> list[ProfessionalReportVersion]:
+    """一份报告的全部版本，**新版在前**（`serialize` 靠这个次序取 `latest_published`）。"""
+    return list(
+        db.scalars(
+            select(ProfessionalReportVersion)
+            .where(ProfessionalReportVersion.report_id == report_id)
+            .order_by(ProfessionalReportVersion.version_no.desc())
+        ).all()
+    )
+
+
+def _names_of(db: Session, reports, versions) -> dict[int, str]:
+    """一批报告涉及到的**全部**账号 id → 显示名，一次查完。
+
+    四个来源一个都不能漏：`serialize` 读 `created_by` / `updated_by` / `published_by`
+    三个报告级字段，以及每个版本的 `created_by` / `published_by`——漏掉 `updated_by`
+    的话列表上那一格会静默变成 `—`（`dict.get` 的兜底），而「谁改过」正是列表要回答的。
+    """
+    return _actor_names(
+        db,
+        [i for r in reports for i in (r.created_by, r.updated_by, r.published_by)]
+        + [i for v in versions for i in (v.created_by, v.published_by)],
+    )
+
+
+def _serialize_many(db: Session, reports, *, viewer: UserAccount | None = None) -> list[dict]:
+    """列表：把「逐份两份查询」压成**两条**（版本行一次、姓名一次）。
+
+    ## 为什么改（2026-09-26 实测）
+
+    此前每一份报告各查一次版本行、各查一次姓名，于是 `GET /professional-reports` 是
+    **2N + 3 条 SQL**：清单里的 `statistics_snapshot` 那一半已经拿掉了（见 `serialize` 的
+    docstring 末段），剩下来的这一半与它同源。286 份时实测 **575 条 SQL / 1.04 秒**
+    （本机空载、逐语句计数），批取之后同一批数据 **5 条 / 0.63 秒**，序列化那一段
+    （批取 vs 逐份，同一个会话里连着跑）**0.40s vs 1.18s**，产物经 `json.dumps` 逐字比对
+    **完全一致**（两个视角各验一次：心理老师与德育领导，286 份）。
+
+    **判据只有一句**：列表要的这两样东西与报告份数无关，那就该是常量条数。
+    现在与份数无关的一共 **5 条**：列表自己 3 条（报告 + 版本 + 姓名），另 2 条是每个请求
+    都有的固定开销（当前用户 / 权限），1000 份也一样。
+
+    ## 但它**不是**那条 e2e 超时的全部原因（同一批实测，如实记）
+
+    这条改动落地之后，同一台机器上 `GET /professional-reports` 的墙钟几乎没动：
+    空载单发 1.29s → 1.28s，12 并发 7.49–7.85s → 7.11–7.49s。12 个并发请求全部落在
+    **7.1–7.5 秒这一个窄带里**，是「一个串行瓶颈 + 排队」的形状，而 SQL 往返不是那个瓶颈
+    ——省下来的 570 次往返没有换来端到端改善。
+
+    真正让那个请求变慢的是**这个库里积了 286 份报告**（277KB 响应体，286 行 × 四段正文
+    的 Python 侧拼装与 JSON 编码，在 GIL 下无法并行）。而这 286 份**全是 e2e 残留**：
+    `db/seed.py` 与 `db/seed_demo.py` 都不创建 `ProfessionalReport`（`rg` 零命中），
+    最早一行是 2026-09-25 11:48:39，而每跑一轮全量 e2e 净增约 7 份、从不清理。
+    所以那一半的处置是清理演示库（备份在 `/tmp/xlp-professional-report-backup-20260926.json`），
+    不是继续压这段代码。**两处都要留着**：这里修的是「一条与份数无关的查询被写成了
+    线性条数」，清理修的是「演示库里的份数本来就不该有那么多」。
+
+    两处**刻意不动**，它们看着像「顺手也能批取」，实际不是：
+
+    - `_snapshot_of` 不查库（纯读那一行里的 JSON），所以它没有可批的东西；
+    - 领导的可见性判据留在 `list_reports` 的 SQL 里（版本级 `EXISTS`），**不**挪到
+      这里按批过滤——挪过来它就成了一条「取完再筛」的规则，而「哪些报告我读得到」
+      是**查询**要回答的问题，两者漂移不会有任何东西报错。
+    """
+    reports = list(reports)
+    if not reports:
+        return []
+    version_rows = list(
+        db.scalars(
+            select(ProfessionalReportVersion)
+            .where(ProfessionalReportVersion.report_id.in_([r.id for r in reports]))
+            .order_by(ProfessionalReportVersion.report_id, ProfessionalReportVersion.version_no.desc())
+        ).all()
+    )
+    grouped: dict[int, list[ProfessionalReportVersion]] = {}
+    for version in version_rows:
+        grouped.setdefault(version.report_id, []).append(version)
+    names = _names_of(db, reports, version_rows)
+    return [
+        serialize(db, report, viewer=viewer, versions=grouped.get(report.id, []), names=names)
+        for report in reports
+    ]
+
+
 def _visible(db: Session, user: UserAccount, report_id: int) -> ProfessionalReport:
     report = db.get(ProfessionalReport, report_id)
     if report is None or report.school_id != _school_id(db, user):
@@ -152,7 +235,7 @@ def _content_payload(version: ProfessionalReportVersion, names: dict[int, str]) 
     }
 
 
-def serialize(db: Session, report: ProfessionalReport, *, include_versions: bool = False, viewer: UserAccount | None = None) -> dict:
+def serialize(db: Session, report: ProfessionalReport, *, include_versions: bool = False, detail: bool = False, viewer: UserAccount | None = None, versions: list[ProfessionalReportVersion] | None = None, names: dict[int, str] | None = None) -> dict:
     """一份报告在列表 / 详情里的形状。
 
     **`viewer` 决定 `content` 是哪一版的、以及 `versions[]` 里能看到哪些**
@@ -168,22 +251,53 @@ def serialize(db: Session, report: ProfessionalReport, *, include_versions: bool
     `_content_payload` 都发了出去——同一份草稿正文于是有两条路，其中一条是敞开的，
     而两条路各说各话在这份响应里看不出来（CLAUDE.md §4：受控导出不能成为绕过心理详情的
     旁路，这是同一个形状）。
+
+    ## `detail`：`statistics_snapshot` 只发给详情，列表发一个标量（2026-09-26）
+
+    **列表此前把每一份报告的整份统计快照都发了出去。** 一份 51 KB，而 e2e 累积到 113 份
+    时 `GET /professional-reports` 的响应是 **5.4 MB**、服务端要跑 **226 条 SQL**
+    （每份报告两条：版本行 + 操作人姓名）。后果在真机上就是这么现形的：领导页在 5 个
+    worker 并行时载入超过 5 秒，`E2E` 里 `.report-item` 一直等不到（屏幕上写着「加载中…」）。
+    **这一半与份数无关**：一份 51 KB 的快照进不进这一页，不由库里有几份报告决定，而
+    「一份 51 KB 的正文被塞进一个列表」在一所学校两年几十份报告上就已经很贵了。
+    （2026-09-26 补：**另一半**才是份数——那 113 份后来涨到 286 份，而它们是 e2e 残留，
+    见 `_serialize_many` 的 docstring。两者一起才是那次超时的全貌。）
+
+    所以列表**不发** `statistics_snapshot`，改发一个标量 `evaluable_count`：领导列表那一行
+    的「可评价样本数」是列表侧唯一的读者（`LeaderAnalyticsReportPage.evaluableText`），
+    而它只要一个整数。三件事因此成立：
+
+    - **两处同源**：`evaluable_count` 与 `statistics_snapshot` 都从 `snapshot` 这一个
+      字典里取，所以「列表显示 49、详情里 49」是构造上成立的，不是两处各算一遍；
+    - **详情一个字没少**：五处 `include_versions=True` 的调用点（新建 / 保存草稿 / 新版本 /
+      发布 / `get_report`）全部传 `detail=True`——心理老师那一页的「界面上那些数字」读的
+      正是 `opened.statistics_snapshot`，它来自详情与写路由，不来列表；
+    - **判据按问题取名**（CLAUDE.md §22 / §29）：它叫 `detail` 而不是跟着
+      `include_versions` 走。两者今天在六处调用点上恰好一致，但「要不要版本时间线」与
+      「要不要那份 51 KB 的快照」是两个问题，合成一个参数会让下一个只想加版本列表的人
+      顺手把快照也带走。
     """
-    versions = db.scalars(select(ProfessionalReportVersion).where(ProfessionalReportVersion.report_id == report.id).order_by(ProfessionalReportVersion.version_no.desc())).all()
+    # 单份调用（详情 / 新建 / 保存 / 发布那一族）各自查这两样；**列表**把它们一次取好再传进来
+    # （见 `_serialize_many`）。两处查的是同一件事，只是一个按报告逐份、一个按批——
+    # 默认值保持原样，所以那六个调用点一个字都不用改。
+    if versions is None:
+        versions = _versions_of(db, report.id)
+    if names is None:
+        names = _names_of(db, [report], versions)
     latest_published = next((v for v in versions if v.status == "PUBLISHED"), None)
     leader = viewer is not None and viewer.role_code is RoleCode.LEADER
     if leader:
         selected = latest_published
     else:
         selected = next((v for v in versions if v.version_no == report.current_version), None)
-    names = _actor_names(db, [report.created_by, report.updated_by, report.published_by, *(v.created_by for v in versions), *(v.published_by for v in versions)])
     data = {
         "id": report.id, "report_no": report.report_no, "title": report.title, "report_type": report.report_type,
         # 报告头这三项 = **当前版本**的镜像（`publish` / `new_version` 两处一起写），
         # 所以 V2 草稿期间它们是 DRAFT / V2；领导读到的那一份在上面 `content` 里。
         "status": report.status,
         "task_scope": report.task_scope_json, "analysis_mode": report.analysis_mode,
-        "statistics_snapshot": _snapshot_of(report, selected) if selected else (report.statistics_snapshot_json or {}),
+        # `statistics_snapshot` / `evaluable_count` 由下面那条 `if detail:` 补进来——
+        # 它们是**同一个** `snapshot` 的两种读法（见 docstring 末段）。
         "current_version": report.current_version,
         "current_version_status": next((v.status for v in versions if v.version_no == report.current_version), None),
         "created_by": report.created_by, "created_by_name": names.get(report.created_by),
@@ -197,6 +311,13 @@ def serialize(db: Session, report: ProfessionalReport, *, include_versions: bool
         "latest_published_by_name": names.get(latest_published.published_by) if latest_published and latest_published.published_by else None,
         "content_version": selected.version_no if selected else None,
     }
+    # 快照只发详情；列表只发它里面那一个标量。**两处同源**：都从上面这一个 snapshot 取，
+    # 所以「列表写着 49、详情里 49」是构造上成立的，不是两边各算一遍。
+    snapshot = _snapshot_of(report, selected) if selected else (report.statistics_snapshot_json or {})
+    if detail:
+        data["statistics_snapshot"] = snapshot
+    else:
+        data["evaluable_count"] = _evaluable_count(snapshot)
     if selected:
         data["content"] = _content_payload(selected, names)
     if include_versions:
@@ -252,11 +373,13 @@ def list_reports(db: Session, user: UserAccount) -> list[dict]:
         )
     else:
         statement = statement.where(ProfessionalReport.created_by == user.id)
-    return [serialize(db, x, viewer=user) for x in db.scalars(statement.order_by(ProfessionalReport.updated_at.desc())).all()]
+    # 序列化走批取那一版（条数与份数无关），不是逐份 `serialize`（2N + 3 条）——
+    # 理由与实测数字见 `_serialize_many` 的 docstring。
+    return _serialize_many(db, db.scalars(statement.order_by(ProfessionalReport.updated_at.desc())).all(), viewer=user)
 
 
 def get_report(db: Session, user: UserAccount, report_id: int) -> dict:
-    return serialize(db, _visible(db, user, report_id), include_versions=True, viewer=user)
+    return serialize(db, _visible(db, user, report_id), include_versions=True, detail=True, viewer=user)
 
 
 def get_version(db: Session, user: UserAccount, report_id: int, version_no: int) -> dict:
@@ -367,6 +490,21 @@ def publish(db: Session, user: UserAccount, report_id: int) -> ProfessionalRepor
     version.status = "PUBLISHED"; version.published_by = user.id; version.published_at = now
     report.status = "PUBLISHED"; report.published_by = user.id; report.published_at = now; report.updated_by = user.id
     db.flush(); return report
+
+
+def _evaluable_count(snapshot: dict) -> int | float | None:
+    """列表投影里唯一那一个标量：**可评价样本数**。
+
+    领导列表每一行的「可评价样本数」是列表侧唯一的快照读者
+    （`LeaderAnalyticsReportPage.evaluableText`），而它要的只是一个整数——所以列表不必
+    为它带上一份 51 KB 的 `statistics_snapshot`（那段推理见 `serialize` 的 docstring 末段）。
+
+    与 `statistics_snapshot` **同源**：两者都从同一个 `snapshot` 字典里取（CLAUDE.md §11：
+    指标卡上的数必须与它点进去的那个地方同源）。取不到就给 `None` 而不是 `0`——「这一版
+    没有快照」与「样本数是 0」是两件事，前者界面上写 `—`（§11：`None` 不是 `0`）。
+    """
+    count = (snapshot.get("sample_quality") or {}).get("n_evaluable")
+    return count if isinstance(count, (int, float)) else None
 
 
 def _snapshot_of(report: ProfessionalReport, version: ProfessionalReportVersion) -> dict:

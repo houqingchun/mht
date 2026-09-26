@@ -867,7 +867,7 @@ async function reportWithDraftOverPublished(page: Page): Promise<string> {
 }
 
 /**
- * 页面不许出现横向溢出（§5.13.8 ⑨，375 / 768 两档）。
+ * 页面不许出现横向溢出（§5.13.8 ⑨；调用点覆盖 375 / 768 / 1024 / 1440 四档）。
  *
  * 判据是 `documentElement` 的 `scrollWidth > clientWidth`——它在溢出发生时立刻为真，
  * 而「某个元素被挤出视口」要逐个元素比对，会把本来就该横向滚动的表格一起报进来。
@@ -885,12 +885,15 @@ async function expectNoHorizontalOverflow(page: Page, label: string) {
 }
 
 /**
- * 底部导航必须落在视口里（§5.13.8 ⑨，375 / 768 两档）。
+ * 底部导航必须落在视口里（§5.13.8 ⑨，**只在 780px 以下的档位调用**）。
  *
  * `AppLayout.vue` 的 `.sidebar` 在 `@media (max-width: 780px)` 里变成
  * `position: fixed; left: 0; right: 0; bottom: 0`（`styles.css`），所以这两档都要断它
  * 整块落在视口内。**判据是几何量而不是类名**：类名写对了而 `bottom: 0` 被别处的
  * `height` / `transform` 顶出屏幕，屏幕上看不出、类名断言也看不出。
+ *
+ * **780px 以上不要调它**：那时 `.sidebar` 是普通侧栏、跟着页面滚动，它落在视口外是正常的。
+ * 调用点按档位上的 `mobile` 标志分岔，理由写在那里。
  */
 async function expectBottomNavInViewport(page: Page, label: string) {
   const nav = page.locator('.sidebar')
@@ -922,7 +925,7 @@ async function tabUntil(
   page: Page,
   match: (el: { tag: string; text: string; label: string }) => boolean,
   label: string,
-  limit = 160
+  limit = TAB_LIMIT
 ): Promise<{ tag: string; text: string; label: string }> {
   for (let i = 0; i < limit; i++) {
     await page.keyboard.press('Tab')
@@ -944,6 +947,68 @@ async function tabUntil(
     if (match(focused)) return focused
   }
   throw new Error(`按了 ${limit} 次 Tab 仍没有到达「${label}」`)
+}
+
+/**
+ * `tabUntil` 一次最多按多少次 Tab。
+ *
+ * 定义在 `tabUntil` **之后**不影响它：默认参数在**调用时**求值，那时模块早已求值完毕。
+ * 两处共用同一个数，免得下一次调上限时只改一处。
+ */
+const TAB_LIMIT = 160;
+
+/**
+ * 焦点那一行是不是「我的报告」列表里的一行？是就回它的文本，否则回空串。
+ *
+ * 判据是**结构**（`ul > li > button`）而不是文案或类名：报告页上只有这一个列表长这样，
+ * 而按文字判（比如「含 `RPT-`」）会让这条用例在报告编号改前缀时红在一个与键盘可达性
+ * 毫无关系的地方；按 `.rows` 那种类名判则会在别处复用同名类时变成假阳性。
+ */
+async function readFocusedReportRow(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const el = document.activeElement as HTMLElement | null
+    if (!el || el.tagName !== 'BUTTON') return ''
+    const li = el.closest('li')
+    if (!li || li.parentElement?.tagName !== 'UL') return ''
+    return (el.innerText ?? '').replace(/\s+/g, ' ').trim().slice(0, 200)
+  })
+}
+
+/**
+ * 用 Tab 进入「我的报告」列表，返回焦点落在的那一行。
+ *
+ * **这一份列表现在只占一个 Tab 停靠点**（`composables/useRovingFocus.ts`）。实测共享
+ * 演示库上有 236 份报告，此前每一行各是一个停靠点——`tabUntil` 那时一路 Tab 过去总能
+ * 扫到目标行，代价是键盘用户要走两百多次 Tab（那正是这一项可达性缺陷）。roving tabindex
+ * 之后一次只能进入**一行**，换行必须用上下方向键，所以「走到目标行」那一步归
+ * `arrowToReportRow`：两条合起来才是键盘用户此刻真实的路径。
+ */
+async function tabIntoReportList(page: Page): Promise<string> {
+  for (let i = 0; i < TAB_LIMIT; i++) {
+    await page.keyboard.press('Tab')
+    const text = await readFocusedReportRow(page)
+    if (text) return text
+  }
+  throw new Error(`按了 ${TAB_LIMIT} 次 Tab 仍没有进入「我的报告」列表`)
+}
+
+/**
+ * 在列表内用 ↓ 走到目标那一行。
+ *
+ * 上限按**列表长度**给（不是 `TAB_LIMIT`）：焦点只会往后走，而目标行可能排在很后面。
+ * 走到就停，典型情况只按几次——**但不能假设它排第一行**：目标那一份是刚建的，而同一秒内
+ * 建的多份报告 `updated_at` **并列**（`now_utc_naive()` 截断到整秒，CLAUDE.md §20），
+ * 并列时 MySQL 不保证按更新时刻排。2026-09-26 实测过：列表头两行是 0224 / 0225，
+ * 而这一条要的是编号更大的那一份——修之前每行都是停靠点，一路 Tab 扫得到；
+ * 换成 roving tabindex 之后就永远停在第 0 行上了。
+ */
+async function arrowToReportRow(page: Page, reportNo: string, limit = 300): Promise<void> {
+  for (let i = 0; i < limit; i++) {
+    const text = await readFocusedReportRow(page)
+    if (text.includes(reportNo)) return
+    await page.keyboard.press('ArrowDown')
+  }
+  throw new Error(`在「我的报告」列表里按了 ${limit} 次 ↓ 仍没有到达 ${reportNo}`)
 }
 
 /**
@@ -1201,11 +1266,15 @@ test.describe('Analytics report functions', () => {
     await expect(page.getByLabel('4. 后续教育支持计划')).toBeVisible();
 
     // ④ 保存：状态行里是**服务端发的编号**，不是「浏览器本地草稿」。
+    //
+    //    走 `saveNewDraft` 而不是内联那三行（2026-09-26）：演示库里积了几份同范围的
+    //    草稿之后，这一页会先弹一句「已经有一份同样范围的草稿」，而 `save()` 在那个
+    //    分支里**不发**「草稿已保存至服务器」那句回执。内联写法于是红在「5 秒等不到
+    //    状态行」上，看起来像保存坏了——实际是从来没有人回答过那个问题。
+    //    这个动作（点保存 / 回答那一问 / 等带编号的回执）已经收在 `saveNewDraft` 里
+    //    （它自己的 docstring 记着同一件事），这里改为复用它。
     await page.getByLabel('1. 整体情况说明').fill('基于当前任务实际统计结果形成的专业说明。');
-    await page.getByRole('button', { name: '保存草稿' }).click();
-    await expect(
-      page.getByRole('status').filter({ hasText: '草稿已保存至服务器（RPT-' })
-    ).toBeVisible();
+    await saveNewDraft(page);
 
     // ⑤ 导出：用途与版本走的是 `FormDialog` 弹层（§5.13 Phase B 把这两项从
     //    `window.prompt` 换成了两格带必填校验的控件），所以先开弹层再填。
@@ -1597,7 +1666,7 @@ test.describe('专业报告工作台', () => {
     await expect(page.getByText('学校尚未发布报告')).toHaveCount(0)
   });
 
-  test('375px 与 768px 下报告页不横向溢出，底部导航仍在视口里', async ({ page }) => {
+  test('375 / 768 / 1024 / 1440px 下报告页不横向溢出，窄档底部导航仍在视口里', async ({ page }) => {
     const reportNo = await reportWithDraftOverPublished(page)
     await loginAs(page, 'counselor')
     await openReportPage(page)
@@ -1605,14 +1674,21 @@ test.describe('专业报告工作台', () => {
     // 版本时间线要真的渲染出来（`v-if="opened"`）——否则这一条漏扫了整块。
     await expect(page.locator('.versions .row').first()).toBeVisible()
 
-    for (const [width, height] of [
-      [375, 812],
-      [768, 1024]
-    ] as const) {
+    // 四档（§5.13.9 的人工检查清单）：`mobile` 决定**要不要**断底部导航，理由见下。
+    for (const { width, height, mobile } of [
+      { width: 375, height: 812, mobile: true },
+      { width: 768, height: 1024, mobile: true },
+      { width: 1024, height: 768, mobile: false },
+      { width: 1440, height: 900, mobile: false }
+    ]) {
       const label = `${width}px 的报告页`
       await page.setViewportSize({ width, height })
       await expectNoHorizontalOverflow(page, label)
-      await expectBottomNavInViewport(page, label)
+      // **底部导航只在 780px 以下成立**（`styles.css` 的 `@media (max-width: 780px)`
+      // 才把 `.sidebar` 变成 `position: fixed; bottom: 0`）。更宽的视口里它是普通侧栏、
+      // 会随页面一起滚动，断它整块落在视口内会**无故变红**——而一条会无故变红的守卫
+      // 很快会被人关掉（CLAUDE.md §18），连带把上面那条溢出断言一起丢掉。
+      if (mobile) await expectBottomNavInViewport(page, label)
 
       // 确认弹层也要量一次：它有自己的一层定位与宽度，页面不溢出不代表弹层不溢出。
       // 先弄脏，再点「重置」把弹层叫出来。
@@ -1638,7 +1714,14 @@ test.describe('专业报告工作台', () => {
     await expect(reportRow(page, reportNo)).toBeVisible({ timeout: 30000 })
 
     // ① 选中「我的报告」里那一行（Enter 就是按钮的默认激活键）。
-    await tabUntil(page, el => el.text.includes(reportNo), '我的报告里那一行')
+    //
+    // **这里是两步，不能只按 Tab**：列表现在只占一个 Tab 停靠点（roving tabindex，
+    // 见 `composables/useRovingFocus.ts`），所以 Tab 只能把它停在**某一行**上，而那一行
+    // 不一定是这一条要的——它自己刚建的那一份与同一秒内建的其它报告 `updated_at` **并列**
+    // （`now_utc_naive()` 截断到整秒，CLAUDE.md §20），并列时服务端不保证按更新时刻排。
+    // 换行归方向键，那正是键盘用户此刻真实的路径。
+    await tabIntoReportList(page)
+    await arrowToReportRow(page, reportNo)
     await page.keyboard.press('Enter')
     await expect(page.getByLabel('1. 整体情况说明')).toHaveValue(DRAFT_TEXT)
 
@@ -1665,7 +1748,16 @@ test.describe('专业报告工作台', () => {
     await page.keyboard.press('Enter')
     await tabUntil(page, el => el.text.includes('生成报告'), '生成报告按钮')
     await page.keyboard.press('Enter')
-    await waitForModalSettled(page.locator('.modal-panel'))
+    //    定位器**必须点名是哪一个弹层**，不能用 `.modal-panel`：本应用有意支持弹层堆叠
+    //    （§22 / `composables/modalStack.ts`），而刚才关掉的「发布 V2？」在
+    //    `.modal-leave-active`（`styles.css`，0.2s）那一段里**还留在 DOM 里**，
+    //    于是 `.modal-panel` 会同时匹配到两个——`toHaveCSS` 撞上严格模式冲突是立即抛错、
+    //    不重试，所以这一条会**硬红**。实测（2026-09-26，探针两次）：
+    //      · 关掉之后 0ms 查询 → 两个面板都在（`aria-label` 分别是「发布 V2？」与
+    //        「导出专业报告」）→ 红；
+    //      · 600ms 之后 → 只剩「导出专业报告」→ 绿。
+    //    那是**正常的过渡行为，不是产品缺陷**；有歧义的是这里的定位器。
+    await waitForModalSettled(page.getByRole('dialog', { name: '导出专业报告' }))
 
     // ⑥ 导出用途：Tab 走得到那一格，且**焦点真的落在它上面**。
     //
@@ -4479,6 +4571,17 @@ test.describe('测评任务的删除与作废治理', () => {
     // 空任务不需要填任何东西：这一支**没有**作废原因那一格。
     await expect(dialog.locator('textarea')).toHaveCount(0);
 
+    // 先点一次「取消」，它**什么都不做**（2026-09-26 用户报的 bug）。
+    // 这一档没有必填字段，所以调用方曾经只能靠「必填项是不是空的」去猜用户按了哪一个按钮——
+    // 而这里没有任何必填项，于是「取消」与「确认删除」在它眼里长得一模一样，点取消任务当场被删。
+    // 判据是**任务仍在**（服务端那一趟），不只是弹层关掉了：弹层关掉而任务没了正是那个 bug 的样子。
+    await dialog.getByRole('button', { name: '取消' }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(row, '点了取消，任务却从列表里消失了').toHaveCount(1);
+    expect(await findTask(page, headers, taskNo), '点了取消，任务却真的被删掉了').toBeDefined();
+
+    await row.getByRole('button', { name: '删除任务' }).click();
+    await expect(dialog).toContainText(`删除任务「${taskName}」`);
     await dialog.getByRole('button', { name: '确认删除' }).click();
     await expect(page.getByText('任务已删除')).toBeVisible();
     await expect(page.locator('tbody tr', { hasText: taskNo })).toHaveCount(0);

@@ -21,6 +21,7 @@ import { computed, onMounted, ref } from 'vue'
 import ErrorState from '../../components/ErrorState.vue'
 import FormDialog, { type FormField } from '../../components/FormDialog.vue'
 import ReportPageHeader from '../analytics/components/ReportPageHeader.vue'
+import { useRovingFocus } from '../../composables/useRovingFocus'
 import { useSettings } from '../../composables/useSettings'
 import { formatDateTime } from '../../services/dates'
 import { reportVersionLabel } from '../../services/labels'
@@ -28,10 +29,10 @@ import {
   exportProfessionalReport,
   getAssessmentTasks,
   listProfessionalReports,
-  type ProfessionalReport
+  type ProfessionalReportListItem
 } from '../../services/api'
 
-const reports = ref<ProfessionalReport[]>([])
+const reports = ref<ProfessionalReportListItem[]>([])
 /** 选中的是 **id**，不是报告对象本身：重新加载之后对象会换一批，id 仍然指得准。 */
 const selectedId = ref<number | null>(null)
 const loading = ref(true)
@@ -62,6 +63,16 @@ const filtered = computed(() => {
 })
 
 const selected = computed(() => reports.value.find(item => item.id === selectedId.value) ?? null)
+
+/**
+ * 键盘：整个列表只占**一个** Tab 停靠点（2026-09-26）。
+ *
+ * 这一份列表有一百多行，而每一行此前都是普通 `<button>`——也就是每一个 Tab 停靠点。处置是
+ * roving tabindex，逻辑与理由都写在 `composables/useRovingFocus.ts` 里（这里与心理老师那份
+ * 「我的报告」列表行为逐字相同，所以只有那一个定义）。行数取**筛选之后**的那个，
+ * 于是筛选把列表缩小时 `tabindex=0` 会跟着夹回去，不会出现「一行都不是 Tab 停靠点」。
+ */
+const { tabbableIndex, noteFocus, onRowKeydown } = useRovingFocus(() => filtered.value.length)
 
 /**
  * 领导能导出的只有**最新已发布那一版**——`content` 就是服务端按 `viewer` 选出来的那一份，
@@ -103,7 +114,7 @@ async function loadTaskNames() {
   }
 }
 
-function rangeSummary(report: ProfessionalReport) {
+function rangeSummary(report: ProfessionalReportListItem) {
   const ids = report.task_scope?.task_ids || []
   if (!ids.length) return '未记录任务范围'
   const names = ids.map(id => taskNames.value[id]).filter(Boolean)
@@ -112,19 +123,25 @@ function rangeSummary(report: ProfessionalReport) {
 }
 
 /** 版本号与它的状态**都取自版本行自己**——不拿报告头那三个字段顶替（见文件头那段）。 */
-function versionLabel(report: ProfessionalReport) {
+function versionLabel(report: ProfessionalReportListItem) {
   const version = report.content
   if (!version) return '—'
   return reportVersionLabel(version.status, version.version_no)
 }
 
-/** 可评价样本数来自**这一版冻结的那份快照**，不是按现在的数据重算。`0` 是合法的值。 */
-function evaluableText(report: ProfessionalReport) {
-  const count = report.statistics_snapshot?.sample_quality?.n_evaluable
+/**
+ * 可评价样本数来自**这一版冻结的那份快照**，不是按现在的数据重算。`0` 是合法的值。
+ *
+ * 列表里这一项是服务端从快照里**现取的标量**（`evaluable_count`），与 `statistics_snapshot`
+ * 同源——列表不再带那整份快照了（`ProfessionalReportListItem` 的注释记着为什么）。
+ * 所以这里读的是一个数，而不是自己钻那条路径去取。
+ */
+function evaluableText(report: ProfessionalReportListItem) {
+  const count = report.evaluable_count
   return count === null || count === undefined ? '—' : String(count)
 }
 
-function releasedText(report: ProfessionalReport) {
+function releasedText(report: ProfessionalReportListItem) {
   const at = report.latest_published_at
   if (!at) return '—'
   const who = report.latest_published_by_name
@@ -225,14 +242,17 @@ onMounted(() => {
       <p v-if="!reports.length" class="empty">学校尚未发布报告</p>
       <p v-else-if="!filtered.length" class="empty">当前筛选无匹配报告</p>
       <ul v-else class="rows">
-        <li v-for="item in filtered" :key="item.id">
+        <li v-for="(item, index) in filtered" :key="item.id">
           <!-- `aria-pressed` 而不是只换底色：这是「在一组里选一个」，读屏软件要知道
                当前选的是哪一个（CLAUDE.md §15，与 `ProfessionalReportList` 同一条）。 -->
           <button
             type="button"
             class="report-item"
             :class="{ active: item.id === selectedId }"
+            :tabindex="index === tabbableIndex ? 0 : -1"
             :aria-pressed="item.id === selectedId"
+            @focus="noteFocus(index)"
+            @keydown="onRowKeydown($event, index)"
             @click="selectedId = item.id"
           >
             <span class="item-title">{{ item.title }}</span>

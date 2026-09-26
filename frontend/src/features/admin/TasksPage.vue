@@ -138,7 +138,8 @@ const formFields = ref<FormField[]>([])
 const formSubmitText = ref('提交')
 /** 标题下面那段影响说明；空串时 `FormDialog` 整段不渲染。 */
 const formDescription = ref('')
-let formResolve: ((values: Record<string, string>) => void) | null = null
+// 取消时回的是 **`null`**，不是 `{}`——两者必须是两个东西（理由见 `onFormCancel`）。
+let formResolve: ((values: Record<string, string> | null) => void) | null = null
 
 const showDetail = ref(false)
 const detailTask = ref<AssessmentTaskItem | null>(null)
@@ -208,7 +209,7 @@ function showFormDialog(
   fields: FormField[],
   submitText = '提交',
   description = ''
-): Promise<Record<string, string>> {
+): Promise<Record<string, string> | null> {
   formTitle.value = title
   formFields.value = fields
   formSubmitText.value = submitText
@@ -221,8 +222,20 @@ function onFormSubmit(values: Record<string, string>) {
   if (formResolve) formResolve(values)
 }
 
+/**
+ * 取消回 **`null`**——它与「提交了一个空表单」必须是两个东西。
+ *
+ * 此前回的是 `{}`，于是调用方分不出这两件事，只能靠「必填项是不是空的」去猜。
+ * 本页九个调用点里有八个因此**恰好**是对的（每个都有一个 `required` 字段顶着），
+ * 而第九个 `removeTask` 不是：可硬删除的那一档**根本没有字段**（`fields` 是空数组），
+ * 于是「点取消」与「点确认删除」在它眼里长得一模一样，任务当场被删掉——
+ * 2026-09-26 用户报的正是这一条（「我选择了取消，但当条测评任务也被删除了」）。
+ *
+ * **不靠给那一档补一个假字段来修**：那只是把同一处判断换个地方藏起来，下一个「不需要
+ * 填任何东西就能做」的动作会再踩一次。取消就是取消，调用方拿得到这个事实。
+ */
 function onFormCancel() {
-  if (formResolve) formResolve({})
+  if (formResolve) formResolve(null)
 }
 
 // 这张表原本在本文件里又抄了一份，与 labels.ts 的 TASK_STATUS_LABELS 完全重复——
@@ -273,6 +286,7 @@ async function newTask() {
     { key: 'end_at', label: '截止日期', type: 'date', required: true, defaultValue: DEFAULT_TASK_END() }
   ], '保存任务')
 
+  if (!values) return
   if (!values.name) return
   if (values.end_at < values.start_at) {
     showToast('error', '截止日期不能早于开始日期')
@@ -294,6 +308,7 @@ async function editTask(task: AssessmentTaskItem) {
     { key: 'end_at', label: '截止日期', type: 'date', defaultValue: task.end_at?.slice(0, 10) || '' }
   ], '保存修改')
 
+  if (!values) return
   if (!values.name) return
   if (values.end_at && values.start_at && values.end_at < values.start_at) {
     showToast('error', '截止日期不能早于开始日期')
@@ -374,6 +389,10 @@ async function removeTask(task: AssessmentTaskItem) {
       check.canHardDelete ? '确认删除' : '确认作废',
       deleteImpactText(check)
     )
+    // **这一道排在字段判断之前，而且它才是真正拦住取消的那一道。**
+    // 可硬删除的那一档 `fields` 是空数组，`values.reason` 永远是 `undefined`，所以下面
+    // 那句守卫在这一档上恒为假——「点取消」与「点确认删除」在它眼里一模一样。
+    if (!values) return
     if (!check.canHardDelete && !values.reason) return
     await deleteAssessmentTask(task.id, values.reason)
     showToast('success', check.canHardDelete ? '任务已删除' : '任务已作废，历史记录已保留且不再参与当前统计')
@@ -499,6 +518,7 @@ async function exportDetail() {
     ],
     '导出'
   )
+  if (!values) return
   if (!values.purpose) return
   exportingDetail.value = true
   try {
@@ -530,6 +550,7 @@ async function exportNonParticipants() {
     ],
     '导出'
   )
+  if (!values) return
   if (!values.purpose) return
   exportingNonParticipants.value = true
   try {
@@ -569,6 +590,7 @@ async function exportUnmatchedRows() {
     ],
     '导出'
   )
+  if (!values) return
   if (!values.purpose) return
   exportingUnmatchedRows.value = true
   try {
@@ -641,6 +663,7 @@ async function markParticipation(row: TaskCompletionItem) {
     ],
     '保存标记'
   )
+  if (!values) return
   if (!values.disposition) return
   const reason = (values.reason || '').trim()
   if (values.disposition !== 'REQUIRED' && !reason) {
@@ -829,6 +852,7 @@ async function startSupplement() {
     ],
     '查看将补发哪些人'
   )
+  if (!values) return
   if (!values.reason) return
   supplementBusy.value = true
   try {

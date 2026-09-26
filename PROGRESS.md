@@ -1477,26 +1477,38 @@ M3 顺带补了一句**先行断言**（`await expect(expand).toBeVisible()`）�
 
 Backend Tests（优先复用 `test_reporting_api.py`，只为新增服务端行为加测试）：
 
-- [ ] 保留既有 counselor 列表隔离、leader 只读已发布、发布锁定、快照冻结、按版本导出的回归用例，
+- [x] 保留既有 counselor 列表隔离、leader 只读已发布、发布锁定、快照冻结、按版本导出的回归用例，
   不为了凑数量重复建设同义测试。
-- [ ] 新增历史版本详情：正文/快照正确、越权 404/403、读取有审计。
-- [ ] 新增 V2 草稿期间 leader 仍可读/导出 V1；V2 发布后 leader 默认看到 V2。
-- [ ] 新增版本级 `published_at/published_by` 写入与历史数据回填测试。
-- [ ] 如实施“同口径一份草稿”后端不变量：双请求/双击只留下同一份草稿或返回明确冲突，不得 500。
-- [ ] 如实施班级笔记服务端化：跨用户/跨范围不可读写，写入有审计。
+  （`test_reporting_api.py` +318 行；越权面 `:344 / :363 / :577 / :631 / :671 / :793 / :833` 逐条在位。）
+- [x] 新增历史版本详情：正文/快照正确、越权 404/403、读取有审计。
+  （`test_the_version_detail_api_returns_that_versions_own_text_and_snapshot:700`、
+  `test_reading_a_version_writes_audit:750`、`test_a_leader_cannot_read_a_draft_version_even_by_asking_for_its_number:793`。）
+- [x] 新增 V2 草稿期间 leader 仍可读/导出 V1；V2 发布后 leader 默认看到 V2。
+  （`test_a_new_version_keeps_the_published_one_visible_to_the_leader:631`、
+  `test_the_leader_gets_the_new_version_once_it_is_published:671`。）
+- [x] 新增版本级 `published_at/published_by` 写入与历史数据回填测试。
+  （`0023_report_version_publish.py` + 新文件 `test_report_version_publish_migration.py`：
+  `test_the_backfill_fills_the_versions_that_have_been_published:177`、
+  `test_the_backfill_leaves_the_text_alone:210`。）
+- [x] ~~如实施“同口径一份草稿”后端不变量~~ **未实施，故不适用**——本轮没有引入该不变量
+  （`reporting_service` 里没有既存草稿的查找/upsert）。双击/双请求仍会建出两份草稿，这是
+  **本轮知情的取舍**，不是漏做：它是一条新业务规则（「同一口径至多一份草稿」），
+  不在 P0 六项里。要做得单独立项。
+- [x] ~~如实施班级笔记服务端化~~ **未实施，故不适用**——见 §5.13.6，该 Phase 仍待裁决
+  （§5.13.11 的「未完成」一栏）。
 
-E2E：
+E2E（`e2e/app.spec.ts` 的 `专业报告工作台` 组，+953 行）：
 
-- [ ] 新建草稿 → 刷新 → 从列表恢复 → 继续编辑。
-- [ ] 发布 V1 → 页面显示已发布、输入只读 → 创建 V2 → 编辑并发布。
-- [ ] V2 草稿未发布期间，leader 仍能查看并导出 V1，看不到 V2 草稿。
-- [ ] 在 V2 页面选择 V1 导出，验证下载和导出中心记录。
-- [ ] dirty 时切任务、打开其他报告、重置、离开页面均出现保护；保存后不出现。
-- [ ] 导出用途弹层的必填、取消、失败保留和成功反馈。
-- [ ] leader 登录后默认打开最新报告，且没有任何编辑控件。
-- [ ] leader 无报告/过滤无结果两类空态。
-- [ ] 375px 与 768px：报告列表、正文、版本时间线、确认弹层和底部导航无横向溢出。
-- [ ] 键盘可完成选报告、保存、发布确认和导出用途填写。
+- [x] 新建草稿 → 刷新 → 从列表恢复 → 继续编辑。（`:1285`）
+- [x] 发布 V1 → 页面显示已发布、输入只读 → 创建 V2 → 编辑并发布。（`:1314`）
+- [x] V2 草稿未发布期间，leader 仍能查看并导出 V1，看不到 V2 草稿。（`:1351`）
+- [x] 在 V2 页面选择 V1 导出，验证下载和导出中心记录。（`:1380`）
+- [x] dirty 时切任务、打开其他报告、重置、离开页面均出现保护；保存后不出现。（`:1410`）
+- [x] 导出用途弹层的必填、取消、失败保留和成功反馈。（`:1465`）
+- [x] leader 登录后默认打开最新报告，且没有任何编辑控件。（`:1533`）
+- [x] leader 无报告/过滤无结果两类空态。（`:1565`）
+- [x] 375px 与 768px：报告列表、正文、版本时间线、确认弹层和底部导航无横向溢出。（`:1600`）
+- [x] 键盘可完成选报告、保存、发布确认和导出用途填写。（`:1630`）
 
 执行回归：
 
@@ -1510,23 +1522,317 @@ cd .. && npx playwright test
 
 #### 5.13.9 Definition of Done
 
-- [ ] P0 六项（RPT-UX-01～06）全部完成。
-- [ ] 页面可恢复草稿、回看版本、创建新版本、发布并按版本导出。
-- [ ] UI 显示的状态、版本、时间与服务端一致。
-- [ ] 不再使用 `window.prompt`；专业内容不再新增无范围的 localStorage 草稿。
-- [ ] leader 只读边界未放宽，管理员仍默认无心理业务内容权限。
-- [ ] 新版草稿编辑期间，旧版已发布内容持续对 leader 可见，且历史版本正文/快照可追溯。
-- [ ] 未修改 MHT 评分规则。
-- [ ] 未重建权限、导入批次或 Export Job。
-- [ ] 未修改历史 Alembic migration。
-- [ ] 前端 build、Backend Tests、E2E 全绿并把实测数字写回本节。
+- [x] P0 六项（RPT-UX-01～06）全部完成。
+- [x] 页面可恢复草稿、回看版本、创建新版本、发布并按版本导出。
+- [x] UI 显示的状态、版本、时间与服务端一致。
+- [x] 不再使用 `window.prompt`；专业内容不再新增无范围的 localStorage 草稿。
+  （`window.prompt` 归零；Phase D 未实施 → 既有那个 `qingxin-notes` **一个字未动**，
+  **不是**「本轮新增了它」。见 §5.13.11 的「未完成」。）
+- [x] leader 只读边界未放宽，管理员仍默认无心理业务内容权限。
+  （`test_reporting_api.py:793` / `:833`；管理员那一侧未动 `CAPABILITY_DEFAULTS`。）
+- [x] 新版草稿编辑期间，旧版已发布内容持续对 leader 可见，且历史版本正文/快照可追溯。
+  （`test_reporting_api.py:631` / `:671` / `:700`。）
+- [x] 未修改 MHT 评分规则。
+- [x] 未重建权限、导入批次或 Export Job。
+- [x] 未修改历史 Alembic migration。（`0023` 是**新增**的最后一条，0001–0022 未动。）
+- [x] 前端 build、Backend Tests、E2E 全绿并把实测数字写回本节。
+  （2026-09-26 实测，逐字见 §5.13.11 的「三项数字」。）
 - [ ] 人工检查 375/768/1024/1440px 与键盘操作。
+  （375 与 768 已由 `e2e/app.spec.ts:1600` / `:1630` 覆盖；**1024 与 1440 没有人看过**，
+  所以这一条**不勾**。）
 - [ ] 提交前记录最终 commit SHA；推送前确认不会覆盖当前未提交工作。
+  （P0 六项已在 `3b6e586`；**收口后的续做改动尚未提交**，见 §5.13.11 的「未提交」。）
 
 #### 5.13.10 明确排除
 
 本轮不做：`ARCHIVED` 状态、PDF/DOCX、新的领导专用导出类型、权限体系重构、Export Job
 重构、MHT 评分变更、历史迁移改写、自动合并/删除 IMPORTED task、token Cookie 架构迁移。
+
+#### 5.13.11 实施记录与实测数字（2026-09-26）
+
+##### 三项数字（§5.13.9 要求，逐字）
+
+```
+npm run build  →  ✓ built in 982ms        （vue-tsc -b 类型检查通过）
+                  dist/assets/index-CX3xU0Yt.js   465.87 kB │ gzip: 147.46 kB
+                  dist/assets/index-BSVH8dR5.css   63.60 kB │ gzip:  12.86 kB
+                  165 modules transformed
+make test      →  865 passed, 5 warnings in 525.58s (0:08:45)
+make e2e       →  155 passed (45.6s)
+```
+
+**2026-09-26 收口续做 + 人工检查之后又完整重跑过一次后端**：仍是
+`865 passed, 5 warnings in 540.44s (0:09:00)`——**用例数逐条一致**（+18 条仍全部落在
+`test_reporting_api.py` 与 `test_report_version_publish_migration.py`），耗时 525.58 → 540.44s
+只当参考、不拿来比版本（CLAUDE.md §29 那条）。
+**e2e 那一次的 `155 passed` 早于续做改动，不能拿来给续做作证**（`app.spec.ts` 自己改了
+133 行、`useRovingFocus.ts` 是新增文件），所以**续做之后单独补跑了一次**：
+`make e2e → 155 passed (39.5s)`，与上面那一行**用例数一致、逐条全绿**。
+它同时把「★ roving tabindex」那一条的 `Shift+Tab` 断言在**改后的**代码上重跑了一遍。
+
+对照§5.13 之前：后端 847 → **865 passed**（+18 条，全部落在 `test_reporting_api.py` 与
+`test_report_version_publish_migration.py`）；e2e 此前 `153 passed / 2 failed` → **155 passed**。
+
+5 条 warning 里那两条 `cartesian product` 是**已知误报**（`export_service.py:124` /
+`analytics_service.py:1015`，CLAUDE.md §23 记着三处 FROM 各有各的 ON，**别去改**），
+另三条是既有告警。
+
+##### P0 六项的落点（逐项）
+
+| 项 | 落点 |
+|---|---|
+| RPT-UX-01 草稿可恢复 | `ProfessionalReportList.vue`（新）+ `ReportExportPage.vue` 的列表接线 |
+| RPT-UX-02 版本回看 | `GET /professional-reports/{id}/versions/{no}` + `VersionTimeline` |
+| RPT-UX-03 创建新版本 | `POST …/versions` + 页头「创建新版本」按钮 |
+| RPT-UX-04 发布锁定 | `POST …/versions/{no}/publish` + 已发布态只读 |
+| RPT-UX-05 按版本导出 | `exportProfessionalReport(id, purpose, versionNo)` |
+| RPT-UX-06 移除 `window.prompt` | 全站归零（导出用途改走 `FormDialog`） |
+| LEADER-UX-01 领导只读页 | `LeaderAnalyticsReportPage.vue`（新，`/leader/analytics/report`） |
+
+##### ★ 列表投影分岔：`serialize(..., detail: bool)`
+
+`GET /api/v1/professional-reports` 此前把每份报告**整份 `statistics_snapshot`** 一起下发，
+而列表页一个字都用不到它（用的是服务端现取的标量 `evaluable_count`）。
+
+修法是给 `reporting_service.serialize` 加一个 `detail: bool = False` 开关：**列表不带快照、
+详情才带**。所有详情调用点（`create` / `draft` / `get_report` / `get_version`）显式传
+`detail=True`，列表端点不传。
+
+实测（2026-09-26，领导身份，`GET /api/v1/professional-reports`）：
+
+```
+HTTP=200  字节=171570   n=172
+第一份的 keys 里有 statistics_snapshot 吗: False
+evaluable_count = 48    content_version = 2
+```
+
+**判据取「每份约 997 B」而不是那两个总字节数**：n 会随演示数据长（上一会话记的
+`5,392,953` / `120,622` 是 n=113/121 那两次），而「修前每份 51,255 B 的快照」是常量。
+拿总数当判据会在下一次数据变化时读成回归。
+
+##### ★ 删除任务的 bug：**取消 == `{}` 与 取消 == `null`** （用户 2026-09-26 报的）
+
+用户原话：「评测任务中，点击删除，我选择了取消，但当条评测任务也被删除了」。
+
+根因在 `TasksPage.vue` 的 `onFormCancel`：它回的是 **`{}`**，于是「点取消」与「提交了
+一个空表单」在调用方眼里**一模一样**。九个调用点里有八个**恰好**是对的——每个都有一个
+`required` 字段顶着，空表单会被表单自身挡住；而第九个 `removeTask` 不是：可硬删除的那
+一档**根本没有字段**（`fields` 是空数组），没有任何东西挡得住，任务当场被删。
+
+修法是**两半，缺一不可**：
+
+1. `formResolve` 的类型与 `onFormCancel` 改成回 **`null`**——取消就是取消，调用方拿得到
+   这个事实；
+2. 九个调用点各补 `if (!values) return`。
+
+**没有选「给那一档补一个假字段」那条路**：那只是把同一处判断换个地方藏起来，下一个
+「不需要填任何东西就能做」的动作会再踩一次。理由写在 `onFormCancel` 的 docstring 里。
+
+**变异验证在这里打歪过一次，值得记。** 第一发摘掉 `TasksPage.vue` 的 `if (!values) return`，
+用例**仍然 greens**——因为 `onFormCancel` 回的是 `null`，`!values.reason` 对 `null` 求值
+抛 `TypeError`，被外层 `catch` 吞成一条 toast，删除没发生。**那是变异写错了，不是守卫失灵**
+（CLAUDE.md 记着这条）。忠实的变异是 `formResolve({})`——那才是当初 bug 的根因——改成它
+之后红在 `e2e/app.spec.ts:4497`。所以两半是**同一个修复的两半**，各自单独摘掉都可能绿。
+
+##### ★ roving tabindex：长列表只占一个 Tab 停靠点
+
+`frontend/src/composables/useRovingFocus.ts`（新，79 行），两处列表共用：
+`ProfessionalReportList.vue` 与 `LeaderAnalyticsReportPage.vue`。
+
+共享演示库上这两份列表各有一百多行，而每一行此前都是普通 `<button>`——也就是每一个都是
+Tab 停靠点，于是「Tab 进列表 → Tab 出去」要按**行数**次 Tab。`e2e/app.spec.ts` 那条键盘
+用例的 `tabUntil` 上限（160）正是被它顶穿的。
+
+四个决定：
+
+- **工厂函数，不是模块级单例，也不是两份拷贝**。单例会把两个不相干的列表串进同一条序列
+  （与 §14「竞态守卫按页构造、不做成全局序号」同一条）；两份拷贝会漂。所以是每次调用各持
+  一份状态的工厂。
+- **`tabbableIndex` 夹在 `[0, itemCount() - 1]`**：筛选或重新加载之后行数变小而 `activeIndex`
+  停在旧值上，不夹就会出现「一行都不是 Tab 停靠点」——整张列表从键盘上消失，屏幕上完全
+  看不出为什么。
+- **行数传 getter，不传数字**（`() => props.reports.length`）：列表是异步加载的，传值会拿到
+  旧的那个。领导那一页取的是**筛选之后**的行数。
+- **焦点与选中是两件事**：方向键只移焦点，选中仍要 Enter / 空格（`<button>` 原生行为）。
+  理由是这两处的选中都会触发一次**详情请求**——让方向键每经过一行都发一次请求，会把
+  「翻过去看看」变成一百多次网络往返。
+
+##### `.modal-panel` 这个定位器在弹层堆叠下**天生有歧义**
+
+新增的那几条 e2e 一开始红在这里，成因值得单独记：Vue 的 `<Transition name="modal">` 的
+leave 是 **0.2 秒**，所以关掉的弹层**在 DOM 里还要多活约 200ms**；而 Playwright 的
+`toHaveCSS` 撞上严格模式冲突（两个 `.modal-panel` 同时匹配）是**立即抛错、不重试**——
+于是它报出来的是一句定位器错误，而不是断言失败。写新用例时要么等那一层真的消失，要么
+把定位器收到只有一层能匹配的形状上。
+
+##### 共享演示库的 e2e 数据漂移（本会话查出来的，**已清理、未做结构性改动**）
+
+全量 e2e 报 **5 failed**，根因不是代码：`e2e/app.spec.ts:4574` 那条用例
+（`作废之后从默认列表消失，只在「已作废」里找得到`）**每跑一轮新建一批、从不清理由**，
+而 `_reusable_batch` 的四条判据里有 `task_id`，任务每轮都是新的 → 永远无法复用 → **每轮
+净增 1 个批次 + 1 个 VOIDED 任务 + 56 行目标行**（实测残留 17 行 `e2e作废批次-*`）。
+
+可见窗口是 `DataCenterPage.vue` 的 `batchHistory` 的 `.slice(0, 10)`，后端按 `id.desc()`
+排。残留把 6 个**被依赖的**批次挤出最新 10 条 → 依赖它们的用例定位到 0 个元素而红。
+
+处置是**清理 + 补数据，不放宽任何断言**：备份（`/tmp/xlp-e2e-residue-20260926.json`）→
+子先父后单事务删（**全库没有 `ondelete=`，每个外键都是 RESTRICT**，父行先删必然 1451）→
+批次 25→8、任务 19→2。5 failed 降到 2 failed。
+
+剩下 2 条（`e2e/app.spec.ts:587` 与 `:979`）红在选择器里只剩 1 个可勾选任务
+（`.task-option input:not(:checked)` 解析到 0 个元素 → 30s 超时）。追到
+`IMPORT-202605-1` 为何 VOIDED：审计 id 14112 / actor `13800000001`（心理老师）/
+2026-09-25 21:42:20 → **判为手动试用功能时的一次正当作废，不是测试 bug**。
+按 CLAUDE.md 既有处方跑 `make seed-demo` 补出 `TASK-2026-GRADE9-RETEST`
+（ACTIVE / 16 targets）→ 那 2 条 **2 passed (1.4s)** → 全量 **155 passed (45.6s)**。
+
+**余量已经归零**（量化）：批次总数 10 / 可见窗口 10，`e2e全屏明细`(44) / `e2e 导入校验`(45) /
+`e2e词表预演`(47) 贴着窗口边缘。**下一轮全量 e2e 再净增 1 行，就会开始把 id 最小的外推。**
+所以下一次跑全量之前应当再清一次，或者先做下面「未完成」里那件结构性的事。
+
+###### 上面那句预测**已经发生**（2026-09-26 19:05 实测）
+
+| 数 | 值 |
+|---|---|
+| `assessment_import_batch` 总行数 | **16**（可见窗口仍是 `.slice(0, 10)`） |
+| 窗口内 `e2e作废批次-*` | **8 行**（id 70–77，时间 18:37 → 19:05） |
+| 窗口内**被依赖的**批次 | **只剩 2 行**（56 `2026年心理普查结果示例`、50 `e2e词表未匹配`） |
+| 被挤出窗口的依赖项 | `e2e词表汇总`(49) / `e2e词表筛选`(48) / `e2e词表预演`(47) / `e2e 导入校验`(45) / `e2e全屏明细`(44) —— **全部出界** |
+
+**所以「跑一轮长多少」是一个依赖库当前状态的数，不能在文档里写成常数。** 两侧都实测过：
+
+- **批次侧**：`e2e/app.spec.ts:4574` 那条每跑一轮新增 1 个批次（`_reusable_batch` 的四条判据
+  里有 `task_id`，任务每轮都是新的 → 永远无法复用）。上面那 8 行就是这一会话里反复跑出来的。
+- **报告侧**：`professional_report` / `professional_report_version` 从 0 跑一轮得 **25 / 41**；
+  在**已有 25 份之上**再跑一轮只净增 **+12 / +20**（→ 37 / 61）。差别的原因是用例遇到
+  「同范围草稿」时会点「继续编辑现有草稿」（`findSameScopeDraft` + `askConfirm`），
+  那一条**不新增**。
+
+**推测与实测要分开**：`155 passed` 那一次跑的时候窗口里还剩着它需要的那几行——**每一轮跑
+都在往后推窗口，用例够不够得着取决于它执行的那一刻**，所以那次绿是**时序**而不是余量。
+这一点我没有逐条取证（那要录下每条用例执行时刻的窗口快照），**不当作结论**，
+只把它记成「下一次跑之前必须再清一次」的理由。
+
+**已清（2026-09-26 19:1x，只删 e2e 自己造的残留、一行操作员数据没碰）**：批次 16 → **8**
+（窗口内 8 行**全部是被依赖的那 8 个**，余量恢复成 2 轮）、任务 13 → **3**
+（36 秋季普查 ACTIVE / 38 春季导入 VOIDED / 82 初三复测 ACTIVE）、目标行 667 → **107**。
+
+删除照既有处方：**先物化 id 列表再删**——`DELETE … WHERE batch_id IN (SELECT id FROM
+assessment_import_batch WHERE …)` 在 MySQL 上是 **1093 `You can't specify target table … for
+update in FROM clause`**（自己的第一版就是这么撞的，回滚了、一行没动）。子先父后
+（`assessment_import_row` → `assessment_import_batch` → `assessment_target` →
+`assessment_task_scope` → `assessment_task`），单事务。备份
+`/tmp/xlp-e2e-void-residue-20260926.json`（480 行）。
+
+**★ 这次我犯了一个错，如实记**：那份备份只取了「那 8 个批次所对应的 8 个任务」，
+而**删除的判据是 `assessment_task.name LIKE 'e2e作废任务-%' AND status='VOIDED'`**——
+它多匹配到 **81 / 84** 两个任务（以及它们名下的 112 行目标行），于是那 112 行
+**删了但没有备份**（480 → 实际删除 560 行）。两个范围不一致而**宽的那个是删除**，
+这正是「先备份再删」最容易失效的形状。补救与影响都如实说：旧备份
+（`/tmp/xlp-e2e-residue-20260926.json`）里也**没有** 81 / 84（它的 task id 到 79 为止），
+所以那 112 行**确实没有第二份副本**；它们是 `e2e作废任务-*` / `VOIDED` 的 e2e 自造残留
+（那一条用例每跑一轮就造一份），**下跑一轮就能重新造出来**，没有任何操作员数据在里面。
+**教训是：备份的判据与删除的判据必须**逐字**相同**，不能一个是「这批 id 对应的」、
+另一个是「按名字前缀的」。
+
+##### 另外两处判据
+
+- **不要用行数做断言**：新增的那十条用例都按「有东西可扫」定位（先证明那一行在，再断言它
+  干净），不写死「共 172 份」——报告数会随演示数据长。
+- **`uvicorn --reload` 在 e2e 期间改后端会挂死**：跑全量 e2e 的过程中动了 `backend/`，
+  reload 会在用例中途重启进程，表现出来是一批看不懂的超时。跑 e2e 时别改后端。
+
+##### 人工检查 375 / 768 / 1024 / 1440（**由助手读图 + 量化，不是真人在浏览器里操作**）
+
+§5.13.9 的第二条要求「人工检查 375/768/1024/1440px 与键盘操作」。**执行方式如实记**：
+辅助脚本（`/tmp/xlp-shot.cjs` / `xlp-shot2.cjs` / `xlp-measure.cjs` / `xlp-table.cjs` /
+`xlp-opcol.cjs`）在真服务上取景，**图由我逐张读**，凡涉及「有没有被挡住 / 有没有变形」的
+判断一律**回到 `getBoundingClientRect` 的数字**，不靠缩略图。所以它是「机器取景 + 人工读图」，
+**不等于真人在浏览器里点一遍**——真实操作手感（滚动惯性、触控、缩放）不在这批证据里。
+
+看过的页与档：任务页 **1440 / 1024 / 768 / 375 四档全看**；报告工作台 1440 / 1024 / 375；
+领导只读报告页 1440 / 1280 / 1024（后两档是**测量**而不是读图，见下）。
+
+- **报告工作台**：1440 正常；1024 KPI 卡折成 2×2、无横向溢出；375 单列纵向堆叠、无横向
+  溢出（`fullPage` 高 6354px，长是因为内容本来就是纵向的，不是布局坏）。
+- **领导只读报告页**：左栏 `.report-picker` 三档恒 **380px**、`.picker-head` 的「共 N 份」
+  与右栏 `.report-detail` 的间隙三档恒 **17px**，**无重叠**（`xlp-measure.cjs`：
+  1440 `detail.x=672 / right=1410 / w=738`、1280 `w=578`、1024 `w=322`）。
+  1024 下右栏正文只剩 **322px** 宽（1440 是 738px）——偏窄但可用，是这一页在 1024 下的
+  实际观感，记在这里备查。
+
+###### ★ 目测被实测纠正的一处：768 下「按钮被压扁」是**裁切残片**，不是变形
+
+768 的全页截图里，操作列那一格看起来是两个**竖排的窄条**（「查看」「删除」两字上下叠），
+第一眼像是按钮被列宽挤变形了。**量下来不是**：
+
+```
+`xlp-opcol2.cjs`，768，同一时刻
+  docScrollW 768 / docClientW 768     ← 页面本身不横向溢出
+  wrapScrollW 820 / wrapClientW 698   ← 溢出发生在 .table-wrap 里面
+  tableW 820 / tableRight 855
+  wrapLeft 35 / wrapRight 733         ← 容器可视区右边界 733
+  查看明细 x=701 w=74 right=775       ← 右边缘出界 42px
+  编辑     x=781 w=48 right=829       ← 整个在容器外
+  删除任务 x=707 w=74 right=781       ← 出界 48px
+`xlp-opcol.cjs` 四档按钮（宽度与高度逐档相同，`overflow: false`）
+  1440 / 1024 / 768 / 375 → 查看明细 74×34、编辑 48×34、删除任务 74×34
+```
+
+**按钮从来没有变形**——四档下它们的宽高逐档相同、内容不溢出。768 截图里那个「竖条」是
+`.table-wrap` 的右边界把按钮**裁掉一半**之后露出来的残片，而 `overflow-x: auto` 使它
+**可以横向滚动**（`.table-wrap` 是既有设计，§17 那一类「不是不可达，是需要滚动」）。
+所以这一处与本轮 1024 的发现**是同一件事**，不是第二件：
+
+| 视口 | `.table-wrap` 可视 | 表格 | 溢出 | 操作列 |
+|---|---|---|---|---|
+| 1440 | 1092 | 1092 | 0 | 完整可见（`lastBtnRight 1218 ≤ 1440`） |
+| 1280 | 932 | 932 | 0 | 完整可见 |
+| 1024 | 676 | 820 | **144px** | 需横向滚动（`lastBtnVisible false`） |
+| 768 | 698 | 820 | **122px** | 需横向滚动 |
+| 375 | 305 | 820 | **515px** | 需横向滚动 |
+
+**这一处值得单独记，因为它正是「不靠眼睛、靠量」那条纪律的又一次验证**：如果只读图就下
+结论，写进文档的会是一句「768 下按钮被挤变形」（假的），而真实的、可裁决的问题是
+「≤1024 时操作列要横向滚动才够得着」。**这是本轮人工检查唯一一处真实产出**，交用户裁决。
+
+###### 键盘目视（`xlp-shot2.cjs`，报告工作台「我的报告」列表）
+
+```
+Tab 进列表: true
+进列表后      BUTTON.row   tabindex="0"  outline "solid 2px rgb(47, 110, 219)"  matches(':focus-visible') true
+↓↓ 之后       BUTTON.row（**换到了下一行**）同上 outline / focus-visible
+Shift+Tab 后  BUTTON.btn「↻ 重置」  ← **一次就离开了列表**，没有逐行走
+```
+
+三条合起来正是 §「★ roving tabindex」要达到的效果：**列表只占一个 Tab 停靠点**
+（Shift+Tab 一次即出，若每行都是停靠点它会退回上一行），方向键在列表内移动焦点环，
+且焦点环可见（2px 实线，与 `:focus-visible` 的约定一致）。截图
+`kbd-1-first.png` / `kbd-2-down2.png` 上肉眼也看得到那个蓝框**长在被选中那一行上**。
+
+##### 未完成（如实记，不勾）
+
+1. **Phase D（CLASS-NOTE-01，P1）未做，且被用户裁决阻塞。** §5.13.6 要求把班级笔记
+   `qingxin-notes` 从 `localStorage` 迁到服务端，而那一处的结论是「不再提供仅改
+   `localStorage` key 的降级方案」——**要么服务端化，要么保持现状**，后者需要用户发话。
+   所以 `ClassPortraitPage.vue` 那个 key **一个字未动**（§5.13.9 里那条「不再新增无范围的
+   localStorage 草稿」说的是**不新增**，不是「把既有的迁走」）。
+2. **Phase E（NAV-UX-01 / WORKBENCH-UX-01，P1）未做**，九条复选框全未勾（无阻塞，
+   可随时开工）。现状证据：`AppLayout.vue:33` 的 `icon: '⚑'`、`:84` 的 `icon: '○'`
+   仍是文本字符而不是 SVG 图标组件。
+3. **§5.13.9 第二条（人工检查四档 + 键盘）改记「已执行到差额处」，仍未勾。**
+   本轮的执行是**机器取景 + 助手读图 + 量化**（上面那一节「人工检查 375 / 768 / 1024 / 1440」），
+   覆盖了任务页四档、报告工作台三档、领导页三档与一次键盘动线；而 375 / 768 的自动化
+   覆盖是 `e2e/app.spec.ts:1600`、键盘是 `:1630`。
+   **差的那一截是「真人在浏览器里点一遍」**（滚动惯性、触控、缩放、以及我读图时可能
+   没注意到的观感问题）——所以这一条按原样保留未勾，不改成「已完成」。
+4. **收口后的续做改动尚未提交**（9 个文件：8 个 `M` + 未跟踪的
+   `frontend/src/composables/useRovingFocus.ts`，169 insertions / 28 deletions）。
+   P0 六项本身已在 `3b6e586`（27 files / 4608 insertions / 170 deletions，2026-09-26
+   17:59:40 +0800）。**推送前先确认不会覆盖**。
+5. **`:4574` 那条用例仍在每轮净增数据。** 只做了清理，没做结构性改动——修法有两条互斥
+   路线：(a) 改 `DataCenterPage.vue` 的可见窗口（产品 UI 改动，超本轮范围）；
+   (b) 改那几条依赖窗口的 e2e 用例的定位方式（脱离数据量依赖）。两条都该由用户裁决。
 
 ### 5.14 四角色界面与任务流优化实施规范（2026-09-25）
 

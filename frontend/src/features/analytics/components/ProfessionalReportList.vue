@@ -11,13 +11,20 @@
  *
  * 选中态用 `aria-pressed` 而不是只换底色：这是「在一组里选一个」，读屏软件要知道
  * 当前选的是哪一个（与登录页角色页签同一条，CLAUDE.md §15）。
+ *
+ * ## 键盘：整个列表只占**一个** Tab 停靠点（2026-09-26）
+ *
+ * 这一份列表有一百多行，而每一行此前都是普通 `<button>` ——也就是**每一个 Tab 停靠点**。
+ * 处置是 roving tabindex，理由、形状与「焦点与选中为什么是两件事」都写在
+ * `composables/useRovingFocus.ts` 里（同一份逻辑领导的报告列表也要用，所以只有那一个定义）。
  */
+import { useRovingFocus } from '../../../composables/useRovingFocus'
 import { formatDateTime } from '../../../services/dates'
 import { reportStatusTone, reportVersionLabel } from '../../../services/labels'
-import type { ProfessionalReport } from '../../../services/api'
+import type { ProfessionalReportListItem } from '../../../services/api'
 
 const props = defineProps<{
-  reports: ProfessionalReport[]
+  reports: ProfessionalReportListItem[]
   selectedId: number | null
   /** 任务 id → 名称，用来把 `task_scope.task_ids` 说成人看得懂的范围摘要。 */
   taskNames: Record<number, string>
@@ -35,6 +42,9 @@ const emit = defineEmits<{
   retry: []
 }>()
 
+/** 行数传 getter：列表是异步加载的，传值会拿到旧的那个（见 `useRovingFocus`）。 */
+const { tabbableIndex, noteFocus, onRowKeydown } = useRovingFocus(() => props.reports.length)
+
 /**
  * 任务范围摘要。
  *
@@ -42,7 +52,7 @@ const emit = defineEmits<{
  * （§24：留空与「没问过」分不开）。反过来，`task_scope` 真的为空是另一句话——
  * 那是历史行的形状，不是「有范围但名字查不到」。
  */
-function rangeSummary(report: ProfessionalReport) {
+function rangeSummary(report: ProfessionalReportListItem) {
   const ids = report.task_scope?.task_ids || []
   if (!ids.length) return '未记录任务范围'
   const names = ids.map(id => props.taskNames[id]).filter(Boolean)
@@ -51,7 +61,7 @@ function rangeSummary(report: ProfessionalReport) {
 }
 
 /** 列表里的状态读的是**版本级**字段：报告头在 V2 草稿期间已经指回 DRAFT 了。 */
-function statusOf(report: ProfessionalReport) {
+function statusOf(report: ProfessionalReportListItem) {
   return reportVersionLabel(
     report.current_version_status ?? report.status,
     report.current_version
@@ -76,12 +86,15 @@ function statusOf(report: ProfessionalReport) {
       你还没有保存过专业报告。填写下方四段专业解读并保存后，它会出现在这里。
     </div>
     <ul v-else class="rows">
-      <li v-for="item in reports" :key="item.id">
+      <li v-for="(item, index) in reports" :key="item.id">
         <button
           type="button"
           class="row"
           :class="{ active: item.id === selectedId }"
+          :tabindex="index === tabbableIndex ? 0 : -1"
           :aria-pressed="item.id === selectedId"
+          @focus="noteFocus(index)"
+          @keydown="onRowKeydown($event, index)"
           @click="emit('select', item.id)"
         >
           <span class="row-main">

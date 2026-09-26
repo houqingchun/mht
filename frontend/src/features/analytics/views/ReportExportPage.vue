@@ -40,6 +40,7 @@ import {
   type AnalyticsReport,
   type AssessmentTaskItem,
   type ProfessionalReport,
+  type ProfessionalReportListItem,
   type ProfessionalReportVersion,
   type ProfessionalReportVersionDetail
 } from '../../../services/api'
@@ -56,7 +57,7 @@ const analysisRequest = createLatestRequest()
 
 /* ── 我的报告 ───────────────────────────────────────────────────────── */
 
-const reports = ref<ProfessionalReport[]>([])
+const reports = ref<ProfessionalReportListItem[]>([])
 const reportsLoading = ref(false)
 const reportsError = ref('')
 /** 任务 id → 名称，把 `task_scope.task_ids` 说成人看得懂的范围摘要。 */
@@ -508,7 +509,7 @@ function scopeKey(ids: number[]) {
  * （不同侧重、不同时点），而 `task_scope` 是 JSON、要变唯一键得先派生一列 `scope_key`
  * 并在所有写入路径上维护它。所以这一句是「不静默重复创建」的落点，理由记在 PROGRESS。
  */
-function findSameScopeDraft(taskIds: number[]): ProfessionalReport | null {
+function findSameScopeDraft(taskIds: number[]): ProfessionalReportListItem | null {
   const key = scopeKey(taskIds)
   return reports.value.find(item =>
     (item.current_version_status ?? item.status) === 'DRAFT'

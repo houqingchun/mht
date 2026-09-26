@@ -19,7 +19,7 @@ Publisher = Annotated[UserAccount, Depends(require_capability(PROFESSIONAL_REPOR
 
 @router.post("/professional-reports")
 def create(payload: ReportCreateRequest, request: Request, user: Editor, db: Annotated[Session, Depends(get_db)]):
-    report = create_report(db, user, payload); write_audit(db, action="创建专业报告", resource_type="PROFESSIONAL_REPORT", resource_id=str(report.id), actor=user, request=request); db.commit(); return ok(serialize(db, report, include_versions=True, viewer=user))
+    report = create_report(db, user, payload); write_audit(db, action="创建专业报告", resource_type="PROFESSIONAL_REPORT", resource_id=str(report.id), actor=user, request=request); db.commit(); return ok(serialize(db, report, include_versions=True, detail=True, viewer=user))
 
 @router.get("/professional-reports")
 def listing(request: Request, user: Reader, db: Annotated[Session, Depends(get_db)]):
@@ -70,15 +70,15 @@ def version_detail(report_id: int, version_no: int, request: Request, user: Read
 
 @router.put("/professional-reports/{report_id}/draft")
 def draft(report_id: int, payload: ReportDraftRequest, request: Request, user: Editor, db: Annotated[Session, Depends(get_db)]):
-    report = save_draft(db, user, report_id, payload); write_audit(db, action="保存专业报告草稿", resource_type="PROFESSIONAL_REPORT", resource_id=str(report.id), actor=user, request=request); db.commit(); return ok(serialize(db, report, include_versions=True, viewer=user))
+    report = save_draft(db, user, report_id, payload); write_audit(db, action="保存专业报告草稿", resource_type="PROFESSIONAL_REPORT", resource_id=str(report.id), actor=user, request=request); db.commit(); return ok(serialize(db, report, include_versions=True, detail=True, viewer=user))
 
 @router.post("/professional-reports/{report_id}/new-version")
 def version(report_id: int, request: Request, user: Editor, db: Annotated[Session, Depends(get_db)]):
-    report = new_version(db, user, report_id); write_audit(db, action="创建专业报告版本", resource_type="PROFESSIONAL_REPORT", resource_id=str(report.id), actor=user, request=request, detail=f"version={report.current_version}"); db.commit(); return ok(serialize(db, report, include_versions=True, viewer=user))
+    report = new_version(db, user, report_id); write_audit(db, action="创建专业报告版本", resource_type="PROFESSIONAL_REPORT", resource_id=str(report.id), actor=user, request=request, detail=f"version={report.current_version}"); db.commit(); return ok(serialize(db, report, include_versions=True, detail=True, viewer=user))
 
 @router.post("/professional-reports/{report_id}/publish")
 def publish_report(report_id: int, request: Request, user: Publisher, db: Annotated[Session, Depends(get_db)]):
-    report = publish(db, user, report_id); write_audit(db, action="发布专业报告", resource_type="PROFESSIONAL_REPORT", resource_id=str(report.id), actor=user, request=request, detail=f"version={report.current_version}"); db.commit(); return ok(serialize(db, report, include_versions=True, viewer=user))
+    report = publish(db, user, report_id); write_audit(db, action="发布专业报告", resource_type="PROFESSIONAL_REPORT", resource_id=str(report.id), actor=user, request=request, detail=f"version={report.current_version}"); db.commit(); return ok(serialize(db, report, include_versions=True, detail=True, viewer=user))
 
 @router.post("/professional-reports/{report_id}/export-jobs")
 def export(report_id: int, payload: ReportExportRequest, request: Request, user: Reader, db: Annotated[Session, Depends(get_db)]):

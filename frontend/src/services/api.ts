@@ -133,6 +133,7 @@ export interface ProfessionalReport {
   /** 建这份报告时选定的任务集合（`{task_ids:number[]}`）。列表上的「任务范围摘要」读它。 */
   task_scope?: { task_ids: number[] } | null
   analysis_mode: string
+  /** 这一版冻结的统计快照。**只有详情与写路由给**——列表现发 `ProfessionalReportListItem`。 */
   statistics_snapshot: AnalyticsReport
   /** 当前版本的**版本级**状态：心理老师用它判「能不能继续写」（已发布就要先建新版本）。 */
   current_version_status?: 'DRAFT'|'PUBLISHED'|'ARCHIVED' | null
@@ -148,7 +149,23 @@ export interface ProfessionalReport {
   content?: ProfessionalReportVersion
   versions?: ProfessionalReportVersion[]
 }
-export async function listProfessionalReports(): Promise<ProfessionalReport[]> { return (await apiRequest<{items:ProfessionalReport[]}>('/professional-reports')).items }
+/**
+ * **列表投影**（`GET /professional-reports`）：一份报告在列表里的形状。
+ *
+ * 与 `ProfessionalReport` 唯一的差别就是统计快照：列表**不发**那一份 51 KB 的
+ * `statistics_snapshot`，只发 `evaluable_count` 这一个标量（服务端 `reporting_service.serialize`
+ * 的 `detail` 参数）。理由是量出来的——共享演示库累积到 113 份报告时整份响应是 5.4 MB，
+ * 领导页在全量 e2e（5 个 worker 并行）下 5 秒都渲染不出来，而列表里唯一的快照读者只有
+ * 领导列表那一列的「可评价样本数」。
+ *
+ * 需要用快照的地方（心理老师页那些数字）读的是 `opened.statistics_snapshot`，而 `opened`
+ * 只来自 `getProfessionalReport` 与四条写路由——**它们都是详情，都带整份快照**。
+ */
+export interface ProfessionalReportListItem extends Omit<ProfessionalReport, 'statistics_snapshot'> {
+  /** 可评价样本数，与详情里那份额度同源。取不到是 `null`（界面写 `—`），不是 `0`（§11）。 */
+  evaluable_count: number | null
+}
+export async function listProfessionalReports(): Promise<ProfessionalReportListItem[]> { return (await apiRequest<{items:ProfessionalReportListItem[]}>('/professional-reports')).items }
 /** 单份报告（含 `versions` 版本列表）。`versions` 只有 `listProfessionalReports` 不给——列表页不需要它。 */
 export async function getProfessionalReport(id:number): Promise<ProfessionalReport> { return apiRequest(`/professional-reports/${id}`) }
 /**
