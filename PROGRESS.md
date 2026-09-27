@@ -6169,7 +6169,8 @@ socket，而 uvicorn 空闲 5 秒关连接 → 半开 socket 上的请求挂住�
 - [x] `npm run build` 通过（§5.20：模板未闭合只有 build 会报）；
 - [x] 回填实际修改文件、测试结果、Commit SHA。
 
-**Commit SHA：`__COMMIT__`**
+**Commit SHA：`999bb07`**（`feat(backup): §5.25 备份搬进应用管理端 + V2.2.0`，
+已 push 到 `origin/V2.0.1`，36 个文件：29 改 + 7 新增）
 
 #### 5.25.8 已知项与有意取舍
 
