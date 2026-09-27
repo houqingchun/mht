@@ -143,13 +143,17 @@ function reset() {
       <h2 class="section-title">关注等级分布</h2>
       <p class="muted tiny">按总分区间分档，每名可评价学生只落一档，三档互不叠加；区间取自本次结果所用的量表评分规则版本。左边是本班，右边是所属年级的全体——与上面「本班与同年级对比」是同一个对照关系，换了一个维度看。</p>
       <div class="band-grid">
+        <!-- 两格都走 `layout="bars"`（2026-09-27 §5.17）：与筛查关注概览那一处**同一个组件、
+             同一套等级顺序、同一套状态色**。统计范围留在各自的 `h3` 里（§5.17.4：班级上下文
+             就在标题旁边），所以这里**不传 `scope-label`**——组件只补一句「可评价 N 人」，
+             同一句话不会在屏幕上出现两次。 -->
         <div class="band-cell">
           <h3 class="band-cell-title">本班 · {{ activeClassName }}</h3>
-          <ScoreBandBars :items="activeClass.level_distribution" :totals="totalBands" :total="activeClass.sample_count"/>
+          <ScoreBandBars layout="bars" :items="activeClass.level_distribution" :totals="totalBands" :total="activeClass.sample_count"/>
         </div>
         <div v-if="gradeForClass" class="band-cell">
           <h3 class="band-cell-title">同年级 · {{ gradeForClass.grade_name }}全年级</h3>
-          <ScoreBandBars :items="gradeForClass.level_distribution" :totals="totalBands" :total="gradeForClass.sample_count"/>
+          <ScoreBandBars layout="bars" :items="gradeForClass.level_distribution" :totals="totalBands" :total="gradeForClass.sample_count"/>
         </div>
         <!-- 取不到年级那一组时**不留一个空框**：那一格会是三条 0 高的柱子，看起来像
              「这个年级一个都没有」，而事实是这份报表里没有这一组。 -->

@@ -932,6 +932,83 @@ async function bandFootTotal(chart: Locator): Promise<number> {
 }
 
 /**
+ * 横向版（`layout="bars"`）的那张「关注等级分布」——§5.17 之后**筛查关注概览**与
+ * **班级维度画像**两页用的都是它。
+ *
+ * 与 `expectScoreBands` 是**两个版式、两套 DOM**，所以是两个函数、不是一个带开关的函数：
+ * 一个函数里 `if (layout)` 分叉会把两套判据绑在一起，改一版时连带改到另一版，而另一版
+ * 此刻可能没有页面在用（年级维度对比那一页仍是纵向的）。纵向版仍归 `expectScoreBands`。
+ *
+ * 判据逐条对着 §5.17.3 那九条一致性规则，**只断这一个组件能负责的那几条**（跨页一致由
+ * 下面那条两页对照的用例管）：
+ *
+ * 1. **三档、顺序从重到轻**（`LEVEL_ORDER`：重点关注 → 需要关注 → 一般观察）。横向版与
+ *    纵向版的档序**不一样，而这是有意的**（见组件文件头）：纵向是给人横着读一列柱子，
+ *    横向是给人竖着读三行，先说重的。所以这里断的是 `LEVEL_ORDER`，不是服务端
+ *    `LEVEL_BANDS` 那个从轻到重的次序——**照抄纵向版那三行会让这一条红**。
+ * 2. **人数与比例同时直接可读**：每一行都有 `.band-count`（`N 人`）与 `.band-rate`
+ *    （百分比或「样本过小」），两者都在**行内**、不靠悬浮层。断的正是「同排可见」这件事
+ *    ——只断「页面上找得到这三个数」的话，一个把比例塞进 `title` 属性的实现照样绿。
+ * 3. **可评价样本量可见，且与页脚同源**：`.band-scope` 写着「可评价 N 人」，页脚写着
+ *    「合计 N 人」，两个数都从 DOM 读回来与三档之和交叉验证（写死任何一个都会让这条失去
+ *    意义——它验的正是组件自己在两处写下的那个口径）。
+ * 4. **条长与比例同源**：条宽 ÷ 轨道宽 ≈ 人数 ÷ 可评价样本。这是**横向版特有的那一条**，
+ *    也是它当初改过口径的地方：曾经按「相对最高那一档」归一化，于是班级页并排两格里
+ *    人多的那一条反而更短（实测 211px 对 180px），而眼睛一定会横着比过去。**不写死像素**
+ *    ——断的是那两个比例相等，容差卡的是「两处算法漂了」。
+ * 5. **0 人的档不画条**：与纵向版同一条（§11：`0` 与「没有数据」是两件事）。
+ *
+ * **比例那一格是两种东西之一**：分母够大时是百分比，不够大时是「样本过小」——后者是服务端
+ * 发 `null` 的地方，不是 `0.0%`（§11），所以两支都收。
+ */
+async function expectScoreBandRows(chart: Locator) {
+  // 一个人都没落进三档时组件换的是空态（`.data-empty`），下面第一条会先红。
+  await expect(chart).toBeVisible();
+
+  const rows = chart.locator('.band-row');
+  await expect(rows).toHaveCount(3);
+
+  const labels = chart.locator('.band-label');
+  await expect(labels).toHaveCount(3);
+  await expect(labels.nth(0)).toHaveText('重点关注');
+  await expect(labels.nth(1)).toHaveText('需要关注');
+  await expect(labels.nth(2)).toHaveText('一般观察');
+
+  // 人数与比例逐行读回来（不写死：那是数据量，不是功能对错），两个都要在**本行内**。
+  const counts: number[] = [];
+  for (const i of [0, 1, 2]) {
+    const row = rows.nth(i);
+    await expect(row.locator('.band-count')).toHaveText(/^\d+ 人$/);
+    await expect(row.locator('.band-rate')).toHaveText(/^(\d+(\.\d+)?%|样本过小)$/);
+    counts.push(Number((await row.locator('.band-count strong').innerText()).trim()));
+  }
+  expect(counts.every(count => Number.isInteger(count) && count >= 0)).toBe(true);
+  const sum = counts.reduce((a, b) => a + b, 0);
+  expect(sum).toBeGreaterThan(0);
+
+  // 可评价样本量：与三档之和、以及页脚那句「合计 N 人」是同一个数。
+  const scopeText = await chart.locator('.band-scope-count').innerText();
+  const scopeMatched = scopeText.match(/可评价\s*(\d+)\s*人/);
+  if (!scopeMatched) throw new Error(`.band-scope 里应当写着「可评价 N 人」，实际读到的是：${scopeText}`);
+  expect(Number(scopeMatched[1])).toBe(sum);
+  expect(await bandFootTotal(chart)).toBe(sum);
+
+  for (const i of [0, 1, 2]) {
+    const row = rows.nth(i);
+    if (counts[i] === 0) {
+      // 0 人的档不画条：一条 0 宽的条与「这一档没人」在图上分不开，而紧接着的 `0 人`
+      // 已经把这件事说清楚了。
+      await expect(row.locator('.band-bar')).toHaveCount(0);
+      continue;
+    }
+    const trackWidth = await row.locator('.band-bar-track').evaluate((node) => node.getBoundingClientRect().width);
+    const barWidth = await row.locator('.band-bar').evaluate((node) => node.getBoundingClientRect().width);
+    expect(trackWidth).toBeGreaterThan(0);
+    expect(Math.abs(barWidth / trackWidth - counts[i] / sum)).toBeLessThan(0.05);
+  }
+}
+
+/**
  * 按标签定位一张 `KpiCard`，返回**卡片本身**（`.kpi-value` / `.hint` 由调用点自己取）。
  *
  * **不能写成 `page.locator('.kpi', { hasText: '可评价样本' })`**：班级页那张「样本覆盖率」卡的
@@ -971,7 +1048,9 @@ test.describe('Analytics', () => {
     await expect(page.getByText('已自动加载最新可分析任务')).toBeVisible();
     await expect(page.getByRole('heading', { name: '关注等级分布' })).toBeVisible();
     // 总览那一张：这一页只有一张 `.band-chart`，所以直接按整页限定。
-    await expectScoreBands(page.locator('.band-chart'));
+    // §5.17 起这一页是**横向版**，所以走 `expectScoreBandRows`（纵向版那一个读的是
+    // `.band-axis`，在这一页上是 0 条）。
+    await expectScoreBandRows(page.locator('.band-chart'));
     await expect(page.locator('.task-option input:checked')).toHaveCount(1);
   });
 
@@ -981,7 +1060,9 @@ test.describe('Analytics', () => {
     await expect(page).toHaveURL(/\/leader\/analytics\/overview$/);
     await expect(page.getByText('已自动加载最新可分析任务')).toBeVisible();
     await expect(page.getByRole('heading', { name: '关注等级分布' })).toBeVisible();
-    await expectScoreBands(page.locator('.band-chart'));
+    // 与心理老师那一页走同一个 helper：**同一套版式**是这一页要证明的事之一
+    // （§5.17.1：读者应当把它们认成同一个业务指标在两个范围上的两张表）。
+    await expectScoreBandRows(page.locator('.band-chart'));
   });
 
   test('multiple imported batches can be selected together', async ({ page }) => {
@@ -1580,8 +1661,12 @@ test.describe('Analytics report functions', () => {
 
     const classChart = cells.nth(0).locator('.band-chart');
     const gradeChart = cells.nth(1).locator('.band-chart');
-    await expectScoreBands(classChart);
-    await expectScoreBands(gradeChart);
+    // §5.17 起这两格都是**横向版**（与筛查关注概览同一个组件、同一套档序与状态色）。
+    // 两格都逐条过一遍，其中第 4 条（条长 ÷ 轨道 ≈ 人数 ÷ 可评价样本）正是**跨格可比**
+    // 那一条：两格各自拿自己的 `sample_count` 当分母，所以「本班 50% 比年级 46% 长」
+    // 与右边两个百分比是同一件事——按最大值归一化时比出来是反的（见 helper 的注释）。
+    await expectScoreBandRows(classChart);
+    await expectScoreBandRows(gradeChart);
 
     const classTotal = await bandFootTotal(classChart);
     const gradeTotal = await bandFootTotal(gradeChart);
@@ -1592,6 +1677,117 @@ test.describe('Analytics report functions', () => {
     // 本班那张的人数与「班级样本质量」里「可评价样本」那一行同源（同一列 `sample_count`）。
     const tableCount = Number((await page.locator('.mini-table tr', { hasText: '可评价样本' }).locator('td').innerText()).trim());
     expect(classTotal).toBe(tableCount);
+  });
+
+  /**
+   * §5.17 的那条产品目标本身：「**这是同一个业务指标，只是统计范围不同**」。
+   *
+   * 上面两条用例各自验的是「这一页自己是自洽的」——`expectScoreBandRows` 断档序、断
+   * 人数与比例同排、断条长与比例同源，一条都不跨页。而 §5.17.1 要的结果恰好是**跨页**的：
+   * 读者在两页上看到的必须是同一个指标的两种统计范围，而不是两种统计。所以这一条把两页
+   * 各打开一次、把同一批事实读回来**互相比**。
+   *
+   * **互相比而不是各自断一个期望值**：各断一个值只能证明「两页此刻分别长这样」，
+   * 证明不了「它们一致」——两页各写死一套颜色时，两边都能过。这与 §32 那条
+   * 「两个页面相互比」是同一个写法（那一次是效度复测的人数）。
+   *
+   * 两条刻意不断：
+   *  · **不断两页的条长相等**——两页的分母本来就不同（可评价样本 48 人对 6 人），
+   *    条长按占比画，跨页相等既不可能也没意义。可比性由 helper 第 4 条在**页内**保证。
+   *  · **不断班级页的 `.band-scope-name`**——§5.17.4 允许的差异：班级上下文留在
+   *    `h3.band-cell-title` 里（「本班 · 初二（3班）」），所以那两格**不传** `scope-label`，
+   *    只出「可评价 N 人」半句。断它反了就是把允许的差异当成违规。
+   */
+  test('both report pages show the same level distribution, only the scope differs', async ({ page }) => {
+    /**
+     * 把「每一档的三件可读事实」读一遍：档名、人数、比例文本，外加条的背景色
+     * （0 人的那一档没有条，那时颜色是 `null`）。
+     *
+     * **必须在还停在这一页上的时候读。** Playwright 的 locator 是**惰性**的——
+     * `page.locator('.band-chart')` 描述的是「**当前这一页**上的所有 `.band-chart`」，
+     * 而不是「我写下这行时所指向的那一个」。第一版把两处 `facts()` 都写在第二次
+     * `goto` 之后，于是「概览那一份」读到的是**班级页的 DOM**（那一页有两个格子、
+     * 6 行），红在 `toEqual` 上显示成「6 个档名对 3 个」，而两页看起来都对。
+     */
+    async function facts(chart: Locator) {
+      const rows = chart.locator('.band-row');
+      const out: Array<{ label: string; count: number; rate: string; color: string | null }> = [];
+      for (let i = 0; i < await rows.count(); i++) {
+        const row = rows.nth(i);
+        const bar = row.locator('.band-bar');
+        out.push({
+          label: (await row.locator('.band-label').innerText()).trim(),
+          count: Number((await row.locator('.band-count strong').innerText()).trim()),
+          rate: (await row.locator('.band-rate').innerText()).trim(),
+          color: await bar.count() ? await bar.evaluate((node) => getComputedStyle(node).backgroundColor) : null
+        });
+      }
+      return out;
+    }
+
+    /**
+     * 人数与比例两格**都在这一行里看得见**（§5.17.3 第 3、4 条：两个数都要能直接读到，
+     * 不依赖悬浮层）。`expectScoreBandRows` 里的 `toHaveText` 对不可见的元素也成立，
+     * 所以「读得到」这件事只有 `toBeVisible` 能回答。
+     *
+     * 同 `facts()`：**必须在还停在这一页上的时候调**，理由见上。
+     */
+    async function expectBandValuesVisible(chart: Locator) {
+      const rows = chart.locator('.band-row');
+      await expect(rows).toHaveCount(3);
+      for (const i of [0, 1, 2]) {
+        await expect(rows.nth(i).locator('.band-count')).toBeVisible();
+        await expect(rows.nth(i).locator('.band-rate')).toBeVisible();
+      }
+    }
+
+    // ---- 第一页：筛查关注概览 ----
+    await page.goto('/counselor/analytics/overview');
+    await expect(page.getByRole('heading', { name: '关注等级分布' })).toBeVisible();
+    const overviewChart = page.locator('.band-chart');
+    await expectScoreBandRows(overviewChart);
+    await expectBandValuesVisible(overviewChart);
+    // 范围名这一侧是必须的：这一页没有别的上下文说明「这 48 人是谁」，而 §9 那条
+    // 「口径要写进界面」在这里就是这一行字。
+    await expect(overviewChart.locator('.band-scope-name')).toHaveText('当前数据范围');
+    const overviewFacts = await facts(overviewChart);
+
+    // ---- 第二页：班级维度画像（本班那一格）----
+    await page.goto('/counselor/analytics/classes');
+    const card = page.locator('.band-card');
+    await expect(card.getByRole('heading', { name: '关注等级分布' })).toBeVisible();
+    const classChart = card.locator('.band-cell').nth(0).locator('.band-chart');
+    await expectScoreBandRows(classChart);
+    await expectBandValuesVisible(classChart);
+    const classFacts = await facts(classChart);
+
+    // ① 档名与**次序**逐条相同（§5.17.3 第 1 条）。三个中文都从 DOM 读回来再互相比，
+    //    不写死——写死的话这一条只证明「两页都渲染了这三个词」，证明不了「是同一个次序」，
+    //    而次序正是这一条要钉的东西（横向版按 `LEVEL_ORDER` 从重到轻）。
+    expect(classFacts.map(row => row.label)).toEqual(overviewFacts.map(row => row.label));
+    expect(overviewFacts.map(row => row.label)).toEqual(['重点关注', '需要关注', '一般观察']);
+
+    // ② 同一档的状态色相同（§5.17.3 第 2 条：用项目现有那一套，不新建第二套 Token）。
+    //    0 人的档两边都可能没有条，所以只在**两边都有条**的档上比；并且先证明真的比过
+    //    至少一档——一条一档都没进的循环在两边全是 0 时也是绿的（§测试注意：先证明有
+    //    东西可扫，再断言它干净）。
+    let comparedColors = 0;
+    for (const i of [0, 1, 2]) {
+      if (overviewFacts[i].color == null || classFacts[i].color == null) continue;
+      expect(classFacts[i].color).toBe(overviewFacts[i].color);
+      comparedColors++;
+    }
+    expect(comparedColors).toBeGreaterThan(0);
+
+    // ③ 两个数在**两页上都直接可见**，不靠悬浮层——已由上面两处
+    //    `expectBandValuesVisible(...)` 在各自那一页上断过（**不能挪到这里**：那两处的
+    //    定位器是惰性的，攒到最后再断会读到班级页的 DOM）。
+
+    // 比例那一格是**两种东西之一**（§11）：分母够大时是百分比，不够大时是「样本过小」。
+    // 这里把两页读回来的文本都在同一条正则上验一遍——两页的判据必须是同一句。
+    for (const row of [...overviewFacts, ...classFacts]) {
+      expect(row.rate).toMatch(/^(\d+(\.\d+)?%|样本过小)$/);
+    }
   });
 
   /**

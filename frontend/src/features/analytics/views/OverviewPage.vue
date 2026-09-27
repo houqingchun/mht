@@ -134,7 +134,11 @@ function reset() { report.value = null; error.value = ''; loading.value = false 
              在两处以为看到的是两种统计。 -->
         <h2 class="section-title">关注等级分布</h2>
         <p class="muted tiny">按总分区间分档，每名可评价学生只落一档，三档互不叠加；区间取自本次结果所用的量表评分规则版本。</p>
-        <ScoreBandBars :items="levelDistribution" :totals="totalBands" :total="sampleCount"/>
+        <!-- `layout="bars"`（2026-09-27 §5.17）：与班级维度画像那一处**同一个组件、同一套
+             等级顺序（重点关注 → 需要关注 → 一般观察）、同一套状态色**，两页的差别只有统计
+             范围——读者因此把它们认成同一个业务指标在两个范围上的两张表，而不是两种统计。
+             范围名用「当前数据范围」，与本页头部那句「汇总当前数据范围内的测评覆盖…」同词。 -->
+        <ScoreBandBars layout="bars" scope-label="当前数据范围" :items="levelDistribution" :totals="totalBands" :total="sampleCount"/>
       </section>
       <section class="card">
         <h2 class="section-title">测评完成情况</h2>
