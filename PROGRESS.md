@@ -5644,3 +5644,141 @@ border(2) 之后内容盒 **77.3px**，而「系统管理员」五个字需要 *
 
 **结论：`object-fit` 一个字不动**（§5.22.1A 第 3 条的 `cover`、`e2e/app.spec.ts:210` 的
 断死都保持不变）。下一版要再调视觉，走**换资产 + 保证主体四周余量**这条路。
+
+### 5.23 V2.0.1 发布终审专项：心晴品牌 Logo / Favicon 全站统一（待 AI Coding）
+
+> **用户已确认品牌方案。** 本节不是重新设计 UI，而是将已确认的品牌 Logo 正式落到所有现有品牌入口。
+>
+> 冻结资产：
+> - `frontend/src/assets/logo-xinqing.svg`：产品 Logo Mark（心 / 成长叶片 / 晴日 / 承托曲线的抽象组合）；
+> - `frontend/public/favicon.svg`：浏览器小尺寸专用图标。
+>
+> AI Coding **不得重绘、改 path、改色、改渐变、转位图或自行生成替代 Logo**。
+
+#### 5.23.1 品牌实现原则
+
+1. **Logo 图形与品牌文字分离。** SVG 只承载图形，不把“心晴”或副标题写进 SVG；
+2. 品牌文字继续使用现有动态 Branding：
+   - 登录页：`GET /api/v1/public/branding`；
+   - 登录后：现有 `settings.org.brand_name / brand_subtitle`；
+3. 因此学校后续修改品牌名/副标题时，不需要替换 Logo 文件，也不得为了 Logo 把品牌名硬编码成“心晴”；
+4. Logo 是产品品牌标识，不承载心理筛查、风险等级或诊断含义；
+5. 保持现有蓝绿主色体系，小面积暖黄色仅表示“晴 / 希望”，不得扩大成告警黄色。
+
+#### 5.23.2 必须处理的品牌位置
+
+AI Coding 先全仓搜索 `brand-mark`、`brand_name`、`brand_subtitle`、`favicon`、`logo`、`<title>`、manifest/icon 等相关位置，并回填实际命中清单。
+
+**A. 登录页 `LoginPage.vue`**
+- [ ] 将当前 `brand-mark` 的“品牌名首字方块”替换为 `logo-xinqing.svg`；
+- [ ] Logo Mark 与动态 `brand_name / brand_subtitle` 组成横向品牌锁定区；
+- [ ] 不把 Logo 塞进左侧 `login-illustration.svg`，两者职责独立；
+- [ ] Logo 建议视觉尺寸约 44～52px，具体以现有登录标题行高为准，不能压缩标题；
+- [ ] Logo 图片有明确可访问策略：旁边已有完整品牌文字时，Logo 作为装饰使用 `alt=""`，避免读屏重复朗读；
+- [ ] branding API 失败时继续显示现有 fallback “心晴 / 中学生心理测评与关怀平台”，Logo 仍可正常显示。
+
+**B. 登录后桌面侧栏 `AppLayout.vue`**
+- [ ] 将当前 `settings.org.brand_name.slice(0, 1)` 首字方块替换为 `logo-xinqing.svg`；
+- [ ] 保留动态品牌名、副标题、版本号；
+- [ ] Logo 建议约 36～42px，不得挤压侧栏导航；
+- [ ] 版本号仍来自现有 public branding endpoint，不写死；
+- [ ] 780px 以下侧栏隐藏时，不为了显示 Logo 新增一套移动端品牌栏；保持现有移动导航信息架构。
+
+**C. 浏览器 Favicon / 标签页 `frontend/index.html`**
+- [ ] 在 `<head>` 中显式加入 `<link rel="icon" type="image/svg+xml" href="/favicon.svg">`；
+- [ ] 使用 `frontend/public/favicon.svg`，不得直接拿复杂主 Logo 在 16×16 下硬缩；
+- [ ] 保留现有页面 `title` 和 description 语义，不为了 Logo 改产品定位；
+- [ ] 验证直接访问 `/login` 和登录后路由时浏览器图标均存在；
+- [ ] 若当前 Vite 构建/部署路径要求调整 favicon 引用，只允许调整引用路径，不修改 favicon 图形。
+
+**D. 其他实际 Logo 命中位置**
+- [ ] 全仓审计后，凡是**真正承担产品品牌 Logo 功能**的位置统一使用冻结 Logo Mark；
+- [ ] 普通头像首字、角色头像（“心/德/管/学”）、业务图标、状态图标**不是 Logo**，不得批量替换；
+- [ ] 专业报告若当前没有 Logo，不因本节强行新增报告页眉 Logo；如已有明确产品 Logo 占位，则统一资产；
+- [ ] 不修改用户上传/学校自有 Logo 机制（若实际代码存在），先记录冲突并遵循现有可配置品牌优先级。
+
+#### 5.23.3 Favicon 小尺寸守卫
+
+`favicon.svg` 是专门简化的小尺寸资产，不等同于主 Logo：
+- 16×16 / 32×32 下优先保证轮廓识别；
+- 不包含文字；
+- 不包含细小副标题；
+- 不增加阴影/复杂滤镜；
+- 浏览器浅色/深色标签栏都必须保持可辨认；
+- 不要求 favicon 与主 Logo 每一条内部细节完全相同，但品牌核心轮廓必须一致。
+
+#### 5.23.4 明确禁止项
+
+1. 不修改认证、RBAC、Session、Token；
+2. 不修改动态 Branding API / Settings 数据结构；
+3. 不把 `brand_name` 硬编码为“心晴”替代现有配置能力；
+4. 不把 Logo 画入登录插画；
+5. 不用 Emoji / 字符首字替代已冻结 Logo；
+6. 不引入第三方 Logo/Icon 库；
+7. 不生成第二套 Logo；
+8. 不新增 Logo 动画；
+9. 不把角色头像、导航图标全部改成 Logo；
+10. 不借机调整全局配色或 Design System；
+11. 不改变专业报告统计、权限或业务逻辑；
+12. 不增加 AI/诊断/预测相关品牌文案。
+
+#### 5.23.5 建议代码使用方式
+
+Vue 页面统一以静态资源 import 使用主 Logo，例如：
+
+```ts
+import xinqingLogo from '../assets/logo-xinqing.svg'
+```
+
+模板：
+
+```html
+<img class="brand-logo" :src="xinqingLogo" alt="" aria-hidden="true" />
+```
+
+具体相对路径按实际文件位置调整。不要复制 SVG 内联到多个 Vue 文件，避免未来出现多份 Logo 源。
+
+Favicon 由 `public/favicon.svg` 通过 `index.html` 引用，不从 Vue 运行时动态注入。
+
+#### 5.23.6 DoD
+
+- [ ] 回填全仓 Logo / favicon / brand-mark 审计命中清单；
+- [ ] 登录页首字品牌方块已替换为主 Logo；
+- [ ] AppLayout 桌面侧栏首字品牌方块已替换为主 Logo；
+- [ ] 浏览器标签页使用专用 favicon；
+- [ ] 动态品牌名/副标题/版本号全部保留；
+- [ ] branding API fallback 无回归；
+- [ ] 角色头像/业务图标未被误替换；
+- [ ] 375 / 768 / 1024 / 1440 无新增横向溢出；
+- [ ] 200% zoom 品牌区与登录操作仍可用；
+- [ ] Keyboard / Focus / Reduced Motion 无回归；
+- [ ] favicon 在 Chromium 实测可加载（HTTP 200，非 broken icon）；
+- [ ] `vue-tsc -b` 通过；
+- [ ] `npm run build` 通过；
+- [ ] Login / AppLayout / branding 定向 E2E 通过；
+- [ ] 全量 E2E 按当前 `workers:1` 权威口径通过；
+- [ ] Backend Tests 无回归；
+- [ ] 回填实际修改文件、测试结果、Commit SHA。
+
+#### 5.23.7 AI Coding 完成回填
+
+- 全仓品牌入口审计：
+- LoginPage：
+- AppLayout：
+- Favicon / index.html：
+- 其他实际 Logo 命中：
+- 动态 Branding 保留验证：
+- Fallback 验证：
+- 角色头像/业务图标误替换检查：
+- 四档响应式：
+- 200% Zoom：
+- Favicon Chromium：
+- `vue-tsc -b`：
+- `npm run build`：
+- 定向 E2E：
+- 全量 E2E：
+- Backend Tests：
+- 实际修改文件：
+- Commit SHA：
+- 遗留问题：无 / （只记录，不扩项）
+
