@@ -5645,7 +5645,7 @@ border(2) 之后内容盒 **77.3px**，而「系统管理员」五个字需要 *
 **结论：`object-fit` 一个字不动**（§5.22.1A 第 3 条的 `cover`、`e2e/app.spec.ts:210` 的
 断死都保持不变）。下一版要再调视觉，走**换资产 + 保证主体四周余量**这条路。
 
-### 5.23 V2.0.1 发布终审专项：心晴品牌 Logo / Favicon 全站统一（待 AI Coding）
+### 5.23 V2.0.1 发布终审专项：心晴品牌 Logo / Favicon 全站统一（已完成，2026-09-27）
 
 > **用户已确认品牌方案。** 本节不是重新设计 UI，而是将已确认的品牌 Logo 正式落到所有现有品牌入口。
 >
@@ -5670,32 +5670,32 @@ border(2) 之后内容盒 **77.3px**，而「系统管理员」五个字需要 *
 AI Coding 先全仓搜索 `brand-mark`、`brand_name`、`brand_subtitle`、`favicon`、`logo`、`<title>`、manifest/icon 等相关位置，并回填实际命中清单。
 
 **A. 登录页 `LoginPage.vue`**
-- [ ] 将当前 `brand-mark` 的“品牌名首字方块”替换为 `logo-xinqing.svg`；
-- [ ] Logo Mark 与动态 `brand_name / brand_subtitle` 组成横向品牌锁定区；
-- [ ] 不把 Logo 塞进左侧 `login-illustration.svg`，两者职责独立；
-- [ ] Logo 建议视觉尺寸约 44～52px，具体以现有登录标题行高为准，不能压缩标题；
-- [ ] Logo 图片有明确可访问策略：旁边已有完整品牌文字时，Logo 作为装饰使用 `alt=""`，避免读屏重复朗读；
-- [ ] branding API 失败时继续显示现有 fallback “心晴 / 中学生心理测评与关怀平台”，Logo 仍可正常显示。
+- [x] 将当前 `brand-mark` 的“品牌名首字方块”替换为 `logo-xinqing.svg`；
+- [x] Logo Mark 与动态 `brand_name / brand_subtitle` 组成横向品牌锁定区；
+- [x] 不把 Logo 塞进左侧 `login-illustration.svg`，两者职责独立；
+- [x] Logo 建议视觉尺寸约 44～52px，具体以现有登录标题行高为准，不能压缩标题；
+- [x] Logo 图片有明确可访问策略：旁边已有完整品牌文字时，Logo 作为装饰使用 `alt=""`，避免读屏重复朗读；
+- [x] branding API 失败时继续显示现有 fallback “心晴 / 中学生心理测评与关怀平台”，Logo 仍可正常显示。
 
 **B. 登录后桌面侧栏 `AppLayout.vue`**
-- [ ] 将当前 `settings.org.brand_name.slice(0, 1)` 首字方块替换为 `logo-xinqing.svg`；
-- [ ] 保留动态品牌名、副标题、版本号；
-- [ ] Logo 建议约 36～42px，不得挤压侧栏导航；
-- [ ] 版本号仍来自现有 public branding endpoint，不写死；
-- [ ] 780px 以下侧栏隐藏时，不为了显示 Logo 新增一套移动端品牌栏；保持现有移动导航信息架构。
+- [x] 将当前 `settings.org.brand_name.slice(0, 1)` 首字方块替换为 `logo-xinqing.svg`；
+- [x] 保留动态品牌名、副标题、版本号；
+- [x] Logo 建议约 36～42px，不得挤压侧栏导航；
+- [x] 版本号仍来自现有 public branding endpoint，不写死；
+- [x] 780px 以下侧栏隐藏时，不为了显示 Logo 新增一套移动端品牌栏；保持现有移动导航信息架构。
 
 **C. 浏览器 Favicon / 标签页 `frontend/index.html`**
-- [ ] 在 `<head>` 中显式加入 `<link rel="icon" type="image/svg+xml" href="/favicon.svg">`；
-- [ ] 使用 `frontend/public/favicon.svg`，不得直接拿复杂主 Logo 在 16×16 下硬缩；
-- [ ] 保留现有页面 `title` 和 description 语义，不为了 Logo 改产品定位；
-- [ ] 验证直接访问 `/login` 和登录后路由时浏览器图标均存在；
-- [ ] 若当前 Vite 构建/部署路径要求调整 favicon 引用，只允许调整引用路径，不修改 favicon 图形。
+- [x] 在 `<head>` 中显式加入 `<link rel="icon" type="image/svg+xml" href="/favicon.svg">`；
+- [x] 使用 `frontend/public/favicon.svg`，不得直接拿复杂主 Logo 在 16×16 下硬缩；
+- [x] 保留现有页面 `title` 和 description 语义，不为了 Logo 改产品定位；
+- [x] 验证直接访问 `/login` 和登录后路由时浏览器图标均存在；
+- [x] 若当前 Vite 构建/部署路径要求调整 favicon 引用，只允许调整引用路径，不修改 favicon 图形。
 
 **D. 其他实际 Logo 命中位置**
-- [ ] 全仓审计后，凡是**真正承担产品品牌 Logo 功能**的位置统一使用冻结 Logo Mark；
-- [ ] 普通头像首字、角色头像（“心/德/管/学”）、业务图标、状态图标**不是 Logo**，不得批量替换；
-- [ ] 专业报告若当前没有 Logo，不因本节强行新增报告页眉 Logo；如已有明确产品 Logo 占位，则统一资产；
-- [ ] 不修改用户上传/学校自有 Logo 机制（若实际代码存在），先记录冲突并遵循现有可配置品牌优先级。
+- [x] 全仓审计后，凡是**真正承担产品品牌 Logo 功能**的位置统一使用冻结 Logo Mark；
+- [x] 普通头像首字、角色头像（“心/德/管/学”）、业务图标、状态图标**不是 Logo**，不得批量替换；
+- [x] 专业报告若当前没有 Logo，不因本节强行新增报告页眉 Logo；如已有明确产品 Logo 占位，则统一资产；
+- [x] 不修改用户上传/学校自有 Logo 机制（若实际代码存在），先记录冲突并遵循现有可配置品牌优先级。
 
 #### 5.23.3 Favicon 小尺寸守卫
 
@@ -5742,43 +5742,43 @@ Favicon 由 `public/favicon.svg` 通过 `index.html` 引用，不从 Vue 运行�
 
 #### 5.23.6 DoD
 
-- [ ] 回填全仓 Logo / favicon / brand-mark 审计命中清单；
-- [ ] 登录页首字品牌方块已替换为主 Logo；
-- [ ] AppLayout 桌面侧栏首字品牌方块已替换为主 Logo；
-- [ ] 浏览器标签页使用专用 favicon；
-- [ ] 动态品牌名/副标题/版本号全部保留；
-- [ ] branding API fallback 无回归；
-- [ ] 角色头像/业务图标未被误替换；
-- [ ] 375 / 768 / 1024 / 1440 无新增横向溢出；
-- [ ] 200% zoom 品牌区与登录操作仍可用；
-- [ ] Keyboard / Focus / Reduced Motion 无回归；
-- [ ] favicon 在 Chromium 实测可加载（HTTP 200，非 broken icon）；
-- [ ] `vue-tsc -b` 通过；
-- [ ] `npm run build` 通过；
-- [ ] Login / AppLayout / branding 定向 E2E 通过；
-- [ ] 全量 E2E 按当前 `workers:1` 权威口径通过；
-- [ ] Backend Tests 无回归；
-- [ ] 回填实际修改文件、测试结果、Commit SHA。
+- [x] 回填全仓 Logo / favicon / brand-mark 审计命中清单；
+- [x] 登录页首字品牌方块已替换为主 Logo；
+- [x] AppLayout 桌面侧栏首字品牌方块已替换为主 Logo；
+- [x] 浏览器标签页使用专用 favicon；
+- [x] 动态品牌名/副标题/版本号全部保留；
+- [x] branding API fallback 无回归；
+- [x] 角色头像/业务图标未被误替换；
+- [x] 375 / 768 / 1024 / 1440 无新增横向溢出；
+- [x] 200% zoom 品牌区与登录操作仍可用；
+- [x] Keyboard / Focus / Reduced Motion 无回归；
+- [x] favicon 在 Chromium 实测可加载（HTTP 200，非 broken icon）；
+- [x] `vue-tsc -b` 通过；
+- [x] `npm run build` 通过；
+- [x] Login / AppLayout / branding 定向 E2E 通过；
+- [x] 全量 E2E 按当前 `workers:1` 权威口径通过；
+- [x] Backend Tests 无回归；
+- [x] 回填实际修改文件、测试结果、Commit SHA。
 
 #### 5.23.7 AI Coding 完成回填
 
-- 全仓品牌入口审计：
-- LoginPage：
-- AppLayout：
-- Favicon / index.html：
-- 其他实际 Logo 命中：
-- 动态 Branding 保留验证：
-- Fallback 验证：
-- 角色头像/业务图标误替换检查：
-- 四档响应式：
-- 200% Zoom：
-- Favicon Chromium：
-- `vue-tsc -b`：
-- `npm run build`：
-- 定向 E2E：
-- 全量 E2E：
-- Backend Tests：
-- 实际修改文件：
-- Commit SHA：
-- 遗留问题：无 / （只记录，不扩项）
+- 全仓品牌入口审计：`rg -n -g '!node_modules' -g '!dist' -e 'brand-mark|brand_name|brand_subtitle|favicon|logo|manifest|<title>' frontend/src frontend/index.html frontend/public e2e`。**真品牌入口三处**：`LoginPage.vue` 的 `.brand-mark`、`AppLayout.vue` 的 `.brand-mark`、`index.html` 的 `<head>`。**不是 Logo、一个字没动**：`SettingsPage.vue` 两条品牌配置项（管理端表单）、`useSettings.ts` 的 `FALLBACK` 品牌文字、`api.ts` 两个 Branding 类型、`styles.css` 里 `.brand-mark` 容器规则 ×2、`AppLayout.vue` 的 `.brand-name`/`.brand-sub`、`student-avatar`（学生**姓名首字**，4 处：`ProgressPage` / `CounselorWorkbenchPage` / `CasesPage` ×2）、侧栏 `.nav-icon` 的 `AppIcon` 业务图标（17 个图标位）、顶栏 `.avatar` 角色头像（心 / 德 / 管 / 学）。**`manifest` 全仓零命中**（没有 PWA manifest，故不涉及）。**专业报告页没有 Logo 占位**，按 §5.23.2 D 第 3 条不强行新增。
+- LoginPage：`.brand-mark` 内由「品牌名首字方块」换成 `<img class="brand-logo" :src="xinqingLogo" alt="" aria-hidden="true" />`（静态 import `../../assets/logo-xinqing.svg`，**只引用不内联**）。它与 `h1`（`branding?.brand_name || '心晴'`）+ `p`（`branding?.brand_subtitle || '中学生心理测评与关怀平台'`）同处 `.brand-row`，构成横向品牌锁定区；实测 48×48。左侧 `login-illustration.svg`（`.login-brand-art`）**一字未动**——插画是装饰、Logo 是品牌标识，职责独立（§5.23.2 A 第 3 条）。
+- AppLayout：`.brand-mark` 内同样换成 `img.brand-logo`（静态 import `../assets/logo-xinqing.svg`）。**动态品牌名 / 副标题 / 版本号三样一个都没动**：`.brand-name`（内含 `span.brand-version`）+ `.brand-sub` 原样，版本号仍来自 public branding endpoint。`navConfig` 的 `avatar: '心'/'德'/'管'/'学'` 与 `.nav-icon` 里的 `AppIcon` **未动**。
+- Favicon / index.html：`<head>` 中 `<title>` 之后显式加入 `<link rel="icon" type="image/svg+xml" href="/favicon.svg" />`。用的是 `frontend/public/favicon.svg` 那一枚**专用小尺寸资产**，没有拿主 Logo 在 16×16 下硬缩。`charset` / `viewport` / `description` / `title` **一字未动**（不为了 Logo 改产品定位）。Vite 把 `public/` 原样拷到产物根，所以 `/favicon.svg` 在 dev 与生产两条路上都成立——**没有调整任何引用路径**。
+- 其他实际 Logo 命中：**无**。全仓审计里唯一另一处「方块 + 文字」形状的是顶栏 `.avatar` 角色头像，它是**角色标识**（同一名老师换到别的角色会自动变字），不是产品 Logo，未动。`student-avatar` 是学生**姓名首字**，同理未动。
+- 动态 Branding 保留验证：`GET /api/v1/public/branding`（登录页）与 `settings.org.brand_name` / `brand_subtitle`（登录后）两条读取路径**一个字未改**；`brand_name` 未被硬编码为「心晴」（`|| '心晴'` 是既有的 fallback 文字，不是本次新增的硬编码）。既有的 `品牌区显示服务端下发的版本号…` 用例仍绿。
+- Fallback 验证：在既有用例 `branding 拉不到时登录页回落到默认品牌，登录表单照常可用` 里补了一句 `await expect(page.locator('.brand-row .brand-logo')).toBeVisible();` —— 断的是「文字回落之后**还有**品牌标识」，因为 Logo 是静态 import、与那个接口毫无关系。少了这一句，一个「拉不到就把整块品牌区藏起来」的实现也是绿的。
+- 角色头像/业务图标误替换检查：**新增一条独立 e2e**：`品牌 Logo 只落在品牌位，角色头像与导航图标没有被一起换掉`（`e2e/app.spec.ts:165`）。三半：① 侧栏 `.brand-mark img.brand-logo` 恰好 1 个；② 顶栏 `.avatar` 仍是**一个汉字**（`/^[心德管学用]$/`）且内部 `img, svg` 计数为 0；③ `.nav-icon` 里 0 个 `img.brand-logo`，且**先断** `.nav-icon svg.app-icon` 数量 > 0（否则第③半在一个不渲染图标的实现上空转）。**变异验证 2/2 全红、逐字节还原**：M1 把角色头像换成 Logo → 红在 `:174` 的 `toHaveText`；M2 把四处导航图标换成 Logo → 红在 `:179` 的 `toHaveCount(0)`。两次都 `cp -p` 落盘备份 + `cmp` 逐字节还原。
+- 四档响应式：375 / 768 / 1024 / 1440，login 与 app 两条路全部 `document.documentElement.scrollWidth === window.innerWidth`（无新增横向溢出）。375 档侧栏照旧收成底部导航栏，`.brand` 在 y:742，`mobileBrandBar` 计数为 0 ⇒ **未新增移动端品牌栏**（§5.23.2 B 最后一条）。全量 E2E 里那条 `四角色 × 四档视口：全部页面都不横向溢出，窄档底部导航仍在视口里` 一并通过。
+- 200% Zoom：1440×900 屏的 200% 缩放对布局等价于 720×450 视口。实测无横向溢出，`.brand-logo` 可见（48×48），`h1` 文本为「心晴」，账号框 / 密码框 / 提交按钮全部可见可用。定向里有 `200% zoom 等效视口下仍能完成登录` 一条。
+- Favicon Chromium：`<link rel="icon" type="image/svg+xml" href="/favicon.svg">`；`GET /favicon.svg` → **HTTP 200 `image/svg+xml`**；页面内 `new Image()` + `decode()` 成功（`naturalWidth/Height = 150×150`）⇒ **非 broken icon**。四条路由（`/login` / `/counselor/workbench` / `/counselor/cases` / `/counselor/data`）下 `<link rel=icon>` 均为 `/favicon.svg` 且直取 200。三条服务路径分别实测：① dev（vite :5173）② 单端口 `XLP_WEB_DIR=frontend/dist`（`TestClient(create_app())`，命中 `main.py` 的 SPA fallback 第 3 步）③ `deploy/windows/serve_frontend.py` 的 `resolve_static`。**三处既有的「前端没有 favicon」守卫全部只针对 `.ico`**（`main.py` 的 `favicon.ico` → 404、`test_web_serving.py::test_favicon_is_a_plain_404`、`test_serve_frontend.py` 的 `resolve_static(dist, "/favicon.ico") is None`），`/favicon.svg` 不受影响，三处**均未改动**且仍绿。
+- `vue-tsc -b`：**EXIT=0**。
+- `npm run build`：**✓ built in 1.11s**（180 modules）。`dist/index.html` 1.09 kB / `dist/assets/index-w70XWmKS.css` 73.85 kB / `dist/assets/index-60CQsBEi.js` 519.20 kB。`dist/favicon.svg` **567 B** 落地；`dist/index.html` 保留 `rel="icon"`；主 Logo 渐变特征色 `168FD8` 在产物 js 中出现 **1 次** ⇒ 被 Vite 内联为 data URI，`dist/assets/` 下**不**落地 `logo-xinqing.svg`（既有构建行为，见遗留问题②）。
+- 定向 E2E：**11 passed (4.2s)**（含 `design tokens reached the stylesheet`、`登录页是品牌视觉区 + 登录操作区，品牌区只承载装饰`、`品牌区显示服务端下发的版本号，375 上跟随品牌名隐藏且不溢出`、`200% zoom 等效视口下仍能完成登录`）；改完 `app.spec.ts` 之后新增用例与两条相邻 branding 用例复跑 **3 passed (2.3s)**。
+- 全量 E2E：**210 passed (4.3m)**（`npx playwright test --workers=1`，权威口径）。比上一版 209 多 1 条，正是本次新增的那条守卫。
+- Backend Tests：**871 passed / 0 failed / 549.71s**（`make test`）——**无回归**。5 条 warning 是既有的（`starlette.testclient` 弃用提示 + `analytics_service` / `export_service` 那两条已查清的笛卡尔积误报），本次未新增。
+- 实际修改文件：`frontend/src/features/auth/LoginPage.vue`、`frontend/src/app/AppLayout.vue`、`frontend/src/assets/styles.css`、`frontend/index.html`、`e2e/app.spec.ts`、`PROGRESS.md`。（冻结资产 `frontend/src/assets/logo-xinqing.svg` 与 `frontend/public/favicon.svg` 已在此前两次提交落地，本次**一个字节都没改**。）
+- Commit SHA：（见下一条「§5.23 收口提交」）
+- 遗留问题：**两条，只记录、不扩项**。① `styles.css:653` 的侧栏 `.brand-mark`（43×43 / radius 14 / `linear-gradient(145deg,#407ee8,#2095a0)`）被文件后部 `.brand-row` 区间那条**同名规则**（48×48 / radius 8 / `#142b45`）以**同优先级**覆盖，是一条**从未生效**的死规则——所以两处方块**当前实测同为 48×48 / `#142b45`**（`getComputedStyle` 量过）。本次按 §5.23.4 第 10 条**未动**：删它或改它会同时改动全局视觉层级，不属于「把 Logo 落到品牌入口」这一件事。② 主 Logo 被 Vite 内联成 data URI，`dist/assets/` 下因此**没有独立的 `.svg` 产物文件**可供别处引用——这是既有的构建行为，不是本次引入；若将来有第二处（如报告页眉）需要同一个 Logo，仍然走静态 import，不要去引用产物路径。
 

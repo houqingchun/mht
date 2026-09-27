@@ -3,6 +3,8 @@ import { computed, ref, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { getBranding, getMe, logout, type CurrentUser } from '../services/api'
 import { useSettings } from '../composables/useSettings'
+// 产品 Logo Mark（§5.23 冻结资产）。**只引用，不内联**（§5.23.4 第 7 条）。
+import xinqingLogo from '../assets/logo-xinqing.svg'
 import AppIcon from '../components/AppIcon.vue'
 import Modal from '../components/Modal.vue'
 import Toast from '../components/Toast.vue'
@@ -297,7 +299,12 @@ load()
   <div :class="['app-shell', { 'student-mode': isStudent }]">
     <aside class="sidebar">
       <div class="brand">
-        <div class="brand-mark">{{ settings.org.brand_name.slice(0, 1) }}</div>
+        <!-- 品牌方块：§5.23 起是冻结的 Logo Mark，不再是「品牌名首字」。
+             动态品牌名 / 副标题 / 版本号三样一个都没动（§5.23.2 B）——Logo 换的只是
+             图形，学校改名之后这里跟着变的那两行字仍然来自配置。 -->
+        <div class="brand-mark">
+          <img class="brand-logo" :src="xinqingLogo" alt="" aria-hidden="true" />
+        </div>
         <div>
           <!-- 版本号紧挨品牌名（V2.0.1 用户要求：让使用者在系统内能看到当前版本）。
                它是**一行字**而不是一枚按钮、不带任何交互；取不到时整枚不渲染

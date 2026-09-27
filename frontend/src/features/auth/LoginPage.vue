@@ -2,6 +2,10 @@
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { getBranding, login, type Branding, type Role } from '../../services/api'
+// 产品 Logo Mark（§5.23 冻结资产）。**只引用，不内联**——SVG 本体不得重绘 / 改色 /
+// 转位图（§5.23 顶栏与 §5.23.4 第 7 条）。它与左侧 `login-illustration.svg` 是两件
+// 东西：插画是装饰，Logo 是品牌标识，职责独立（§5.23.2 A 第 3 条）。
+import xinqingLogo from '../../assets/logo-xinqing.svg'
 
 const router = useRouter()
 // The login screen must show the school's name before anyone is authenticated,
@@ -161,7 +165,13 @@ async function submit() {
 
         <section class="login-panel">
           <div class="brand-row">
-            <div class="brand-mark">{{ (branding?.brand_name || '心').slice(0, 1) }}</div>
+            <!-- 品牌锁定区（§5.23.2 A）：Logo Mark + 动态品牌名 / 副标题。
+                 `alt=""` + `aria-hidden="true"` 是有意的——紧挨着就是一个讲全了的
+                 `h1` + 副标题，Logo 再被念一遍是重复信息，而图形里没有文字可念。
+                 branding 拉不到时这一块照旧渲染（Logo 不依赖接口，只有文字走 fallback）。 -->
+            <div class="brand-mark">
+              <img class="brand-logo" :src="xinqingLogo" alt="" aria-hidden="true" />
+            </div>
             <div>
               <h1>{{ branding?.brand_name || '心晴' }}</h1>
               <p>{{ branding?.brand_subtitle || '中学生心理测评与关怀平台' }}</p>

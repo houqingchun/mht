@@ -148,6 +148,38 @@ test.describe('Authentication', () => {
   });
 
   /**
+   * §5.23.4 第 9 条：**角色头像、导航图标不是 Logo，不得批量替换**。
+   *
+   * 它与上面那两条问的是相反方向的同一件事：那两条问「品牌位里是不是那个 Logo」，
+   * 这一条问「**别的**位置有没有被一起换成 Logo」。一次「全站把首字方块换成 Logo」
+   * 的重构能通过上面每一条断言，只在角色头像上坏掉——而角色头像与品牌方块**长得
+   * 几乎一样**（都是方块 + 一个「心」字），所以它是最容易被顺手换掉的那一处。
+   *
+   * 三半各盯一处，且都断「不是那个东西」而不是「是哪个东西」：
+   * ① 侧栏品牌位里恰好一个 `img.brand-logo`（§5.23.2 B 那个落点）；
+   * ② 顶栏角色头像仍是**一个汉字**、里面没有任何图形元素——它是角色标识
+   *    （心 / 德 / 管 / 学），换掉之后四种角色在顶栏就全长得一样了；
+   * ③ 导航图标位里没有品牌 Logo。业务图标自己的形状归 `图标走 AppIcon 的 SVG`
+   *    那一条守，这里只守「别混进 Logo」。
+   */
+  test('品牌 Logo 只落在品牌位，角色头像与导航图标没有被一起换掉', async ({ page }) => {
+    await loginAs(page, 'counselor');
+
+    // ① 品牌位：就是 §5.23.2 B 那一处
+    await expect(page.locator('.brand-mark img.brand-logo')).toHaveCount(1);
+
+    // ② 角色头像：仍是一个汉字，且里面没有图形。
+    const avatar = page.locator('.avatar').first();
+    await expect(avatar).toBeVisible();
+    await expect(avatar).toHaveText(/^[心德管学用]$/);
+    await expect(avatar.locator('img, svg')).toHaveCount(0);
+
+    // ③ 导航图标位：不掺品牌 Logo（先证明那里真的渲染了图标，否则下面那句空转）。
+    expect(await page.locator('.nav-icon svg.app-icon').count()).toBeGreaterThan(0);
+    await expect(page.locator('.nav-icon img.brand-logo')).toHaveCount(0);
+  });
+
+  /**
    * §5.22.3 / §5.22.5：桌面是「品牌视觉区 + 登录操作区」（≈55:45），≤900 收敛成单栏。
    *
    * 三段判据各盯一个面，**放一起是有意的**：它们说的是同一句话「品牌区只是装饰，
@@ -357,6 +389,11 @@ test.describe('Authentication', () => {
 
     await expect(page.getByRole('heading', { level: 1 })).toHaveText('心晴');
     await expect(page.getByText('中学生心理测评与关怀平台')).toBeVisible();
+    // **Logo 不跟着回落**（§5.23.2 A 最后一条）：它是一个静态 import，与这个接口
+    // 一点关系都没有。所以上面那两行断的是「文字回落成了什么」，这一行断的是
+    // 「回落之后还有没有品牌标识」——两件事，少了这一行，一个「拉不到就把整块
+    // 品牌区藏起来」的实现也是绿的。
+    await expect(page.locator('.brand-row .brand-logo')).toBeVisible();
     // 隐私与筛查边界说明是 §5.22.6 明确禁止删除的那一块，品牌回落不该波及它。
     await expect(page.getByText('不等同于医学诊断')).toBeVisible();
 
