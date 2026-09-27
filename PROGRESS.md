@@ -3010,12 +3010,13 @@ error: failed to push some refs to 'github.com:houqingchun/mht.git'
 ```
 
 `git push` 把裸名 `V2.0.0` 同时解析成 `refs/heads/V2.0.0` 与 `refs/tags/V2.0.0`，两个都匹配
-就拒绝猜。所以上面第 ② 行那次成功是**有前提的**：那时 tag 还没建出来。以后往这条分支推
-必须写全长 refspec——
+就拒绝猜。所以上面第 ② 行那次成功是**有前提的**：那时 tag 还没建出来。
 
-```
-git push origin refs/heads/V2.0.0:refs/heads/V2.0.0
-```
+**出路两条，都实测过**：① 不带参数的 **`git push`** ——它走的是 upstream 配置
+（`V2.0.0@{upstream}` = `origin/V2.0.0`，`push.default` 是默认的 `simple`），
+**不解那个裸名**，所以照常可用（`git push --dry-run` 回 `Everything up-to-date`）；
+② 要显式写的话就得写全长 `git push origin refs/heads/V2.0.0:refs/heads/V2.0.0`
+——**别把 `origin V2.0.0` 这个写法记成能用的**，它正是失败的那一条。
 
 标签同理用 `refs/tags/V2.0.0`（或 `tags/V2.0.0`）；`git checkout V2.0.0` 之类的**读**也会
 报 `refname 'V2.0.0' is ambiguous`。这与 `V1.1.3` 的处境**逐字相同**，不是这一次新引入的
