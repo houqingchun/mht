@@ -2998,9 +2998,28 @@ origin/V2.0.0...HEAD` = **`0 17`**——远端**一个提交都没有**、我们
 （它仍是 `ee860ea` V1.0.0），也没有把 `V2.0.0` 合并进去。
 
 **tag 的形式与既有的两个一致**：仓库里原有 `v1.0.0` 与 `V1.1.3` 都是**附注标签**、消息就是
-那串版本名，所以 `V2.0.0` 照同一形状打。**tag 名与分支名同名**，因此 `git checkout V2.0.0`
-之类的写法会报 `refname 'V2.0.0' is ambiguous`——要指标签就用 `refs/tags/V2.0.0`（或
-`tags/V2.0.0`）。这与 `V1.1.3` 的处境**逐字相同**，不是这一次新引入的。
+那串版本名，所以 `V2.0.0` 照同一形状打。
+
+**★ tag 名与分支名同名：`git push origin V2.0.0` 在打了 tag 之后会当场失败。** 这条
+2026-09-27 实测撞到过——**同一条命令在打 tag 之前是好的、之后就不是了**：
+
+```
+$ git push origin V2.0.0
+error: src refspec V2.0.0 matches more than one
+error: failed to push some refs to 'github.com:houqingchun/mht.git'
+```
+
+`git push` 把裸名 `V2.0.0` 同时解析成 `refs/heads/V2.0.0` 与 `refs/tags/V2.0.0`，两个都匹配
+就拒绝猜。所以上面第 ② 行那次成功是**有前提的**：那时 tag 还没建出来。以后往这条分支推
+必须写全长 refspec——
+
+```
+git push origin refs/heads/V2.0.0:refs/heads/V2.0.0
+```
+
+标签同理用 `refs/tags/V2.0.0`（或 `tags/V2.0.0`）；`git checkout V2.0.0` 之类的**读**也会
+报 `refname 'V2.0.0' is ambiguous`。这与 `V1.1.3` 的处境**逐字相同**，不是这一次新引入的
+——但它是**写**命令上第一次真的撞到，所以记在这里而不是留在「知道有这回事」。
 
 **★ tag 打的是源码，不是交付包。** §5.14.7.5 第 1 条记着的那件事在这里更要紧：`V2.0.0`
 标签指向的是 `af50823` 这棵树（前端源码含 §5.14 全部改动），而磁盘上那个
