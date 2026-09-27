@@ -5779,6 +5779,6 @@ Favicon 由 `public/favicon.svg` 通过 `index.html` 引用，不从 Vue 运行�
 - 全量 E2E：**210 passed (4.3m)**（`npx playwright test --workers=1`，权威口径）。比上一版 209 多 1 条，正是本次新增的那条守卫。
 - Backend Tests：**871 passed / 0 failed / 549.71s**（`make test`）——**无回归**。5 条 warning 是既有的（`starlette.testclient` 弃用提示 + `analytics_service` / `export_service` 那两条已查清的笛卡尔积误报），本次未新增。
 - 实际修改文件：`frontend/src/features/auth/LoginPage.vue`、`frontend/src/app/AppLayout.vue`、`frontend/src/assets/styles.css`、`frontend/index.html`、`e2e/app.spec.ts`、`PROGRESS.md`。（冻结资产 `frontend/src/assets/logo-xinqing.svg` 与 `frontend/public/favicon.svg` 已在此前两次提交落地，本次**一个字节都没改**。）
-- Commit SHA：（见下一条「§5.23 收口提交」）
+- Commit SHA：`5ca7af9`（`feat(brand): §5.23 品牌 Logo 落到登录页 / 侧栏 / favicon，并加一条守卫`，已 push 到 `origin/V2.0.1`）。
 - 遗留问题：**两条，只记录、不扩项**。① `styles.css:653` 的侧栏 `.brand-mark`（43×43 / radius 14 / `linear-gradient(145deg,#407ee8,#2095a0)`）被文件后部 `.brand-row` 区间那条**同名规则**（48×48 / radius 8 / `#142b45`）以**同优先级**覆盖，是一条**从未生效**的死规则——所以两处方块**当前实测同为 48×48 / `#142b45`**（`getComputedStyle` 量过）。本次按 §5.23.4 第 10 条**未动**：删它或改它会同时改动全局视觉层级，不属于「把 Logo 落到品牌入口」这一件事。② 主 Logo 被 Vite 内联成 data URI，`dist/assets/` 下因此**没有独立的 `.svg` 产物文件**可供别处引用——这是既有的构建行为，不是本次引入；若将来有第二处（如报告页眉）需要同一个 Logo，仍然走静态 import，不要去引用产物路径。
 
