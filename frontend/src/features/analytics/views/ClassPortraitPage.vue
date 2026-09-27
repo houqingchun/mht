@@ -174,6 +174,14 @@ function reset() {
           </table>
         </div>
       </section>
+      <!-- **不给 `tier-primary`，与上面那三张卡一样**（§5.15 UX-FINAL-01）：
+           这一格是这一页唯一带动作的地方（保存草稿），照「谁在干活谁是主工作区」
+           它本可以拿 Primary，但它**不是**——两点：①它落在右半栏（`.bottom-grid`
+           的 1:1.5），一条通栏强调条在窄栏里会读成「这一块是主角」，而用户来这一页
+           要的是上面那份班级数据；②它的产物是**本设备浏览器里的草稿**（`save()`
+           写 localStorage，下面那行 `role="status"` 就是这句话），不落库、不进任何
+           流程，把它提成主工作区会与「班级画像」这四个字对不上。
+           这条同样适用于另外三张分析页（见 `DimensionsPage.vue` 同一处的注释）。 -->
       <section class="card">
         <h2 class="section-title">心理老师专业研判</h2>
         <div class="factbox">统计事实：本班各维度高分比例与同年级对比，差异仅为描述性统计。</div>

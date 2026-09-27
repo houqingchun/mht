@@ -243,7 +243,10 @@ onMounted(load)
 
     <template v-if="!loading && !error">
       <!-- 学生导入 -->
-      <section class="card pad">
+      <!-- `tier-primary`：这一页唯一的主工作区。它承载这一页**唯一一个改服务端
+           状态的主操作**（预览面板里那枚「确认导入」，§5.14.6 第 5 条），而下面
+           两块分别是结果集（学生列表）与回头看的历史（导入批次）。 -->
+      <section class="card pad tier-primary">
         <h2>学生导入</h2>
         <p>
           支持 CSV/JSON。选择文件后只做校验预览，确认后才写入数据库。
@@ -378,7 +381,10 @@ onMounted(load)
       </section>
 
       <!-- 导入批次历史。放在学生列表之后：它是**回头看**的东西，不是这一页的主任务。 -->
-      <section class="card" style="margin-top:17px">
+      <!-- `tier-supporting`：上面那句注释就是这一档的判据——「回头看的东西」
+           正是 §5.15.2 说的 Supporting Information（次要信息）。降的是它的
+           重量，不是它的可读性：标题与正文颜色一个字没动。 -->
+      <section class="card tier-supporting" style="margin-top:17px">
         <div class="card-head">
           <h2>导入批次</h2>
           <div class="toolbar">

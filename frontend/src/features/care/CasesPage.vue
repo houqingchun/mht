@@ -692,7 +692,17 @@ onMounted(load)
         </div>
       </div>
 
-      <div class="card">
+      <!-- `tier-primary`：这一页的主工作区**就是这张表**（「重点学生」这个页签
+           存在的全部意义是让人从里面挑一条点进去）。
+
+           上面那条筛选工具条（`.card.pad`）留在默认的二级层，不是漏了：它是**控件条**，
+           与它下面的结果集不是一个层级；两块都加重会变成「两个主区」，而这一页里
+           「唯一」的那一个只能是结果集。
+
+           两个页签各有一张自己的表卡（另一处在下面「全部学生」那一支里），但它们
+           落在互斥的 `v-if` 分支上，渲染时只出现一个——所以「同一页面最多一个
+           Primary」在任一时刻都成立。 -->
+      <div class="card tier-primary">
         <div class="card-body">
           <DataTable
             :columns="columns"
@@ -767,7 +777,8 @@ onMounted(load)
         :on-retry="loadStudents"
       />
 
-      <div v-if="!studentsLoading && !studentsError" class="card">
+      <!-- 「全部学生」页签的主工作区，理由与上面那张表逐字相同（两张卡互斥渲染）。 -->
+      <div v-if="!studentsLoading && !studentsError" class="card tier-primary">
         <div class="card-body">
           <DataTable
             :columns="studentColumns"

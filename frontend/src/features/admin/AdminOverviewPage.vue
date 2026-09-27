@@ -328,7 +328,10 @@ const launchChecklist = computed(() => {
         </article>
       </div>
 
-      <article class="card pad" style="margin-top: 17px">
+      <!-- `tier-primary`（§5.15 UX-FINAL-01）：这一页的主工作区是「待完成上线配置」
+           ——三张卡里只有它逐条给出**接下来要做什么**（每一行都带「去处理」）。
+           上面那两张（账号概况 / 系统与量表）是从 KPI 下钻的导航，不是工作区。 -->
+      <article class="card pad tier-primary" style="margin-top: 17px">
         <h2>待完成上线配置（{{ launchChecklist.length }} 项）</h2>
         <p class="muted tiny" style="margin: 6px 0 0">
           这里只列能从当前配置判定的项目。密钥一类的东西不在这里猜——界面看不到它们，

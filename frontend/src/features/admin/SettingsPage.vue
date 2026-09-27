@@ -153,7 +153,10 @@ onMounted(load)
 
       <p class="muted tiny" style="margin-bottom:14px">{{ currentTab.hint }}</p>
 
-      <div class="card pad">
+      <!-- `tier-primary`（§5.15 UX-FINAL-01）：这一页只有这一处工作区——配置表单
+           本身（按页签切换的那一组）。上面的页签栏与 `hint` 是它的导航，不是另一个
+           工作区。 -->
+      <div class="card pad tier-primary">
         <!-- 机构标识 -->
         <div v-if="activeTab === 'org'" class="settings-grid">
           <!-- 最后三项是学生端「我想找人聊聊」弹层里那三行，**出厂是空的**。

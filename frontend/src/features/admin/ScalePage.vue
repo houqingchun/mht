@@ -229,7 +229,10 @@ onMounted(load)
           </div>
           <div v-else class="empty">尚未导入任何量表版本</div>
         </div>
-        <div class="card pad">
+        <!-- `tier-supporting`（§5.15 UX-FINAL-01）：这一格是**口径说明**（历史答卷
+             保留计算时的题库与规则版本），不是工作区——它回答「我不必担心什么」，
+             不承载任何动作，所以走 Supporting 那一层。 -->
+        <div class="card pad tier-supporting">
           <h2>版本保护</h2>
           <div class="notice" style="margin-top:14px">
             历史答卷始终保留计算时的题库与规则版本，后续导入不会自动覆盖历史结果。
@@ -248,7 +251,10 @@ onMounted(load)
         style="margin-top:17px"
       />
 
-      <div class="card" style="margin-top:17px">
+      <!-- `tier-primary`（§5.15 UX-FINAL-01）：这一页的主工作区是「全部版本」这一张
+           表——草稿躺在这里，**发布按钮也在这里**（唯一的生命周期动作）。上面那块
+           题库导入产出的是草稿，是它的上游；两张只读卡是参考。 -->
+      <div class="card tier-primary" style="margin-top:17px">
         <div class="card-head">
           <h2>全部版本</h2>
           <span class="muted tiny">{{ versions.length }} 个版本</span>

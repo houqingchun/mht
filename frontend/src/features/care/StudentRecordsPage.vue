@@ -221,7 +221,11 @@ async function loadAnswers() {
       <!-- 最近一次。取的是 `assessment`（**算数的那一场**，要求 is_effective），
            不是 `history` 的最后一行：后者刻意含被 §18.8 降级过的那一场（那也是他真实
            考过的一次，趋势图上不该抹掉），所以两者在那些学生身上会分岔。 -->
-      <div class="card pad">
+      <!-- `tier-primary`（§5.15 UX-FINAL-01）：这一页的主工作区是「最近一次测评」
+           这一格——它是常驻的、也是这一页第一件要回答的事（「他现在是什么状态」），
+           与页头那句「本页只回答他考过几次、每次多少分」同一个取向。下面页签里的
+           趋势图与历次测评表是记录明细，走默认的二级层。 -->
+      <div class="card pad tier-primary">
         <h2>最近一次测评</h2>
         <div v-if="records.assessment.session_id === null" class="empty" style="margin-top:13px">
           这名学生还没有已交卷的测评。
@@ -344,7 +348,10 @@ async function loadAnswers() {
            措辞与建档判据同源：触发建档的是**重点题命中**，不是关注等级。所以这里写
            「重点题未命中」而不是「因为他只是一般观察」——后者会把两件不相干的事
            说成一个因果，而那正是用户看到这一屏时想问的那个问题。 -->
-      <div class="card pad" style="margin-top:17px">
+      <!-- `tier-supporting`（§5.15 UX-FINAL-01）：这一格是**口径说明**——「关注档案在
+           重点题答『是』时自动建立，关注等级本身不建档」那一段正是 Supporting 的第一类
+           （帮助说明）。它不是工作区，也不承载动作。 -->
+      <div class="card pad tier-supporting" style="margin-top:17px">
         <div class="toolbar" style="justify-content:space-between">
           <div>
             <template v-if="records.case_id === null">

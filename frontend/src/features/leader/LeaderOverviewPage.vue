@@ -273,7 +273,11 @@ onMounted(load)
            描述。此前顺序恰好相反（分布 → 年级 → 提醒），读者要滚过两块图才看见
            待办。 -->
       <div class="grid two" style="margin-top:17px">
-        <article class="card pad">
+        <!-- `tier-primary`：上面那两段注释已经把判据写全了——「左侧『管理提醒』
+             是这一页唯一一件**告诉读者接下来做什么**的事，右侧的年级条形图是背景」。
+             整个页面里只有它回答「我现在该做什么」，所以强调条给它。
+             与它并排的「年级完成与关注情况」留在默认的二级层（背景/描述性信息）。 -->
+        <article class="card pad tier-primary">
           <h2>管理提醒</h2>
           <!-- 三档渲染（见 script 里 `ManagementAlert` 那段注释）：有去处的
                `<button role="button">`，没有去处的普通 `<div>`。两者外观相同，

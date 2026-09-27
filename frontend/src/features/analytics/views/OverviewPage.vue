@@ -171,7 +171,11 @@ function reset() { report.value = null; error.value = ''; loading.value = false 
           </table>
         </div>
       </section>
-      <section class="card">
+      <!-- `tier-supporting`（§5.15 UX-FINAL-01）：这一格是**统计口径说明**（「本页…
+           不代表医学诊断」那四条），属于 Supporting Information 的第一类。它旁边的
+           图表与工作进展表走默认的二级层——分析页的头层由上面的 `.metric` / KPI 承担，
+           所以这里不给任何一块 `.tier-primary`（一页最多一个主工作区）。 -->
+      <section class="card tier-supporting">
         <h2 class="section-title">统计解释边界</h2>
         <div class="stat-boundary">
           ① 本页呈现当前所选任务的实际聚合统计，不代表医学诊断。<br/>

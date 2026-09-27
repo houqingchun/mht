@@ -190,7 +190,7 @@ e2e 数不变是因为它这一轮只动了注释（唯一那次红与被测代�
 
 **当前新增执行项：§5.15 UX-FINAL**（2026-09-27，范围已冻结）
 
-- [ ] UX-FINAL-01 全局视觉层级精修；
+- [x] UX-FINAL-01 全局视觉层级精修（**已完成**，2026-09-27，落地记录见 §5.15.7）；
 - [ ] UX-FINAL-02 关怀档案详情精修；
 - [ ] UX-FINAL-03 专业报告工作台精修；
 - [ ] 三项完成后 V2.0.0 UI/UX 正式收口，不再新增 UX-FINAL-04。
@@ -3215,15 +3215,21 @@ MySQL」，出包时重生成会**掩盖**「有人改了 `seed.py` 却没跑 `m
 
 **实施要求**
 
-- [ ] 在现有样式体系上补充三层视觉语义，不新建第二套 Design System：
-  - **Primary Workspace**：当前页面最重要的工作区域 / 当前动作；
-  - **Secondary Section**：普通业务列表、统计、趋势和辅助工作区；
-  - **Supporting Information**：口径、隐私说明、帮助说明和次要信息。
-- [ ] 优先通过现有 class / token 的有限扩展实现，禁止为了视觉精修大面积重写组件。
-- [ ] 同一页面最多只有一个明确的 Primary Workspace，避免所有 Card 都抢视觉焦点。
-- [ ] Supporting Information 降低视觉重量，但必须保持可读性与无障碍对比度。
-- [ ] 保持现有状态色语义；红色只用于真正需要警示的状态，不增加“风险排行榜”式视觉表达。
-- [ ] 保持 §5.14 已完成的 SVG Icon、Focus、Reduced Motion、响应式与 DataTable 行为不变。
+- [x] 在现有样式体系上补充三层视觉语义，不新建第二套 Design System：
+  - **Primary Workspace**：当前页面最重要的工作区域 / 当前动作 → `.card.tier-primary`；
+  - **Secondary Section**：普通业务列表、统计、趋势和辅助工作区 → **默认 `.card`，一个字节未改**；
+  - **Supporting Information**：口径、隐私说明、帮助说明和次要信息 → `.card.tier-supporting`
+    （行内的那些本来就是 `.hint` / `.helper-text` / `.minor` / `.page-desc`）。
+- [x] 优先通过现有 class / token 的有限扩展实现，禁止为了视觉精修大面积重写组件
+  （只加了两个修饰类 + 15 个页面的容器 class，`DataTable.vue` / `Modal.vue` / 路由 / 权限一个字未动）。
+- [x] 同一页面最多只有一个明确的 Primary Workspace，避免所有 Card 都抢视觉焦点
+  （逐页判据见 §5.15.7；`CasesPage` 的两处落在互斥 `v-if` 分支上，任一时刻只渲染一个）。
+- [x] Supporting Information 降低视觉重量，但必须保持可读性与无障碍对比度
+  （**降的是尺寸、内边距与阴影，不动对比度**：标题仍 `var(--navy)`、正文仍 `var(--text)`）。
+- [x] 保持现有状态色语义；红色只用于真正需要警示的状态，不增加“风险排行榜”式视觉表达
+  （强调条用中性的 `--navy2`，不用状态色）。
+- [x] 保持 §5.14 已完成的 SVG Icon、Focus、Reduced Motion、响应式与 DataTable 行为不变
+  （`DataTable.vue` 与 `Modal.vue` 零改动；e2e 的「无障碍契约」「布局完整性」两组全绿）。
 
 **主要涉及文件**
 
@@ -3232,11 +3238,16 @@ MySQL」，出包时重生成会**掩盖**「有人改了 `seed.py` 却没跑 `m
 
 **验收标准**
 
-- [ ] 核心页面可以明确区分 Primary / Secondary / Supporting 三层信息；
-- [ ] 不新增第二套颜色、圆角、阴影、字体 Token；
-- [ ] 不改变导航、路由、权限与页面业务结构；
-- [ ] 375 / 768 / 1024 / 1440 四档视口无新增横向溢出；
-- [ ] `prefers-reduced-motion`、键盘 Focus 与现有可访问性能力无回归。
+- [x] 核心页面可以明确区分 Primary / Secondary / Supporting 三层信息；
+- [x] 不新增第二套颜色、圆角、阴影、字体 Token
+  （颜色只用 `--navy2` / `--surface` / `--surface2` / `--line` 与三个既有的灰阶字面量
+  `#cbd8e6` / `#e6ecf2` / `#eef2f6`；阴影仍只用 `--shadow`；圆角仍只用 `--radius`；
+  字号仍只用 `--font-section-title` / `--font-body`）。**`:root` 一行未改。**
+- [x] 不改变导航、路由、权限与页面业务结构（22 条路由、`meta.role`、能力矩阵零改动）；
+- [x] 375 / 768 / 1024 / 1440 四档视口无新增横向溢出
+  （`vocabulary.spec.ts` 的「四角色 × 四档视口」全绿）；
+- [x] `prefers-reduced-motion`、键盘 Focus 与现有可访问性能力无回归
+  （`app.spec.ts` 的「无障碍契约」组全绿；那两个修饰类不含 `animation` / `transition`）。
 
 #### 5.15.3 UX-FINAL-02：关怀档案详情精修
 
@@ -3341,21 +3352,124 @@ MySQL」，出包时重生成会**掩盖**「有人改了 `seed.py` 却没跑 `m
 
 严格按以下顺序执行，每项独立验证，禁止三项一起大改后再回归：
 
-1. [ ] **UX-FINAL-01**：全局视觉层级精修；
+1. [x] **UX-FINAL-01**：全局视觉层级精修（2026-09-27，见 §5.15.7）；
 2. [ ] **UX-FINAL-02**：关怀档案详情精修；
 3. [ ] **UX-FINAL-03**：专业报告工作台精修；
-4. [ ] `vue-tsc -b` 通过；
-5. [ ] `npm run build` 通过；
-6. [ ] 相关 E2E 定向回归通过；
-7. [ ] 全量 E2E 按当前权威口径通过；
-8. [ ] Backend Tests 无回归；
-9. [ ] 375 / 768 / 1024 / 1440 四档核心页面无新增横向溢出；
-10. [ ] 键盘导航、Focus、Reduced Motion 无回归；
-11. [ ] 更新本 `PROGRESS.md` 的完成状态与 commit SHA；
+4. [x] `vue-tsc -b` 通过（UX-FINAL-01 收尾时跑过，退出码 0）；
+5. [x] `npm run build` 通过（定稿那次：`index-Cq1JRR6d.css` 67.60 kB / `index-BqfQ8iBP.js` 498.71 kB）；
+6. [x] 相关 E2E 定向回归通过（UX-FINAL-01 一次改全站视觉，定向范围就是全量，见第 7 条）；
+7. [x] 全量 E2E 按当前权威口径通过（**193 passed / 3.7m**，`workers: 1`，`EXIT=0`。
+   定稿后重跑一次，日志 `/tmp/xlp_e2e_uxfinal01.log`）；
+8. [x] Backend Tests 无回归（UX-FINAL-01 只碰 `.vue` 与 `.css`，跑一次确认：
+   **869 passed / 0 failed / 538.09s**，`EXIT=0`。日志 `/tmp/xlp_backend_test_20260927.log`）；
+9. [x] 375 / 768 / 1024 / 1440 四档核心页面无新增横向溢出（在 193 里）；
+10. [x] 键盘导航、Focus、Reduced Motion 无回归（在 193 里，「无障碍契约」组）；
+11. [x] 更新本 `PROGRESS.md` 的完成状态与 commit SHA（本节即该项）；
 12. [ ] **三项完成后 V2.0.0 UI/UX 正式收口，不再新增 UX-FINAL-04。**
 
 **实施原则**：优先做“信息组织与视觉表达”，不做“业务能力扩张”。任何实现如果需要新增后端业务模型、
 改变业务状态机或改变统计/评分口径，默认判定为**超出本节范围**，停止实现并在 PROGRESS.md 记录原因。
+
+#### 5.15.7 UX-FINAL-01 落地记录（2026-09-27）
+
+**结论：三层视觉层级已落到全站。改动面 = `styles.css` 里两个修饰类 + 16 个页面容器上的 22 处 class。
+零新增 Token、零组件重构、零 `.ts` 改动、零后端改动。**
+
+##### 一、`styles.css`：只加两个修饰类，`git diff` 全部落在同一个小节里
+
+| 层 | 选择器 | 表达方式 |
+|---|---|---|
+| **Primary Workspace** | `.card.tier-primary` | `border-color: #cbd8e6` + `box-shadow: var(--shadow), inset 0 3px 0 var(--navy2)` |
+| **Secondary Section** | `.card`（**逐字节未改**） | 就是全站既有那张卡，一行都没动 |
+| **Supporting Information** | `.card.tier-supporting` | `background: var(--surface2)`、`border-color: #e6ecf2`、`box-shadow: none`、更紧凑的 `.card-head` / `.card-body` 内边距、`h2` 降到 `var(--font-body)` |
+
+四条设计约束，每条都有一个具体的坑：
+
+1. **强调条用 `inset` 阴影，不用 `border-top`。** 全站是 `* { box-sizing: border-box }`，
+   一条 3px 的 `border-top` 会把内容盒压掉 3px、整页高度随之变化——那是「加了一个纯视觉的类，
+   却动了布局」。DoD 第 9 条（四档视口无溢出）正是在防这一类。
+2. **也没有用 `:before`。** 伪元素要定位上下文，而 `.card` 在多个页面上带着 `overflow: hidden`
+   （分析页那几张卡的 scoped 样式里就写着），一个绝对定位的伪元素配 `overflow: hidden` 会连带
+   裁掉 `.toolbar.action-menu` 的下拉面板。`inset` 阴影不参与盒模型，两个坑一起绕开。
+3. **强调条取中性色 `--navy2`（#1d4167），与 `.metric:before` 同族。** 它说的是「这里是主工作区」，
+   不是「这里成功 / 这里危险」——「一页一个主工作区」是一条**结构**声明，不该借用语义色。
+4. **Supporting 降重量靠背景、边框、阴影、内边距，不靠降对比度。** 实测：`--muted`（#647386）
+   落在 `--surface2`（#f8fafc）上是 4.63:1，勉强过 AA；这一层的字再调浅就会掉到 AA 以下。
+   「让次要信息看起来次要」不能以读不清为代价，所以这一档**一个文字颜色都没动**。
+
+**可核对的两件事**：`:root`（色板、`--radius`、`--shadow`、`--font-*`）**一行未改**；
+`.card` 的基础规则**逐字节未改**。`styles.css` 的全部改动落在 `.card h2` 与
+`/* ========== Metric tile ========== */` 之间——两个修饰类加一段中文理由注释，
+`rg -n 'tier-' frontend/src/assets/styles.css` 一眼看得完。
+
+##### 二、22 处落点（15 Primary / 7 Supporting，16 个文件）
+
+| 文件 | 层级 | 那一块是什么 |
+|---|---|---|
+| `care/CounselorWorkbenchPage.vue` | primary | 优先工作队列 |
+| 同上 | supporting | 工作边界口径 |
+| `care/CasesPage.vue` ×2 | primary | 「重点学生」与「全部学生」两张页签各自的表格卡（落在互斥的 `v-if` 分支里，同一时刻只渲染一张） |
+| `care/StudentRecordsPage.vue` | primary | 「最近一次测评」 |
+| 同上 | supporting | 建档案口径（「关注档案在重点题答『是』时自动建立」那一段） |
+| `admin/TasksPage.vue` | primary | 测评任务表（这一页唯一一张表） |
+| `admin/AdminSystemPage.vue` | primary | 账号台账 |
+| `admin/OrganizationPage.vue` | primary | 学生信息导入 |
+| 同上 | supporting | 导入批次历史 |
+| `admin/DataCenterPage.vue` | primary | MHT 测评记录导入 |
+| 同上 | supporting | 近期数据任务（从审计日志派生） |
+| `admin/AuditPage.vue` | primary | 审计表本身 |
+| `admin/ExportCenterPage.vue` | primary | 导出作业台账 |
+| `admin/ScalePage.vue` | supporting | 「版本保护」口径说明 |
+| 同上 | primary | 「全部版本」（**发布按钮在它里面**，唯一的生命周期动作） |
+| `admin/SettingsPage.vue` | primary | 配置表单 |
+| `admin/AdminOverviewPage.vue` | primary | 「待完成上线配置」（三张卡里只有它逐条给出接下来要做什么） |
+| `analytics/views/OverviewPage.vue` | supporting | 统计解释边界 |
+| `analytics/views/GradesPage.vue` | supporting | 专业解释提示 |
+| `leader/LeaderOverviewPage.vue` | primary | 管理提醒（左侧栏那两块是它的输入） |
+| `leader/ProgressPage.vue` | primary | 重点进展名单 |
+
+##### 三、三类判据（每一处都写成了就地注释）
+
+判据不是「这张卡长得重要」，而是**这一页的哪张卡承载它的动作**。三类：
+
+1. **「谁在干活，谁就是主工作区。」** 台账 / 表格 / 队列这一类承载页面唯一写动作的卡拿 Primary：
+   `AuditPage`、`ExportCenterPage`、`TasksPage`、`AdminSystemPage`、`CasesPage`、`ProgressPage`、
+   `ScalePage`「全部版本」、`SettingsPage`、`OrganizationPage`、`DataCenterPage`、`AdminOverviewPage`。
+2. **「回头看的、从别处派生出来的是 Supporting。」** 两条导入链路的批次历史、
+   `ScalePage` 的「版本保护」、`CounselorWorkbenchPage` 的「工作边界」。
+3. **「口径说明（为什么这么算 + 不做什么）是 Supporting。」** 分析页那两块
+   「统计解释边界 / 专业解释提示」与 `StudentRecordsPage` 的建档案口径。
+
+##### 四、刻意**不给** tier 类的页面（是判断，不是漏了）
+
+| 页面 | 为什么 |
+|---|---|
+| 学生端三页（`StudentHomePage` / `StudentHistoryPage` / `StudentAssessmentPage`） | §5.15.5 ⑭ 明令不重做学生端 UX（§5.14 已完成）。另有构造上的原因：`StudentHomePage` 全页没有 `class="card"`；后两页的 `card` 都在 `v-for` 里（重复行容器不可能承载「最多一个」的 Primary）。 |
+| `analytics/views/ClassPortraitPage.vue` 的「心理老师专业研判」 | 它是这一页唯一带动作的一格（保存草稿），**但没有提成 Primary**：它落在 `.bottom-grid` 的窄栏里，且产物是 localStorage 草稿（`save()` 不落库、不进任何流程）——提成主工作区会让「班级画像」这四个字对不上。理由写在那一处注释里。 |
+| 四张分析报表页（总览 / 年级 / 八维度 / 班级画像） | 它们的第一层由页头那一行 `.kpis` 承担，下面的卡全是「读的东西」。这条规则在 `OverviewPage.vue` / `DimensionsPage.vue` / `ClassPortraitPage.vue` **三处各写了一遍反向声明**（§3 的「反向的为什么不做也要写下来」）。 |
+| `care/CareCaseDetailPage.vue` | 留给 **UX-FINAL-02**。 |
+| `analytics/views/ReportExportPage.vue`、`analytics/components/ProfessionalReportList.vue`、`ProfessionalReportVersions.vue`、`leader/LeaderAnalyticsReportPage.vue` | 留给 **UX-FINAL-03**。 |
+| 共享子组件（`KpiCard` / `FilterBar` / `ReportPageHeader` / `ScaleRulePanel` / `DataTable` / `Modal`） | 它们是页面容器内部的零件，不是页面容器本身。给零件加层级标签，会在它被复用的每一处重复生效——那就成了「全页都强调」。 |
+
+##### 五、验证结果
+
+| 项 | 结果 |
+|---|---|
+| `npx vue-tsc -b` | 退出码 0 |
+| `npm run build` | 成功，`index-Cq1JRR6d.css` 67.60 kB / `index-BqfQ8iBP.js` 498.71 kB |
+| 全量 `make e2e` | **193 passed / 3.7m**（`workers: 1`，与 CI 同口径，`EXIT=0`） |
+| 四档视口无溢出 | 在 193 里（「四角色 × 四档视口」那一组） |
+| 无障碍契约 | 在 193 里（`aria-sort` / `aria-pressed` / `role=status` / `overflow` 锁 / `:focus-visible` 全绿） |
+| Backend Tests | 见 §5.15.6 第 8 项 |
+
+**UX-FINAL-01 没有新增 e2e 用例**——它一次改动全站视觉，所以「定向回归」的范围就是全量；
+新加一条只能断言某个 class 存在，而那种断言在「类加了但视觉没生效」时照样是绿的。
+
+**本项的唯一已知代价**（如实记，未修）：`.tier-supporting` 的紧凑内边距只写了
+`.card-head` / `.card-body` 两个选择器，而全站仍有若干 `.card.pad`（内边距写在自己的
+`padding` 上）。它们拿到的是背景与边框的降重，内边距不变——**不是坏掉，是这一档的降重
+在那几张卡上少了一半**。要收口得逐个改页面容器类，那正是 §5.15.5 第 13 条禁止的
+「为了改而改」，留给后续按需处理。
 
 ## 6. 关键文件
 

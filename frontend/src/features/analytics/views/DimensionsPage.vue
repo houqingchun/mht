@@ -192,6 +192,12 @@ async function exportValidityRetest() {
     <div class="role-note"><b>样本说明</b><span class="minor">不同分析口径须由心理老师确认。</span></div>
 
     <div class="twocol">
+      <!-- **不给 `tier-primary`，是有意的**（§5.15 UX-FINAL-01）：四张分析报表页
+           （总览 / 年级 / 八维度 / 班级画像）是同一条口径——页头由 `.kpis` 那一行
+           承担第一层，下面的卡片全是「读的东西」，没有哪一张是「在这里干活的地方」。
+           所以这条线上一个 Primary 都不给，两块口径说明（本页暂无）走 Supporting。
+           **不要**因为「这一张看起来更重要」就给它加一个 bar：一页最多一个主工作区，
+           而这里的主工作区在 KPI 那一行。 -->
       <section class="card">
         <h2 class="section-title">八维度分析</h2>
         <div class="inner-tabs">

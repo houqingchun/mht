@@ -763,7 +763,11 @@ onUnmounted(() => {
            卡片内部的疏密是第二件事（见 `.batch-fields.four` 与 `.conventions`）。
            次序也换了：题库导入只产出草稿（发布还归管理员），是偶尔做一次的事；而每次普查
            都要做的是测评记录导入。原先两栏并排时两张卡片一样宽，看不出这个主次。 -->
-      <div class="card pad">
+      <!-- `tier-primary`：这一页唯一的主工作区。上面那段注释自己写着这次改动的
+           目的——「原先两栏并排时两张卡片一样宽，看不出这个主次」，而主次正是
+           这一层要表达的东西：测评记录导入是每次普查都要做的那一件。
+           下面那张题库版本导入（偶尔做一次、只产出草稿）留在默认的二级层。 -->
+      <div class="card pad tier-primary">
         <h2>MHT测评记录导入</h2>
         <p class="muted tiny" style="margin-top:7px">
           CSV · 导入在其他平台完成的普查结果，按姓名、性别、年龄、年级、班级定位学生；
@@ -1118,7 +1122,11 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div class="card" style="margin-top:17px">
+    <!-- `tier-supporting`：这一块是**从审计日志派生**的参考信息（它自己的副标题
+           就写着「来自审计日志」），回答的是「最近谁做了什么」，不是这一页要做的
+           事。与它上面那块「导入批次」（可以点进去继续处理，属于业务列表）不同，
+           所以那一块留在默认的二级层。 -->
+    <div class="card tier-supporting" style="margin-top:17px">
       <div class="card-head">
         <h2>近期数据任务</h2>
         <span class="muted tiny">来自审计日志</span>

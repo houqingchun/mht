@@ -964,7 +964,12 @@ onMounted(load)
 
       <!-- 优先工作队列 + 本周提醒 -->
       <div class="grid main-side" style="margin-top:17px">
-        <article class="card">
+        <!-- `tier-primary`：这一页**唯一**的主工作区（§5.15.2「同一页面最多一个」）。
+             判据与上面那五张指标卡、下面那四块是什么关系：指标卡回答「整体什么水平」、
+             维度分布回答「集中在哪」、工作边界回答「我不做什么」——**只有这一块回答
+             「现在动手做什么」**，而工作台的全部目的就是这一句话。所以强调条给它，
+             其余全部留在默认的二级层。 -->
+        <article class="card tier-primary">
           <div class="card-head">
             <h2>优先工作队列</h2>
             <!-- 这一块是**预览**（旁边就是「查看全部」），所以行数要写出来：
@@ -1185,7 +1190,11 @@ onMounted(load)
           </div>
           <div v-else class="muted tiny" style="margin-top:16px">尚无已提交的测评数据。</div>
         </article>
-        <article class="card pad">
+        <!-- `tier-supporting`：这一块是**口径与边界说明**，正是 §5.15.2 给 Supporting
+             Information 举的第一个例子（「口径、隐私说明、帮助说明、次要信息」）。
+             它旁边的「主要维度分布」是业务统计，留在默认的二级层——两块并排时如果
+             长得一样重，读者会把「我不做什么」读成与「问题集中在哪」同级的信息。 -->
+        <article class="card pad tier-supporting">
           <h2>工作边界</h2>
           <div class="notice" style="margin-top:15px">
             量表仅用于筛查。量表结果、学校关注事件、人工复核和持续跟进分别保存，不生成医学诊断。

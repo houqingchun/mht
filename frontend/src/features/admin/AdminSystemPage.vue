@@ -848,7 +848,10 @@ onMounted(loadVersionLabel)
       <!-- 这一块此前**完全没有守卫**：加载中骨架与「暂无账号」同屏，失败时红条与
            「暂无账号」同屏。`SkeletonBlock` / `ErrorState` 两个组件本身都是对的，
            出问题的是调用方没让它们互斥。 -->
-      <section v-if="!loading && !error" class="card pad">
+      <!-- `tier-primary`：这一页的落点就是账号台账（权限矩阵那件事走页头那枚按钮
+           开弹层，不占卡片）。§5.14.5 改名之后这一页只剩「账号与权限」两件事，
+           而看得见的那一件是这一张表。 -->
+      <section v-if="!loading && !error" class="card pad tier-primary">
         <h2>账号管理</h2>
         <div class="toolbar">
           <div class="search-box">

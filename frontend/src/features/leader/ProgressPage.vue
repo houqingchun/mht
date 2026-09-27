@@ -108,7 +108,9 @@ onMounted(load)
     <SkeletonBlock v-if="loading" variant="table" :rows="5" />
     <ErrorState v-if="error && !loading" :message="error" :on-retry="load" />
 
-    <div class="card" v-if="!loading && !error">
+    <!-- `tier-primary`：这一页的主工作区是这份「重点进展」名单本身（它承载
+         筛选、下钻说明与逐行进展），上面那句遮蔽口径留在页头，不是卡片。 -->
+    <div class="card tier-primary" v-if="!loading && !error">
       <div class="card-body">
         <!-- 从总览那几张卡下钻过来时，这一条说明**当前筛的是什么**。少了它，
              读者看到的是一份被筛过的名单，而屏幕上没有任何东西说得出这件事

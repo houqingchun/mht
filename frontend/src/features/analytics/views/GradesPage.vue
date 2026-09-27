@@ -115,7 +115,10 @@ function reset() { report.value = null; error.value = ''; selectedDimCode.value 
             </tbody>
           </table>
         </section>
-        <section class="card">
+        <!-- `tier-supporting`（§5.15 UX-FINAL-01）：与总览页的「统计解释边界」同族
+             ——四条读图口径（「不生成年级心理健康排名」那一条就在这里），是辅助信息，
+             不是工作区。上面那些图表卡留在默认的二级层。 -->
+        <section class="card tier-supporting">
           <h2 class="section-title">专业解释提示</h2>
           <div class="tip-box">
             ① 年级差异必须同时查看样本量与覆盖率。<br/>

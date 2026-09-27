@@ -176,7 +176,10 @@ onMounted(load)
     <SkeletonBlock v-if="loading && !audits.length" variant="table" :rows="6" />
     <ErrorState v-if="error && !loading" :message="error" :on-retry="load" />
 
-    <div v-if="!error" class="card">
+    <!-- `tier-primary`（§5.15 UX-FINAL-01）：这一页的主工作区是这份审计表本身
+         ——筛选工具条与逐行轨迹都在同一张卡里，页头那两句口径说明留在 `.page-desc`
+         与 `.page-foot`，不是卡片。 -->
+    <div v-if="!error" class="card tier-primary">
       <div class="card-head">
         <div class="toolbar">
           <div class="search-box">

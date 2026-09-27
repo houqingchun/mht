@@ -945,7 +945,9 @@ onMounted(load)
     <SkeletonBlock v-if="loading" variant="table" :rows="3" />
     <ErrorState v-if="error && !loading" :message="error" :on-retry="load" />
 
-    <div class="card" v-if="!loading && !error">
+    <!-- `tier-primary`：这一页只有这一张表（测评任务的清单与它每一行的状态），
+         没有第二个候选。上面那条 `.page-head` 里的工具条留在页头，不是卡片。 -->
+    <div class="card tier-primary" v-if="!loading && !error">
       <div class="card-body">
         <DataTable
           :columns="columns"
