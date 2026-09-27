@@ -5223,6 +5223,111 @@ test.describe('心理老师工作台的行动优先', () => {
       page.locator('.page-head').getByRole('button', { name: '重新打开档案' })
     ).toBeEnabled();
   });
+
+  // ===== §5.18 心理老师连续工作体验：三条断点各一条守卫 =====
+  //
+  // 三条断的都是「两屏说的是不是同一件事」，所以判据一律**从界面上现取**、
+  // 一个数字都不写死（演示库是共享的，写死会在某一天红在一个与功能无关的地方）。
+
+  test('从队列切档进档案再返回，切过的状态档与地址栏都还在', async ({ page }) => {
+    await loginAs(page, 'counselor');
+    // 起点必须与目标不同：默认档是「今日待办」（`filter=today`），而这条要断的是
+    // 「**我切过的那一档**还在不在」。
+    await page.goto('/counselor/cases?filter=today');
+
+    const tabs = page.locator('button.queue-tab');
+    await expect(tabs).toHaveCount(7);
+    await expect(page.locator('.queue-tab.active')).toContainText('今日待办');
+    const startLabel = (await page.locator('.queue-tab.active').innerText()).trim();
+    const startFilter = new URL(page.url()).searchParams.get('filter');
+
+    // 挑一个**非空、且不是「全部」也不是起点**的档：
+    //  · 空的档点进去没有行可点，用例会停在半路；
+    //  · 「全部」是默认档，而默认档不往地址栏里塞参数（`setQueueFilter('all')`
+    //    会把 `filter` 删掉）；
+    //  · **起点那一档必须跳过**：点它等于没切，而这条用例断的正是「切过之后」。
+    //    （少了这一句，整条用例会退化成空转——变异验证时实测到过。）
+    const labels = (await tabs.allInnerTexts()).map(text => text.trim());
+    let pickedLabel: string | null = null;
+    for (let i = 0; i < labels.length; i += 1) {
+      if (labels[i].startsWith('全部') || labels[i] === startLabel) continue;
+      await tabs.nth(i).click();
+      await expect(page.locator('.queue-tab.active')).toContainText(labels[i]);
+      if ((await page.locator('tbody tr').count()) > 0) {
+        pickedLabel = labels[i];
+        break;
+      }
+    }
+    expect(pickedLabel, '没有一个非空的状态档，这条用例会退化成空转').not.toBeNull();
+
+    // 切档必须写进地址栏。此前它是一次裸赋值（只改内存里那个 ref），于是
+    // 进详情再返回时那一档就没了——而浏览器 Back 与刷新同样回不到它。
+    const filterKey = new URL(page.url()).searchParams.get('filter');
+    expect(
+      filterKey,
+      '切了状态档，地址栏里的 filter 却还是原来那个：这个档分享不出去，返回时也回不到它'
+    ).not.toBe(startFilter);
+
+    await page.locator('tbody tr').first().getByRole('button', { name: '查看档案' }).click();
+    await expect(page).toHaveURL(/\/counselor\/cases\/\d+$/);
+
+    await page.getByRole('button', { name: '返回列表' }).click();
+    await expect.poll(() => new URL(page.url()).searchParams.get('filter')).toBe(filterKey);
+    await expect(page.locator('.queue-tab.active')).toContainText(pickedLabel!);
+  });
+
+  test('直接打开档案详情或测评记录的地址，点「返回列表」不会离开应用', async ({ page }) => {
+    await loginAs(page, 'counselor');
+    const headers = await counselorHeaders(page);
+    const listed = await page.request.get('/api/v1/care-cases?limit=1', { headers });
+    await expectOk(listed, '这一条失去了取数的手段：GET /care-cases');
+    const items = (await listed.json()).data.items as Array<{ student_id: number }>;
+    expect(items.length, '一条档案都没有，这条用例会退化成空转').toBeGreaterThan(0);
+    const studentId = items[0].student_id;
+
+    // 收藏夹 / 分享链接 / 刷新：**整页加载**进来的，站内没有上一页
+    // （`history.state.back === null`），所以「返回列表」不能走 `router.back()`
+    // ——那会把用户退出整个应用（实测退到 `about:blank`，白屏）。
+    for (const path of [
+      `/counselor/cases/${studentId}`,
+      `/counselor/students/${studentId}/records`
+    ]) {
+      await page.goto(path);
+      const back = page.getByRole('button', { name: '返回列表' });
+      await expect(back, `${path} 上没有「返回列表」`).toBeVisible();
+      await back.click();
+      await expect.poll(() => new URL(page.url()).pathname).toBe('/counselor/cases');
+      // 而且要**真的**落在列表上：只把地址改掉、页面没跟上也是坏的。
+      await expect(page.locator('button.queue-tab')).toHaveCount(7);
+    }
+  });
+
+  test('工作台的指标卡点进去，名单人数与卡上那个数一致（切了负责人档也一样）', async ({ page }) => {
+    await loginAs(page, 'counselor');
+    await page.goto('/counselor/workbench');
+
+    const ownerTabs = page.locator('.owner-tabs .owner-tab');
+    await expect(ownerTabs).toHaveCount(3);
+    await ownerTabs.nth(1).click();
+    await expect(ownerTabs.nth(1)).toHaveClass(/active/);
+
+    // 用「逾期跟进」：四张卡里它对负责人档**最敏感**（数的是 `c.overdue`），
+    // 而负责人档只筛它下面那份队列、上面那几张卡一个数都不动。
+    // 「关注档案总数」断不出这条——它切前切后都是全集，改前改后都绿。
+    const card = page.locator('.metric', {
+      has: page.locator('.metric-label', { hasText: '逾期跟进' })
+    });
+    const onCard = await numberIn(card.locator('.metric-value'));
+    expect(onCard, '一张逾期档案都没有，这条用例会退化成空转').toBeGreaterThan(0);
+
+    await card.click();
+    // 深链**不带负责人档**：目的地不该比出发点的数字更窄（CLAUDE.md §11）。
+    await expect(page).toHaveURL(/\/counselor\/cases\?filter=overdue$/);
+    const listed = Number(
+      (await page.locator('.toolbar .row-select span').first().innerText()).match(/^(\d+)\s*人/)?.[1]
+    );
+    expect(listed, '列表说的人数与卡片上的数不一致').toBe(onCard);
+  });
 });
 
 test.describe('系统配置', () => {

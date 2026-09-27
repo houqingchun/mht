@@ -153,6 +153,28 @@ function setOwnerFilter(next: OwnerFilter) {
   router.replace({ query: nextQuery })
 }
 
+/**
+ * 切状态档。**必须和上面那个 `setOwnerFilter`、以及 `selectTab` 一样写回地址栏。**
+ *
+ * 这一处此前是裸赋值（`@click="queueFilter = tab.key"`），于是整页里只有它一个筛选器
+ * 不落进 URL——症状不是「刷新后档位丢了」（那要用户自己刷新才会碰到），而是**进个案详情
+ * 再返回时工作位置被重置**：详情页的「返回列表」走的是浏览器历史，回到的是上一次
+ * `router.replace` 那一刻的地址；而这一档从没写进去过，所以回来的是最初始的
+ * `?filter=today`。用户手上刚切到「待复核」（3 行），按返回看到的是「今日待办」（2 行），
+ * 而他自己的动作解释不了这个变化。
+ *
+ * 记的是 `filter`（工作台四张指标卡深链过来的就是它），`all` 时删掉该键——
+ * 与 `selectTab` 对默认页签的处理一致，默认档不往地址栏里塞参数。
+ */
+function setQueueFilter(next: string) {
+  if (queueFilter.value === next) return
+  queueFilter.value = next
+  const nextQuery = { ...route.query }
+  if (next === 'all') delete nextQuery.filter
+  else nextQuery.filter = next
+  router.replace({ query: nextQuery })
+}
+
 // ---------------------------------------------------------------------------
 // 「全部学生」页签：名册 + 每人最近一场测评结果
 //
@@ -634,7 +656,7 @@ onMounted(load)
             v-for="tab in QUEUE_TABS"
             :key="tab.key"
             :class="['queue-tab', { active: queueFilter === tab.key }]"
-            @click="queueFilter = tab.key"
+            @click="setQueueFilter(tab.key)"
           >
             {{ tab.label }}
           </button>

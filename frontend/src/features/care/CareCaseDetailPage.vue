@@ -12,6 +12,7 @@ import DimensionRadar from '../../components/DimensionRadar.vue'
 import ClassComparisonPanel from '../../components/ClassComparisonPanel.vue'
 import { showToast } from '../../services/toast'
 import { useSettings } from '../../composables/useSettings'
+import { useSafeBack } from '../../composables/useSafeBack'
 import { daysFromNow, formatDateTime, formatDuration, today } from '../../services/dates'
 import { deltaTone, latestScoreDelta, scoredPoints } from '../../services/trend'
 import {
@@ -391,6 +392,14 @@ async function loadComparison() {
   }
 }
 
+/**
+ * 「返回列表」。**不是裸 `router.back()`**：这一页的地址可以收藏、可以分享，
+ * 直接打开时没有站内上一页，裸 back 会把用户带出应用（白屏）。
+ * 兜底路径是重点学生列表——这一页的每一个入口都在那里（工作台四张指标卡深链到它）。
+ * 判据与「为什么不用 `history.length`」见 `composables/useSafeBack.ts`。
+ */
+const goBack = useSafeBack('/counselor/cases')
+
 /** 去这个学生的「测评记录」页——那条路不需要他有档案，所以它永远通。 */
 function openStudentRecords() {
   if (!detail.value) return
@@ -641,7 +650,7 @@ onMounted(loadComparison)
         </p>
       </div>
       <div class="actions">
-        <button class="btn" @click="router.back()">返回列表</button>
+        <button class="btn" @click="goBack">返回列表</button>
         <!-- 「测评记录」与档案页并列：这一页读的是**这份档案**（复核、跟进、复测），
              那一页读的是**这个学生的测评事实**（历次场次、维度分、班级对照）。
              两名老师在同一名学生上并行工作时，两条路都得走得通。 -->

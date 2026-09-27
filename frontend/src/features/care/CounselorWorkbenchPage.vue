@@ -510,14 +510,25 @@ async function openDetail(studentId: number) {
  * The filter value is a QUEUE_TABS key (a status code), not a display label —
  * passing the Chinese label silently landed on an unfiltered list.
  *
- * `owner` 一起带过去（§5.14.3 验收：「切换后列表、数量、空态一致」）。
- * 「查看全部」这件事此前只带状态档：一个把队列收在「我负责的」上的老师点进去，
- * 看到的是**全部负责人**的档案，「查看全部」这四个字于是把筛选器悄悄摘掉了。
- * 带上之后两屏说的是同一件事，而 `CasesPage` 认不出的值一律回退 `all`
- * （`normalizeOwnerFilter`），所以 `owner=all` 与不带它同义，只是更明确。
+ * **不带 `owner`**（2026-09-27 §5.18.4 改）。它此前带过，理由是「一个把队列收在
+ * 『我负责的』上的老师点进来，不该看到全部负责人的档案」——那条理由只对「查看全部」
+ * 一张卡成立，却加在了**五张**卡上，于是另外四张卡的数字被它们自己的目的地否证了。
+ * 实测（工作台切到 `?owner=mine`）：「逾期跟进」卡读 2、点进去列表读 **1 人**；
+ * 「待人工复核」卡读 3、点进去读 **2 人**。
+ *
+ * 判据是**卡片的数从哪来**：四张卡的计数全部从 `cases` 全域现算
+ * （`todayCount` / `overdueCount` / `pendingReviewCount` / `cases.length`），
+ * 一个都不套 `matchesOwner`——owner 档的 `aria-label` 是「按负责人筛选**队列**」，
+ * 它只筛它下面那份队列，上面那五张卡不受它影响（那句口径就写在模板里 owner 档
+ * 的下方）。**目的地不该比出发点的数字更窄。** 想按负责人看，列表页自己有那三档。
+ *
+ * 这与 CLAUDE.md §11 是同一条，而这一张卡此前已经犯过一次同样的错：它当时读
+ * `metrics.following`（跟进中的**档案**数），而它指向的「已逾期」队列按 `c.overdue`
+ * 筛——真实数据上一个读 10、一个 0 条。`setOwnerFilter` 那条 URL 往返不受影响：
+ * 工作台自己的 `?owner=` 照旧写进地址栏，`:96` 在 setup 时读回来。
  */
 function goCases(filter = 'all') {
-  router.push({ path: '/counselor/cases', query: { filter, owner: ownerFilter.value } })
+  router.push({ path: '/counselor/cases', query: { filter } })
 }
 
 /**

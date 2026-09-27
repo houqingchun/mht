@@ -26,6 +26,7 @@ import ErrorState from '../../components/ErrorState.vue'
 import Modal from '../../components/Modal.vue'
 import TrendChart from '../../components/TrendChart.vue'
 import ClassComparisonPanel from '../../components/ClassComparisonPanel.vue'
+import { useSafeBack } from '../../composables/useSafeBack'
 import {
   LEVEL_ORDER,
   SOURCE_ORDER,
@@ -51,6 +52,15 @@ import {
 
 const route = useRoute()
 const router = useRouter()
+
+/**
+ * 「返回列表」。**不是裸 `router.back()`**：这一页同样可以通过地址直接打开
+ * （`CasesPage` 的未建档行与档案页的「测评记录」都会跳到这里，而那两处的地址
+ * 都是可分享的），那时没有站内上一页，裸 back 会退出应用。兜底路径与
+ * `CareCaseDetailPage` 一致——两个入口一个在重点学生列表、一个在档案页，
+ * 而档案页的兜底也是它。判据见 `composables/useSafeBack.ts`。
+ */
+const goBack = useSafeBack('/counselor/cases')
 
 const records = ref<StudentAssessmentRecords | null>(null)
 const loading = ref(true)
@@ -210,7 +220,7 @@ async function loadAnswers() {
         </p>
       </div>
       <div class="actions">
-        <button class="btn" @click="router.back()">返回列表</button>
+        <button class="btn" @click="goBack">返回列表</button>
       </div>
     </div>
 
