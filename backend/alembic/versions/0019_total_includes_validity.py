@@ -26,14 +26,15 @@
 
 ## 为什么是纯 SQL 常量，不是 Python 里循环着改
 
-`deploy/build_migration_sql.py` 用**离线渲染**（`alembic upgrade 0012:head --sql`）生成
-`backend/sql/upgrade_from_v1_0_0.sql`，而离线模式下 `op.get_bind()` 是 `MockConnection`、
+`deploy/build_migration_sql.py` 用**离线渲染**（`alembic upgrade <起点>:head --sql`）生成
+`backend/sql/upgrade_from_*.sql`（写这条迁移时只有 `upgrade_from_v1_0_0.sql` 一份；现在是
+一份起点一个文件，见 CLAUDE.md §30），而离线模式下 `op.get_bind()` 是 `MockConnection`、
 它的 `execute()` 返回 `None`、下一句 `.fetchall()` 当场 `AttributeError`（`0013` / `0014`
 的 `_precheck()` 开头那句 `if context.is_offline_mode(): return` 就是为这件事写的）。
 **但 `op.execute("静态 SQL 字符串")` 在离线模式下原样吐进脚本**（`0015` 的 UPDATE 与
 `0017` 的三条 UPDATE 就在那份文件里）。所以这里一句 Python 循环都不能有：凡是需要的
 动态判断，都得交给 MySQL 自己的 `JSON_SET` / `JSON_LENGTH` / `SUBSTRING_INDEX` 表达式。
-`upgrade_from_v1_0_0.sql` 是手边没有能跑的 Python 的那台机器**唯一**的升级路。
+`upgrade_from_*.sql` 是手边没有能跑的 Python 的那台机器**唯一**的升级路。
 
 **整份脚本里一个 `%` 都不许有**：`op.execute` 把字符串交给 SQLAlchemy 的 `text()`，而
 pymysql 的 paramstyle 是 `pyformat`——一个字面 `%` 会被当成参数占位符。这就是版本号

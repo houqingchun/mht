@@ -35,7 +35,7 @@
 | `make reset-db` | 清空测评数据并重新种子（保留名册与账号） |
 | `make purge-demo` | 把 `seed-demo` 填进去的一切删干净，回到只有 `seed.py` 基线的状态。**仅用于开发库** |
 | `mysql … < backend/sql/reset_to_baseline.sql` | 清到「只有 admin + 基本配置」。给**别处的新环境**用，见 §16 |
-| `make db-upgrade-sql` | 重新渲染 `backend/sql/upgrade_from_v1_0_0.sql`（+ `dist/` 一份）。**改过 alembic 迁移就要跑**，见 §30 |
+| `make db-upgrade-sql` | 重新渲染**全部**交付基线的增量 SQL：`backend/sql/upgrade_from_v1_0_0.sql` 与 `upgrade_from_v1_1_6.sql`（+ `dist/` 各一份）。**改过 alembic 迁移就要跑**，见 §30 |
 | `make deploy-package` | 打 Windows 一键安装包 → `dist/心晴部署包_V<版本>.zip`。**在开发机上跑**，见 §18 |
 | `python backend/run_server.py` | 生产启动器（`chdir` + 日志轮转 + 数据库等待 + 崩溃重试）。计划任务跑的就是它 |
 | `make clean` | 清理编译产物 |
@@ -83,8 +83,8 @@ deploy/
     manual-migrate.ps1       只升数据库（不起服务、不碰程序文件），§30
     serve_frontend.py        只发前端时的静态服务器 + /api 反代（纯标准库）
     手工启动后端.bat 手工启动前端.bat  ★ 那个出路的两个入口。纯 ASCII（只有文件名是中文）
-    数据库增量升级.bat         ★ 停在 V1.0.0 的库要单独升时的那一枚。纯 ASCII，§30
-  build_migration_sql.py    生成 `backend/sql/upgrade_from_v1_0_0.sql`（`make db-upgrade-sql`，§30）
+    数据库增量升级.bat         ★ 库要单独升（而不是跟着一键安装升）时的那一枚。纯 ASCII，§30
+  build_migration_sql.py    生成 `backend/sql/upgrade_from_*.sql`，**一份起点一个文件**（`make db-upgrade-sql`，§30）
   README.md                  面向维护者：怎么重出包、加一个依赖要改哪两处
 ```
 
@@ -757,17 +757,18 @@ mysql -h HOST -u USER -p DB < backend/sql/reset_to_baseline.sql
 （`DEFAULT_RULE_CONFIG`）。在 SQL 里再抄一份必然漂移，而一份抄错的规则 JSON 会让那个库的评分
 与别处不同、且看不出来（§6：阈值随规则版本走）。**这是一条约定，不是没写完。**
 
-#### `sql/` 下现在有**四个**文件，分工不要混（2026-09-18 补，2026-09-20 加第三个，2026-09-21 加第四个）
+#### `sql/` 下现在有**五个**文件，分工不要混（2026-09-18 补，2026-09-20 加第三个，2026-09-21 加第四个，2026-09-27 加第五个）
 
 | 文件 | 建表吗 | 删行吗 | 改行吗 | 写行吗 | 谁用 |
 |---|---|---|---|---|---|
 | `reset_to_baseline.sql` | 不 | 删（清成基线） | 不 | 不 | 上面那张表 |
-| `schema_mysql8.sql` | **建**（34 张表，父先子后） | 不 | 不 | 不 | §18 的 `schema_prepared` 分工 |
-| `upgrade_from_v1_0_0.sql` | **改**（`0012 → 0018` 六条迁移的渲染） | 不 | 不 | 不 | §30：停在 V1.0.0 的库 |
+| `schema_mysql8.sql` | **建**（36 张表，父先子后） | 不 | 不 | 不 | §18 的 `schema_prepared` 分工 |
+| `upgrade_from_v1_0_0.sql` | **改**（`0012 → head` 的渲染） | 不 | 不 | 不 | §30：停在 V1.0.0 的库 |
+| `upgrade_from_v1_1_6.sql` | **改**（`0020 → head` 的渲染） | 不 | 不 | 不 | §30：停在 V1.1.6 的库（**一批客户库的起点**） |
 | `seed_mysql8.sql` | 不 | 不 | 不 | **写**（6 张表 105 行） | §31：自己建了空库、又跑不了 Python 的人 |
 
 前两份都是**手写并受静态守卫**（`test_sql_schema_matches_models.py` /
-`test_sql_reset_to_baseline.py`）；后两份**是生成的**（`deploy/build_migration_sql.py` +
+`test_sql_reset_to_baseline.py`）；后三份**是生成的**（`deploy/build_migration_sql.py` +
 `make db-upgrade-sql`、`deploy/build_seed_sql.py` + `make db-seed-sql`），守卫都是逐字节
 比对今天这棵树渲染出来的东西（§30 / §31）。**谁也不许手改它们**——改了下次重跑就没了，
 而且守卫会红。两份生成器有一处**关键不同**：前者是纯文件操作，后者要**连一台活着的
@@ -4249,10 +4250,10 @@ M2（让回访审计带上正文）、M3（真的把重点题授给德育领导�
 3. **`verification_status` 仍然没有读者**（缺口 11 未变）。阶段 8 没有碰它——四档处置
    那一列的唯一读点还是审计的 `detail`，而那一串 `detail` 仍然只有数据库看得见。
 
-### 30. 手工数据库增量升级：停在 V1.0.0 的库怎么升上来（2026-09-20）
+### 30. 手工数据库增量升级：停在旧交付基线的库怎么升上来（2026-09-20，2026-09-27 加第二个起点）
 
-**这一期不是功能，是一条交付路。** 客户的库停在 V1.0.0（`alembic_version = 0012`），
-而程序已经到 1.1.2——中间是六条迁移。一键安装包本来就会跑（升级模式的第 4 步），
+**这一期不是功能，是一条交付路。** 客户的库停在某个交付基线（`alembic_version` 说得出
+是哪一个），而程序已经往前走了几条迁移。一键安装包本来就会跑（升级模式的第 4 步），
 但那两条路各自会断：
 
 - 「只想先把库升上去，程序文件过一会儿再换」；
@@ -4265,23 +4266,52 @@ M2（让回访审计带上正文）、M3（真的把重点题授给德育领导�
 |---|---|---|
 | 一键安装（**推荐**） | 装得上 | 新包覆盖 → 双击「一键安装.bat」→ 第 4 步跑迁移 |
 | `数据库增量升级.bat` → `manual-migrate.ps1` | 装过的机器上，只想升库 | 双击，不起服务、不碰程序文件 |
-| `backend\sql\upgrade_from_v1_0_0.sql` | 目标机没有 venv / 起不了 Python | 拿这个文件到别处 `mysql < 它` |
+| `backend\sql\upgrade_from_*.sql` | 目标机没有 venv / 起不了 Python | 拿**自己起点那一份**到别处 `mysql < 它` |
 
-三条路都**只对 V1.0.0 的库跑一次**。
+**一份起点一个文件，拿哪一份看库的版本戳**（`SELECT version_num FROM alembic_version;`）：
+
+| 念出来是 | 起点 | 拿哪一份 |
+|---|---|---|
+| `0012_drop_care_case_unique` | V1.0.0 | `upgrade_from_v1_0_0.sql` |
+| `0020_total_excludes_validity` | V1.1.6 | `upgrade_from_v1_1_6.sql` |
+
+文件名由 `build_migration_sql.output_name(baseline)` 从起点标签派生，**不手写**。
+**两个都不是？先别执行**，把那一句的结果发回来。三条路都**只该执行一次**。
 
 #### 那份 SQL 是**生成的**，不是手写的（★ 谁也不许手改它）
 
-`deploy/build_migration_sql.py` 从**两份既有来源**现渲染：链上每条迁移的 `PRECHECKS`
-**常量本身**（按文件路径 import 出来）+ `alembic upgrade 0012:head --sql` 的离线渲染。
-它在这里一个字的 SQL 都不重写——**再抄一份就等于开出第二个出处**，两份会在某次改迁移
-之后各说各话，而它们看起来都对。所以它与 `schema_mysql8.sql` 同一个性质：快照，不是来源
-（§16 那张表现在是三行）。
+`deploy/build_migration_sql.py` 从**两份既有来源**现渲染**每一份**：链上每条迁移的
+`PRECHECKS` **常量本身**（按文件路径 import 出来）+ `alembic upgrade <起点>:head --sql`
+的离线渲染。它在这里一个字的 SQL 都不重写——**再抄一份就等于开出第二个出处**，两份会在
+某次改迁移之后各说各话，而它们看起来都对。所以它与 `schema_mysql8.sql` 同一个性质：
+快照，不是来源（§16 那张表现现在是五行）。
 
-- 生成：`make db-upgrade-sql`，**出包时也跑**（每次都重新生成，不复用仓库里那份）。
+- 生成：`make db-upgrade-sql`（`build_all` 把 `BASELINES` 里每一份都刷一遍），
+  **出包时也跑**（每次都重新生成，不复用仓库里那份）。
 - 落两处、同一个文件名：`backend/sql/`（随 `backend/` 进包）与 `dist/`（拿给执行的人）。
+  两处都要在 `build_package.py` 的 `REQUIRED_PATHS` 里有名字——漏了新那份，客户在安装
+  目录里找不到自己起点的那份文件，而他会以为是自己看漏了。
 - 守卫 `test_incremental_upgrade_sql.py`：逐字节比对「盘上那份 == 今天这棵树渲染出来的
-  那份」，红了就重跑 `make db-upgrade-sql` 并把那份文件一起提交。
+  那份」，`parametrize` 到 `BASELINES` 上（新加起点时它不用改一行）。红了就重跑
+  `make db-upgrade-sql` 并把变了的那几份一起提交。
 - **不能手改**：改了下次重跑就没了，而且守卫会红。
+- **`manual-migrate.ps1` 那句「程序文件还是旧版」的线索指 `upgrade_from_v1_1_6.sql`，
+  不是最早那份。** 后者自 2026-09-20 起在**每一棵**源码树里都有（包括客户机上那一版旧
+  程序文件），拿它当判据是**恒真**的——程序文件再旧它也照在，那句 WARN 永远不出现，而它
+  要提醒的正是那件事。
+
+#### ★ 那道门按起点分岔：零检查的那一份里没有存储过程段（2026-09-27）
+
+第二份起点（V1.1.6）那条线上**一条 `PRECHECKS` 都没有**——`0021` / `0022` / `0023`
+全是 expand-only。于是 `_guard_section` 与 `_footer(has_guard=…)` 按 `precheck_count`
+分叉：`upgrade_from_v1_1_6.sql` 里**既没有 `CREATE PROCEDURE` 也没有 `CALL xlp_check_empty`**。
+这不是漏了——那个过程一次都不会被 `CALL`，留着只会在客户的库上要一次 `CREATE ROUTINE`
+权限、建完立刻删掉（权限不够时 `mysql` 停在那一行）。
+
+**分岔写错方向时，有检查那一份一个字都不变**（逐字节守卫照样绿），所以
+`test_only_the_baselines_with_checks_carry_the_guard` **两个方向都断**，而且「哪一份是
+零检查」按 `collect_prechecks` 现数、不写死标签——写死标签的话，将来换一个起点时这一条
+会变成一条关于标签的断言，而它要问的是「检查与那道门是否同进同出」。
 
 #### ★ 每个迁移拆成【检查】/【DDL】两半，交错排列
 
@@ -4482,10 +4512,10 @@ Python，正是那台机器缺的东西。
 口径与 §20 那个「库名不以 `_test` 结尾就拒绝跑」逐字同源：**宁可拦住**。库在 `finally`
 里删掉，中途崩掉也不会在开发机上留一个「看起来与正常库一模一样」的半成品。
 
-#### **但它不在出包时重新生成**（与 `upgrade_from_v1_0_0.sql` 不同，且不是漏了）
+#### **但它不在出包时重新生成**（与那两份 `upgrade_from_*.sql` 不同，且不是漏了）
 
-`upgrade_from_v1_0_0.sql` 每次重生成，是因为它的两个来源都长在**当前源码树**上，出包时
-源码树就是最新的。这一份多了一个**外部来源**（一个库），出包时重生成反而会**掩盖**
+那些每次重生成，是因为它们的两个来源都长在**当前源码树**上，出包时源码树就是最新的。
+这一份多了一个**外部来源**（一个库），出包时重生成反而会**掩盖**
 「有人改了 `seed.py` 却没重跑 `make db-seed-sql`」——那个信号应该由守卫红在那次
 `make test` 上，不该被一次静默重生成盖掉。它与 `schema_mysql8.sql` 同一档：**仓库里的
 快照，随 `backend/` 进包**（`build_package.py` 的 `REQUIRED_PATHS` 钉住，旁边那行注释

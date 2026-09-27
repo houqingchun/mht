@@ -167,22 +167,28 @@ REQUIRED_PATHS = [
     # `mysqldump --no-data` 出来的一份，要么什么都没有——这一份让他们**不必先有一台
     # 装好的库**就能把表建出来。它与 reset 那份是一对：那份删行，这份建表。
     "backend/sql/schema_mysql8.sql",
-    # 从 V1.0.0 升到当前版本的增量 SQL（2026-09-20 加）。`copy_backend` 拷的是整棵
-    # `backend/`，所以它自动跟着进包、落在 `<安装目录>\backend\sql\` 下；
-    # `deploy\manual-migrate.ps1` 就是按这个路径去找它的（找不到时它说「多半是程序文件
-    # 还是旧版」）。生成器另外还往 `dist/` 写一份——那一份是给直接执行的人拿的。
+    # 手工增量 SQL：**一份起点一个文件**（2026-09-20 加第一份，2026-09-27 加第二份）。
+    # `copy_backend` 拷的是整棵 `backend/`，所以它们自动跟着进包、落在
+    # `<安装目录>\backend\sql\` 下；`deploy\windows\manual-migrate.ps1` 就是按这个路径
+    # 去找它的（读不到时它说「多半是程序文件还是旧版」）。生成器另外还往 `dist/` 写一份
+    # ——那一份是给直接执行的人拿的。
     #
-    # 文件名里的 `v1_0_0` 是 `build_migration_sql.BASELINE_LABEL` 派生的
-    # (`OUTPUT_NAME`)。基线换代（比如改成从 V1.1.0 升）时**这里要跟着改**——
-    # 忘了改会红在下面那次自检上（「缺这个路径」），而不是静默少带一个文件。
+    # 客户拿哪一份，取决于**他那台机器的 `alembic_version` 念出来是哪个 revision**：
+    #
+    #   V1.0.0（`0012_drop_care_case_unique`）→ upgrade_from_v1_0_0.sql
+    #   V1.1.6（`0020_total_excludes_validity`）→ upgrade_from_v1_1_6.sql
+    #
+    # 文件名由 `build_migration_sql.output_name(baseline)` 从起点标签派生，**不在这里
+    # 手写**。加一个新起点时，这份清单与下面那次自检会一起提醒你：漏了会红在自检上
+    # （「缺这个路径」），而不是静默少带一个文件——而那一份恰恰是某台机器上唯一的路。
     "backend/sql/upgrade_from_v1_0_0.sql",
+    "backend/sql/upgrade_from_v1_1_6.sql",
     # 「只有系统基础数据与管理员账号」的那份 **DML** 脚本（2026-09-21 加）。与上面
     # `schema_mysql8.sql` 是一对，但方向相反：那份建表、这份写数据（admin + MHT 量表
     # /100 题/评分规则），**一段 DDL 都没有、也不写 `alembic_version`**（那张表归
     # Alembic，见文件头里那一句）。
     #
-    # **它不在 `step("3/6")` 里重新生成，这是有意的**（与 `upgrade_from_v1_0_0.sql`
-    # 相反）。那一份的两个来源都长在当前源码树上，出包时源码树就是最新的；这一份多了一个
+    # **它不在 `step("3/6")` 里重新生成，这是有意的**（与那两份增量 SQL 相反）。那一份的两个来源都长在当前源码树上，出包时源码树就是最新的；这一份多了一个
     # **外部来源**——它的数据段必须来自 `seed.py` 的**结果**（真的跑一遍一个一次性库），
     # 而出包时重生成会**盖掉**「有人改了 `seed.py` 却没重跑 `make db-seed-sql`」这个信号。
     # 那个信号应该由 `app/tests/test_seed_sql.py` 红在那次 `make test` 上，不该被一次
@@ -754,7 +760,7 @@ def main() -> int:
     # 所以「仓库里那份」与「这棵树今天渲染出来的那份」是两件事；它们不一样时，出错的地方
     # 是客户手上的库。`app/tests/test_incremental_upgrade_sql.py` 从另一头盯着同一条。
     step("3/6 生成数据库增量 SQL")
-    for sql_path in build_migration_sql.build(DIST):
+    for sql_path in build_migration_sql.build_all(DIST):
         log(f"{sql_path.relative_to(ROOT)}  ({sql_path.stat().st_size} 字节)")
 
     step("4/6 复制源码与前端")

@@ -102,15 +102,15 @@ def test_the_version_is_a_three_part_release_number():
 
 
 def test_the_label_drops_the_patch_segment():
-    """`1.1.2` → `V1.1`：界面显示的是主.次，修订号不外露。
+    """`2.1.0` → `V2.1`：界面显示的是主.次，修订号不外露。
 
     末尾那个字面量是**跟着 `__version__` 一起改的**，不是第二个出处 ——
     它在这里的作用是让「修订号被丢掉了」这句话变成一条判据：只写上面那一行
     恒等式的话，一个把 `[:2]` 误写成 `[:3]` 的实现照样绿（两边一起变），
-    而界面上会冒出一个 `V1.1.2`。
+    而界面上会冒出一个 `V2.1.0`。
     """
     assert VERSION_LABEL == "V" + ".".join(__version__.split(".")[:2])
-    assert VERSION_LABEL == "V2.0", f"标签变成了 {VERSION_LABEL!r}"
+    assert VERSION_LABEL == "V2.1", f"标签变成了 {VERSION_LABEL!r}"
 
 
 # --------------------------------------------------------------------------

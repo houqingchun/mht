@@ -304,9 +304,18 @@ Write-Line ('安装目录：' + $root) 'OK'
 # 那份手工 SQL 与程序文件是同一批东西（它随 `backend\` 一起进包，`build_package.py` 的
 # REQUIRED_PATHS 钉住它）。它不在 = 这个目录里多半还是旧版的程序文件。下面拿它当一条
 # 线索用，不当判据。
-$sqlPath = Join-Path $script:BackendDir 'sql\upgrade_from_v1_0_0.sql'
-$script:SqlHint = '库升不动的时候还有一条路：那份手工 SQL 在 ' + $sqlPath +
-    '（怎么执行写在它自己的文件头里，这里不重述——两处各说一遍，过一阵就会有一处是旧的）。'
+#
+# ★ 线索指向**本版新增的那一份**（`upgrade_from_v1_1_6.sql`），不是最早那份
+# `upgrade_from_v1_0_0.sql`。后者自 2026-09-20 起在**每一棵**源码树里都有——包括客户机上
+# 现在这一版旧的程序文件——所以拿它当判据是**恒真**的：程序文件再旧它也照在，
+# 这句 WARN 永远不出现，而它要提醒的正是那件事。
+$sqlPath = Join-Path $script:BackendDir 'sql\upgrade_from_v1_1_6.sql'
+$script:SqlHint = '库升不动的时候还有一条路：手工 SQL 就在 ' +
+    (Join-Path $script:BackendDir 'sql') + ' 下，**一份起点一个文件**。' +
+    '拿哪一份看这台库的版本戳——`SELECT version_num FROM alembic_version;` 念出来是 ' +
+    '`0012_drop_care_case_unique` 就拿 upgrade_from_v1_0_0.sql，是 ' +
+    '`0020_total_excludes_validity` 就拿 upgrade_from_v1_1_6.sql。' +
+    '（怎么执行写在每一份自己的文件头里，这里不重述——两处各说一遍，过一阵就会有一处是旧的。）'
 
 if (-not (Test-Path -LiteralPath $script:VenvPython)) {
     Stop-Here ('这个目录里还没有运行环境（' + $script:VenvPython + '）。这个按钮要在**装过的**' +
@@ -363,4 +372,5 @@ if ($after -ne 0) {
 Write-Line '数据库升级完成。' 'OK'
 Write-Line ('这一版程序是 ' + $version + '；库的版本戳看上面那一行 `alembic_version = …`。')
 Write-Line '库和程序文件要一起换：只换了程序没升库、或者只升了库没换程序，都会出问题。'
-Write-Line ('核对表结构双击安装目录里的「查看状态.bat」；如果你要手工执行那一份，它在 ' + $sqlPath + '。')
+Write-Line ('核对表结构双击安装目录里的「查看状态.bat」；要手工执行升级 SQL 的话，' +
+    '按版本戳去 ' + (Join-Path $script:BackendDir 'sql') + ' 下挑一份。')

@@ -5782,3 +5782,144 @@ Favicon 由 `public/favicon.svg` 通过 `index.html` 引用，不从 Vue 运行�
 - Commit SHA：`5ca7af9`（`feat(brand): §5.23 品牌 Logo 落到登录页 / 侧栏 / favicon，并加一条守卫`，已 push 到 `origin/V2.0.1`）。
 - 遗留问题：**两条，只记录、不扩项**。① `styles.css:653` 的侧栏 `.brand-mark`（43×43 / radius 14 / `linear-gradient(145deg,#407ee8,#2095a0)`）被文件后部 `.brand-row` 区间那条**同名规则**（48×48 / radius 8 / `#142b45`）以**同优先级**覆盖，是一条**从未生效**的死规则——所以两处方块**当前实测同为 48×48 / `#142b45`**（`getComputedStyle` 量过）。本次按 §5.23.4 第 10 条**未动**：删它或改它会同时改动全局视觉层级，不属于「把 Logo 落到品牌入口」这一件事。② 主 Logo 被 Vite 内联成 data URI，`dist/assets/` 下因此**没有独立的 `.svg` 产物文件**可供别处引用——这是既有的构建行为，不是本次引入；若将来有第二处（如报告页眉）需要同一个 Logo，仍然走静态 import，不要去引用产物路径。
 
+### 5.24 V2.1.0 版本升级与交付：客户库（`0020` → head）的手工增量升级（已完成，2026-09-27）
+
+#### 5.24.1 任务与背景
+
+用户指令（逐字）：
+
+> 现在再升级一下版本到V2.1.0， 同时分析一下数据库层面的变化（与V1.1.6比较），我上次在客户侧执行的
+> 数据库升级脚本是 `/Users/houboris/Documents/workspace/xinliceping/backend/sql/manual_total_excludes_validity_with_history.sql`。
+> 请以这个为背景， 帮我打包V2.1.0，同时生成一个用于在客户侧执行的升级SQL脚本（我手工执行）。
+
+拆成三件：① 版本升到 **V2.1.0**；② 分析 **V1.1.6 → V2.1.0** 的数据库变化；③ 出包 +
+生成一份**客户手工执行**的增量 SQL。三件都做完了，本节是回填。
+
+**客户库的起点是确定的，不是推测出来的**：`manual_total_excludes_validity_with_history.sql`
+的文件头写着「适用前提：当前 `alembic_version` = `0019_total_includes_validity`」，末尾那句
+`UPDATE alembic_version SET version_num = '0020_total_excludes_validity'` 把它推到 `0020`。
+所以客户库今天是 **`0020_total_excludes_validity`**，正好等于 `build_migration_sql.BASELINES`
+里新加的那个交付基线（V1.1.6）。
+
+#### 5.24.2 数据库变化分析：V1.1.6（`0020`）→ V2.1.0（`0023`）
+
+**结论先写：三条迁移，全部 expand-only（只加不改）、零 `PRECHECKS`，不会因为库里已有的数据
+形状失败。** 在客户那台库上它们只会做三件事——加八个可空列、建两张新表、给一张新表补三列并
+按条件回填四句 `UPDATE`（而那两张新表在客户库上是空的，四句回填实际一行都不会改）。
+
+| # | 迁移 | 做了什么 | 在客户库上的实际影响 |
+|---|---|---|---|
+| 1 | `0021_v2_task_governance` | `assessment_task` 与 `risk_event` 各加 `voided_at` / `voided_by` / `void_reason`（三列全 **可空**）+ 两条指向 `user_account(id)` 的外键 | 八个 `NULL` 列 + 两个外键；已有行一个字段都不变 |
+| 2 | `0022_professional_reports` | 纯建两表：`professional_report`（1 唯一键 + 4 外键）+ `professional_report_version`（1 唯一键 + 2 外键）+ 索引 `ix_professional_report_school_status` | 两张**空表**（客户从没建过专业报告） |
+| 3 | `0023_report_version_publish` | `professional_report_version` 加 `status`（`NOT NULL DEFAULT 'DRAFT'`）/ `published_at` / `published_by` + 一个外键，随后**四条条件 `UPDATE` 回填** | 在空表上瞬时完成；四条回填 no-op |
+
+表数从 34（V1.2 时代）变成 **36 张应用表**（`rg -c "^CREATE TABLE" backend/sql/schema_mysql8.sql`
+与模型 `__tablename__` 双向核对过）。
+
+**`0023` 那四条回填值得单独看一眼**，因为它们是这一批里唯一「读既有数据再写」的语句——
+判据逐条不同，写在迁移的 docstring 里：报告头 `PUBLISHED`/`ARCHIVED` 的，全部现存版本都
+发布过；报告头那两列时间/人只由 `publish()` 写、而它写的是**当前版本**，所以只抄给
+`version_no = current_version` 那一行；报告头是 `DRAFT` 但有新版本时，`new_version()` 不清那
+两列，所以它们属于**上一版**（`current_version - 1`）；更早的那些版本只回填 `PUBLISHED`，
+时间与人留 `NULL`（**猜不出的一律留空**，与 CLAUDE.md §21 那条「`tested_at` 刻意不回填」
+同一条理由）。客户库上这四条全空转。
+
+#### 5.24.3 第二份交付基线：一份起点一个文件
+
+`build_migration_sql.py` 的 `BASELINES` 从「一个模块级常量」改成 `Baseline` 元组
+（`DEFAULT_BASELINE` = V1.0.0 / `DELIVERED_BASELINE` = V1.1.6），`output_name(baseline)` 从起点
+标签派生文件名——**清单与文件名一起长，没有手写的那一处**。产物 `backend/sql/upgrade_from_v1_1_6.sql`
+（183 行 / 9318 字节）+ `dist/` 一份，随出包第 3/6 步当场重生成。
+
+客户拿哪一份，判据只有一句：
+
+```sql
+SELECT version_num FROM alembic_version;
+```
+
+念出来 `0020_total_excludes_validity` 就拿 `upgrade_from_v1_1_6.sql`；念出来
+`0012_drop_care_case_unique` 就拿 `upgrade_from_v1_0_0.sql`；两个都不是就先别执行，把那一句的
+结果发回来。执行方式与既有的两份完全一致：**先备份**，再
+`mysql -h HOST -u USER -p --default-character-set=utf8mb4 DB < 那份文件`，**只该跑一次**。
+
+#### 5.24.4 ★ 那道门按起点分岔：零检查的那一份里**没有存储过程段**
+
+这是本轮唯一一处**新长出来的机制**，也是唯一一处「写错方向不会有任何东西报错」的地方。
+
+第二份起点（V1.1.6）那条线上**一条 `PRECHECKS` 都没有**（上面那三条迁移全是 expand-only），
+所以 `_guard_section` 与 `_footer(has_guard=…)` 按 `precheck_count` 分叉：
+`upgrade_from_v1_1_6.sql` 里**既没有 `CREATE PROCEDURE` 也没有 `CALL xlp_check_empty`**。
+
+**分岔写错方向时，有检查那一份一个字都不变**——`upgrade_from_v1_0_0.sql` 的逐字节守卫照样
+是绿的，而客户拿到的是一份在他的库上要一次 `CREATE ROUTINE` 权限、建完却一次都不会 `CALL`
+它的文件（权限不够时 `mysql` 停在那一行）。所以守卫
+`test_only_the_baselines_with_checks_carry_the_guard` **两个方向都断**，且「哪一份是零检查」
+按 `collect_prechecks` **现数**、不写死标签——写死标签的话，将来换一个起点时这一条会变成
+一条关于标签的断言，而它要问的是「检查与那道门是否同进同出」。
+
+#### 5.24.5 `seed_mysql8.sql` 随版本号重生成（一次「升版本必然踩到」的过期）
+
+这份交付 SQL 的文件头写着版本号（`-- 版本：V2.1（2.1.0）`），所以**每次升 `__version__`
+都要重跑 `make db-seed-sql`**（它要连一台活着的 MySQL）。本轮是 `test_seed_sql.py` 的逐字节
+守卫把它抓出来的：改完版号之后跑定向测试是 `2 failed, 95 passed`，红的两条 diff 只有文件头
+那一行——`-- 版本：V2.0（2.0.0）` vs `-- 版本：V2.1（2.1.0）`。重跑生成器并提交那份文件之后
+`11 passed`（`test_seed_sql.py` + `test_incremental_upgrade_sql.py`）。
+
+**这条同时反证了一件事**：本轮改过 `0019_total_includes_validity.py` 的 docstring（两份
+`upgrade_from_*.sql` 是离线渲染出来的），而重跑之后 `upgrade_from_v1_0_0.sql` 的字节数与
+此前一致、守卫全绿 ⇒ **docstring 改动没有让渲染结果变样**。
+
+#### 5.24.6 版本号、出包与交付物
+
+- `backend/app/version.py`：`__version__ = "2.1.0"` ⇒ `VERSION_LABEL` 自动变 `V2.1`；
+  唯一镜像 `frontend/package.json` 一起改（CLAUDE.md §19）。`test_app_version.py` 里那条
+  「标签丢掉修订号」的断言字面量跟着从 `V2.0` 改成 `V2.1`——**字面量随 `__version__` 变是
+  有意的**：写死一个不随它动的期望值，`[:2]` 被误写成 `[:3]` 时就抓不住了。
+- `make deploy-package` → **`dist/心晴部署包_V2.1.0.zip`（12,147,673 B / 11.6 MB）**，
+  `package-info.txt` 写 `version=2.1.0+20260927`。不传 `--keep` 时脚本自己
+  `shutil.rmtree(pkg_dir)`，所以这一跑是干净的（上一版 V2.0.0 的 staging 同名目录才会被
+  复用，新版本名不会）。六步自检全过（必需文件齐全 / `task.xml` 与 `python/` 没有混进来 /
+  依赖闭环 / 没有 `.env`·`.venv`·`tests`·`pyc` / 题库位置可达 / BOM 与纯 ASCII 约定）。
+- **包里带着客户要的那一份**：`unzip -l` 逐项核过 —— `backend/sql/upgrade_from_v1_1_6.sql`
+  9318 字节在包里（随 `backend/` 一起拷进安装目录），`dist/` 下另有一份同名的给人直接取。
+- 维护者文档同步到「一份起点一个文件」：`Makefile`（`db-upgrade-sql` 那段注释 + 文件名）、
+  `README.md`（`backend/sql/` 那节改成四份脚本的表）、`deploy/README.md`（5 处，含一处坏引用
+  ——目录树里指着旧标题「把停在 V1.0.0 的库升上来」）、`deploy/build_seed_sql.py`（「与那两份
+  `upgrade_from_*.sql` 不同」）、`CLAUDE.md`（§16 的分工表、§30 三条路与判据表 + 新增
+  「零检查分支」一节、§31 的同一条措辞）、`0019_*.py` 的 docstring（2 处）。全部用 `rg`
+  反查过残留的单数措辞与坏引用。
+
+#### 5.24.7 跑数与 DoD 回填
+
+- Backend Tests：**874 passed / 0 failed / 528.32s**（`make test`）——**无回归**。上一版基线
+  871，多出来的 3 条就是 `test_incremental_upgrade_sql.py` 从 3 条变 6 条（第二份基线
+  `parametrize` 进去）。5 条 warning 是既有的（`starlette.testclient` 弃用提示 +
+  `analytics_service` / `export_service` 那两条已查清的笛卡尔积误报）。
+- 全量 E2E：**210 passed (4.3m)**（`npx playwright test`，`workers: 1` 权威口径）——与上一版
+  持平，本轮**没有新增 e2e 用例**（改的是版本号、生成器与文档）。
+- 定向守卫：`test_seed_sql.py` + `test_incremental_upgrade_sql.py` → **11 passed**。
+- DoD：
+  - [x] `__version__` → `2.1.0`，唯一镜像 `frontend/package.json` 同步，`VERSION_LABEL` = `V2.1`；
+  - [x] V1.1.6 → V2.1.0 的数据库差异逐条查清（三条迁移 / 表数 36 / 全 expand-only）；
+  - [x] 客户库起点确认（`manual_total_excludes_validity_with_history.sql` 推到 `0020`）；
+  - [x] 第二份交付基线 `upgrade_from_v1_1_6.sql` 生成 + `dist/` 一份；
+  - [x] 零检查分支与守卫两方向都断；
+  - [x] `seed_mysql8.sql` 随版本号重生成并提交；
+  - [x] 维护者文档 6 个文件同步、`rg` 反查无残留；
+  - [x] `make deploy-package` 出包成功并核对包内容；
+  - [x] Backend Tests / 全量 E2E 无回归；
+  - [x] 回填实际修改文件、测试结果、Commit SHA。
+
+#### 5.24.8 交付给用户的三件东西
+
+1. **`dist/心晴部署包_V2.1.0.zip`**（12,147,673 B）—— 拷到客户机解压、双击「一键安装.bat」；
+   升级模式不会重跑 seed、不会重置管理员密码、不会碰库里的数据，只更新程序文件并再跑一次迁移
+   （那时迁移已是空转的）。
+2. **`backend/sql/upgrade_from_v1_1_6.sql`**（9318 字节，包里另有一份）—— **手工升库用**。
+   先 `mysqldump` 备份，再 `mysql --default-character-set=utf8mb4 DB < 它`，最后核
+   `SELECT version_num FROM alembic_version;` 应当是 `0023_report_version_publish`。
+3. **数据库变化分析**（本节 5.24.2）—— 三条迁移、八个可空列、两张新表、四条空转回填。
+
+**两件东西的次序不重要，但建议先跑 SQL 再换程序文件**：这样中途出问题时报出来的是一句
+SQL 错（离原因近），而不是「页面 500」（离原因远）。
+

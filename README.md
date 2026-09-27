@@ -99,15 +99,19 @@ mysql -h 127.0.0.1 -u root -p xinliceping < sql/reset_to_baseline.sql
 `make purge-demo` 是另一件事：它只把 `seed-demo` 填的东西删掉，回到 `seed.py` 的基线
 （S001、两名种子员工、基线任务都还在），而且只在开发库上用。
 
-#### `backend/sql/` 下另外三份脚本（面向交付，不是给开发库用的）
+#### `backend/sql/` 下另外四份脚本（面向交付，不是给开发库用的）
+
+增量升级 SQL **一份起点一个文件**：客户拿哪一份，取决于他那台库的
+`SELECT version_num FROM alembic_version;` 念出来是哪个 revision。
 
 | 文件 | 做什么 | 谁用 |
 |---|---|---|
-| `schema_mysql8.sql` | 建 34 张表 | 目标机跑不了 Python、只能手工建表时 |
-| `upgrade_from_v1_0_0.sql` | 把停在 V1.0.0 的库升到当前版本 | 同上，且库是旧版 |
+| `schema_mysql8.sql` | 建 36 张表 | 目标机跑不了 Python、只能手工建表时 |
+| `upgrade_from_v1_0_0.sql` | 把停在 V1.0.0 的库（版本戳 `0012_drop_care_case_unique`）升到当前版本 | 同上，且库是旧版 |
+| `upgrade_from_v1_1_6.sql` | 把停在 V1.1.6 的库（版本戳 `0020_total_excludes_validity`）升到当前版本 | 同上；**这一批客户库的起点** |
 | `seed_mysql8.sql` | 空库的初始化数据：量表 + 100 道题 + 评分规则 + `admin`（初始密码 `123456`），**不含任何演示数据** | 自己建了空库的人——没有数据就登录不进去 |
 
-三份都随一键安装包一起交付。后两份是**生成的**（`make db-upgrade-sql` /
+四份都随一键安装包一起交付。后三份是**生成的**（`make db-upgrade-sql` /
 `make db-seed-sql`），别手改，改了下次重跑就没了；`seed_mysql8.sql` 生成时要连上一台
 活着的 MySQL（它 dump 的是 `seed.py` 跑完再清库之后的**结果**）。四份脚本各自的分工与
 执行方式见 `deploy/README.md`。

@@ -60,8 +60,13 @@ reset-db:
 purge-demo:
 	cd backend && source .venv/bin/activate && python -m app.db.purge demo
 
-# 重新生成「从 V1.0.0 升到当前版本」的数据库增量 SQL
-# -> backend/sql/upgrade_from_v1_0_0.sql 与 dist/ 下同一份。
+# 重新生成**全部**交付基线的数据库增量 SQL：一份起点一个文件
+# -> backend/sql/upgrade_from_v1_0_0.sql（从 V1.0.0）
+# -> backend/sql/upgrade_from_v1_1_6.sql（从 V1.1.6）  ＋ dist/ 下各同一份。
+#
+# 客户拿哪一份，取决于他那台库的 `SELECT version_num FROM alembic_version;` 念出来是
+# 哪个 revision。加一个新的交付基线时改 `build_migration_sql.BASELINES` 一处，这里不用动
+# （`build_all` 会把每一份都刷一遍）。
 #
 # **改了 alembic 迁移就要重跑它。** 产物是从两份既有来源现渲染出来的（链上每条迁移的
 # PRECHECKS 常量 + `alembic upgrade <基线>:head --sql`），所以迁移一动、不重跑，
@@ -84,7 +89,7 @@ db-upgrade-sql:
 # mysql），**不碰开发库本身**。改过 `seed.py` / `data/mht_scale.json` / `reset_to_baseline.sql`
 # 就要跑它，然后把 `backend/sql/seed_mysql8.sql` 一起提交——`test_seed_sql.py` 逐字节盯着。
 #
-# **不在 `make deploy-package` 里重新生成**（与 upgrade_from_v1_0_0.sql 相反）：那一份的
+# **不在 `make deploy-package` 里重新生成**（与那两份 upgrade_from_*.sql 相反）：那些的
 # 两个来源都长在当前源码树上，出包时源码树就是最新的；这一份多了一个**外部来源**（一个库），
 # 出包时重生成反而会**盖掉**「有人改了 seed 却没重跑这里」这个信号。
 db-seed-sql:

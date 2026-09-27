@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
-"""把「从 V1.0.0 升到当前版本」的数据库增量渲染成一份可以直接手工执行的 `.sql`。
+"""把「从各个交付基线升到当前版本」的数据库增量渲染成可以直接手工执行的 `.sql`。
 
 ## 它为什么存在
 
-客户的库停在 V1.0.0（迁移 `0012_drop_care_case_unique`），升级要跑 `0013` ～ 当前 head。
-路有两条：一键安装包里的 `install.ps1`（**升级模式**会自动跑 `ensure_schema` +
-`alembic upgrade head`），以及**这份文件**——给「只想先把库升上去」「程序文件先不动」
-「安装器那一侧出故障」的场景用。
+客户的库可能停在两个起点之一：**V1.0.0**（迁移 `0012_drop_care_case_unique`，最早那批
+交付）或 **V1.1.6**（迁移 `0020_total_excludes_validity`，最近一次交付）。升级要跑的是
+**从那个起点**到当前 head 的那几条迁移。路有两条：一键安装包里的 `install.ps1`
+（**升级模式**会自动跑 `ensure_schema` + `alembic upgrade head`），以及**这些文件**——
+给「只想先把库升上去」「程序文件先不动」「安装器那一侧出故障」的场景用。
+
+**一份起点一个文件**，文件名由起点标签派生（`upgrade_from_v1_0_0.sql` /
+`upgrade_from_v1_1_6.sql`）。客户拿哪一份，取决于他那台机器上
+`SELECT version_num FROM alembic_version;` 念出来的是哪个 revision——两条交付线各自的
+起点，见 `BASELINES` 上面那段注释。
 
 ## 它不是第二个出处
 
@@ -39,11 +45,13 @@ SELECT id, student_id FROM assessment_session WHERE school_id IS NULL LIMIT 5;
 「`0013` 的回填做干净了没有」。这类检查**在 `0013` 的 DDL 跑完之前根本执行不了**。
 真实迁移链的形状也是这个：`0014` 的 `_precheck()` 跑在 `0013` 之后。
 
-所以顺序是**每条迁移「先检查、后动手」，一条一条往下走**：
+所以顺序是**每条迁移「先检查、后动手」，一条一条往下走**（下面拿 V1.0.0 那条线举例——
+它 11 条迁移、13 条检查；V1.1.6 那条线只有 3 条，**一条检查都没有**，所以它渲染出来的
+文件里既没有【检查】段、也不建那个存储过程，表头写的就是这件事）：
 
 ```
-迁移 1/6  0013_v12_expand   → 它的检查 → 它的 DDL
-迁移 2/6  0014_v12_enforce  → 它的检查 → 它的 DDL   ← 这里才读得到 0013 加的那些列
+第 1 条  0013_v12_expand   → 它的检查 → 它的 DDL
+第 2 条  0014_v12_enforce  → 它的检查 → 它的 DDL   ← 这里才读得到 0013 加的那些列
 ...
 ```
 
@@ -84,6 +92,11 @@ ERROR 1048 (23000) at line 581: Column 'requires_manual_review' cannot be null
 一侧**，因为它什么都没执行。收尾处 `DROP PROCEDURE IF EXISTS` 把它删掉；中途被 `SIGNAL`
 中断时那一句跑不到，所以开头也有一句 `DROP ... IF EXISTS` 顶着。
 
+**零检查的那一份里没有这一整段**（`_guard_section` / `_footer(has_guard=False)`）：它一次
+都不会 `CALL` 那个过程，留着只会在客户的库上做一次需要 `CREATE ROUTINE` 权限、建完立刻
+删的 `CREATE PROCEDURE`——而权限不够时 `mysql` 会停在那一行，客户拿到的是一句他看不懂的
+英文，却以为自己的账号有问题。
+
 ## 两条路都走子进程，不调 `alembic.command`
 
 `alembic/env.py` **无条件**拿 `get_settings().database_url` 覆盖 `sqlalchemy.url`，所以
@@ -105,6 +118,7 @@ import re
 import subprocess
 import sys
 import textwrap
+from dataclasses import dataclass
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import ModuleType
@@ -115,18 +129,63 @@ VERSIONS_DIR = BACKEND / "alembic" / "versions"
 SQL_DIR = BACKEND / "sql"
 DIST_DIR = ROOT / "dist"
 
-# 升级的**起点**：V1.0.0 的 head。客户的库停在它上面，所以增量从它的**下一条**算起。
-# 两个常量是一对，改一个要想着另一个——`BASELINE_LABEL` 是写给人看的那一串，
-# 出现在文件头与文件名里；`BASELINE_REVISION` 是给 alembic 认的那一串。
+# 升级的**起点**：某个交付版本的 head。客户的库停在它上面，所以增量从它的**下一条**算起。
+# 两个字段是一对，改一个要想着另一个——`label` 是写给人看的那一串（出现在文件头与文件名
+# 里），`revision` 是给 alembic 认的那一串。
+#
+# **为什么要两个起点**：一份文件服务一个「库停在哪」的事实，而客户手上不止一种库。
+# `V1.0.0` 那份从最早的交付线算起（0013 起，11 条迁移，含 0013/0014 那 13 条前置检查）；
+# `V1.1.6` 那份从 0020 算起（3 条迁移，**一条检查都没有**——0021/0022/0023 全是「只加
+# 不改」，没有会因为真实数据形状失败的东西）。两份都生成，客户按自己库上的
+# `SELECT version_num FROM alembic_version` 挑那一份。
+#
+# **不许把两者合成一份**：一份文件的起点只能有一个，而「起点之前那些迁移」在一份
+# 已经跑过它们的库上是必然的 `Duplicate column`。这不是可以靠 IF NOT EXISTS 绕过去的
+# 排版问题——0022 建的是两张新表、0023 加的是三列加四条回填 UPDATE，绕法各不相同。
 BASELINE_LABEL = "V1.0.0"
 BASELINE_REVISION = "0012_drop_care_case_unique"
 
-# 一份文件、一个名字，两处落盘（`backend/sql/` 与 `dist/`）用的是同一个——这样纸上写的
-# 名字、磁盘上的名字、包里那个名字是同一串字。**不按版本号起名**是有意的：那份内容里
-# 的版本已经写在文件头了，而带版本号的文件名每升一次就留下一份同名的旧货。
-# `V1.0.0` → `v1_0_0`。派生而不是再抄一遍字面量：这两串一旦对不上，出问题的地方是
-# 文件**名**（纸上写的、包里那个），而看的人是文件**头**——那种不一致很难被发现。
-OUTPUT_NAME = f"upgrade_from_{BASELINE_LABEL.lower().replace('.', '_')}.sql"
+DELIVERED_BASELINE_LABEL = "V1.1.6"
+DELIVERED_BASELINE_REVISION = "0020_total_excludes_validity"
+
+
+@dataclass(frozen=True)
+class Baseline:
+    """升级的起点。换成对象而不是一对模块级常量，是为了让「同一份实现、两个起点」成立。
+
+    第一版是两个模块级常量 + 一个由它们派生的 `OUTPUT_NAME`，而那时只有一个起点、所以
+    够用；加第二个起点时，若各写一份渲染逻辑，两份文件会在某次改迁移之后各说各话
+    （CLAUDE.md 那条「同一处只许有一个定义」）。所以起点变成参数，实现只有一份。
+    """
+
+    label: str
+    revision: str
+
+
+DEFAULT_BASELINE = Baseline(BASELINE_LABEL, BASELINE_REVISION)
+DELIVERED_BASELINE = Baseline(DELIVERED_BASELINE_LABEL, DELIVERED_BASELINE_REVISION)
+
+# 出包与 `make db-upgrade-sql` 都按这个次序各生成一份。**次序有意义**：第一份是老客户的
+# （停得越早、要跑的迁移越多），第二份是本次交付线那一份。
+BASELINES: tuple[Baseline, ...] = (DEFAULT_BASELINE, DELIVERED_BASELINE)
+
+
+def output_name(baseline: Baseline) -> str:
+    """一份文件、一个名字，两处落盘（`backend/sql/` 与 `dist/`）用的是同一个——这样纸上
+    写的名字、磁盘上的名字、包里那个名字是同一串字。
+
+    **不按版本号起名**是有意的：那份内容里的版本已经写在文件头了，而带版本号的文件名
+    每升一次就留下一份同名的旧货。`V1.1.6` → `v1_1_6`。派生而不是再抄一遍字面量：
+    这两串一旦对不上，出问题的地方是文件**名**（纸上写的、包里那个），而看的人是
+    文件**头**——那种不一致很难被发现。
+
+    起点标签只许用 `[A-Za-z0-9.]`：它会变成文件名的一部分，而客户手上的路径可能是
+    `C:\\Users\\Zhang San\\`（CLAUDE.md §18 那条「路径参数是常态」）。
+    """
+    if not re.fullmatch(r"[A-Za-z0-9.]+", baseline.label):
+        raise SystemExit(f"[X] 基线标签 {baseline.label!r} 里出现了不能进文件名的字符")
+    return f"upgrade_from_{baseline.label.lower().replace('.', '_')}.sql"
+
 
 RULE = "=" * 78
 LINE = "-" * 78
@@ -162,12 +221,17 @@ def _read_revision_and_parent(path: Path) -> tuple[str, str | None] | None:
     return found.group(1), (parent.group(1) if parent else None)
 
 
-def migration_chain() -> list[tuple[str, Path]]:
-    """从基线的**下一条**排到 head，按执行次序（不含基线自己）。
+def migration_chain(baseline: Baseline = DEFAULT_BASELINE) -> list[tuple[str, Path]]:
+    """从 `baseline` 的**下一条**排到 head，按执行次序（不含基线自己）。
 
     只认识线性链。分叉时当场停下——那说明有人开了分支，而这份文件按「一条路走到底」
     写，硬凑出来的次序会让某条迁移的 DDL 排在它依赖的那一条之前
     （`0014` 要收紧的列，`0013` 得先加上）。
+
+    参数**带默认值**是给既有调用点的：`test_incremental_upgrade_sql.py` 与
+    `build_package.py` 里的那几处按老样子调它，走的仍然是 `V1.0.0` 那一条线
+    （默认值就是从前那个写死的常量，所以行为一个字没变）。加第二个起点**不该**
+    让老调用点跟着改——那正是「同一份实现、两个起点」这句话的落点。
     """
     graph: dict[str, tuple[str | None, Path]] = {}
     for path in sorted(VERSIONS_DIR.glob("*.py")):
@@ -185,14 +249,21 @@ def migration_chain() -> list[tuple[str, Path]]:
 
     chain: list[tuple[str, Path]] = []
     current: str | None = heads[0]
-    while current is not None and current != BASELINE_REVISION:
+    while current is not None and current != baseline.revision:
         if current not in graph:
             raise SystemExit(f"[X] 迁移链走到了 {current!r}，但没有这一条 revision 的文件")
         down, path = graph[current]
         chain.append((current, path))
         current = down
-    if current != BASELINE_REVISION:
-        raise SystemExit(f"[X] 从 head 往回走没走到基线 {BASELINE_REVISION}，先到了链首")
+    if current != baseline.revision:
+        # 走到链首（`down_revision = None`）都没碰上那个基线：说明起点写错了，
+        # 而**最可能的错法是「写成了某个中途版本的标签、revision 抄错一位」**。
+        # 停在这里而不是空着手往下走——一份从链首开始的文件在一份已经跑过
+        # 前半条链的库上必然撞 Duplicate column，而那时报出来的是一句英文 MySQL 错。
+        raise SystemExit(
+            f"[X] 从 head 往回走没走到基线 {baseline.revision}"
+            f"（{baseline.label}），先到了链首；核对 `Baseline.revision`"
+        )
     chain.reverse()
     return chain
 
@@ -241,13 +312,17 @@ def collect_prechecks(chain: list[tuple[str, Path]]) -> dict[str, list[tuple[str
     return collected
 
 
-def render_ddl_blocks() -> dict[str, str]:
-    """`alembic upgrade <基线>:head --sql` 的离线渲染，按迁移切成 `{revision: DDL}`。
+def render_ddl_blocks(baseline: Baseline = DEFAULT_BASELINE) -> dict[str, str]:
+    """`alembic upgrade <起点>:head --sql` 的离线渲染，按迁移切成 `{revision: DDL}`。
 
     退出码非 0 时把 stderr 原样带出来：那一段英文（多半是某条迁移 import 失败）是唯一
     指得出原因的东西，吞掉它就只剩一句「生成失败」。
+
+    渲染出来的块**多于链上那几条**是正常的（起点越早、多出来的越多），而 `compose`
+    只按链取——切出来的字典是全量，用它的地方是 `compose` 里那次「链上每一条都得有
+    对应的块」的对账。所以这里不需要为第二个起点做任何裁剪。
     """
-    command = [sys.executable, "-m", "alembic", "upgrade", f"{BASELINE_REVISION}:head", "--sql"]
+    command = [sys.executable, "-m", "alembic", "upgrade", f"{baseline.revision}:head", "--sql"]
     done = subprocess.run(
         command, cwd=BACKEND, capture_output=True, text=True, encoding="utf-8"
     )
@@ -281,29 +356,38 @@ def _version_label() -> str:
     return found.group(1)
 
 
-def _header(chain: list[tuple[str, Path]], precheck_count: int) -> str:
+def _header(
+    chain: list[tuple[str, Path]], precheck_count: int, baseline: Baseline = DEFAULT_BASELINE
+) -> str:
     head = chain[-1][0]
     version = _version_label()
     count = len(chain)
-    return "\n".join(
-        [
-            f"-- {RULE}",
-            "-- 心晴 · 数据库增量升级脚本",
-            "--",
-            f"-- 从  {BASELINE_LABEL}（迁移 {BASELINE_REVISION}）",
-            f"-- 到  V{version}（迁移 {head}）",
-            "--",
-            "-- 由 deploy/build_migration_sql.py 生成，**不要手工编辑**：它的数据源是",
-            f"-- 链上 {count} 条迁移各自的 PRECHECKS 常量与 alembic 的离线渲染。",
-            "-- 改了迁移就重跑一次 `make db-upgrade-sql`。",
-            f"-- {RULE}",
-            "",
-            "-- 【怎么执行】",
-            "--",
-            "--   第一步 · 先备份。这一步没有替代品：",
-            "--       mysqldump -h HOST -u USER -p --default-character-set=utf8mb4 \\",
-            "--         --single-transaction DB > backup_$(date +%Y%m%d).sql",
-            "--",
+
+    lines = [
+        f"-- {RULE}",
+        "-- 心晴 · 数据库增量升级脚本",
+        "--",
+        f"-- 从  {baseline.label}（迁移 {baseline.revision}）",
+        f"-- 到  V{version}（迁移 {head}）",
+        "--",
+        "-- 由 deploy/build_migration_sql.py 生成，**不要手工编辑**：它的数据源是",
+        f"-- 链上 {count} 条迁移各自的 PRECHECKS 常量与 alembic 的离线渲染。",
+        "-- 改了迁移就重跑一次 `make db-upgrade-sql`。",
+        f"-- {RULE}",
+        "",
+        "-- 【怎么执行】",
+        "--",
+        "--   第一步 · 先备份。这一步没有替代品：",
+        "--       mysqldump -h HOST -u USER -p --default-character-set=utf8mb4 \\",
+        "--         --single-transaction DB > backup_$(date +%Y%m%d).sql",
+        "--",
+    ]
+
+    # ↓ 这两支**必须都留着**：第一支讲的是「哪些检查会替你拦下」，而零检查的那一份
+    # 里那句「一共 0 条检查，下面几条会替你拦住」是一句**指着不存在的东西**的话。
+    # 有检查那一支的每一个字都不能动——`upgrade_from_v1_0_0.sql` 的逐字节守卫盯着它。
+    if precheck_count:
+        lines += [
             f"--   第二步 · 把整个文件交给 mysql 执行。文件按迁移分成 {count} 条，每条都是",
             "--       「先【检查】、后【DDL】」两小段：",
             f"--             第 1 条 / 共 {count} 条：0013_xxx",
@@ -316,14 +400,31 @@ def _header(chain: list[tuple[str, Path]], precheck_count: int) -> str:
             "--         看到 `ERROR 1644 (45000)` 就说明拦住了——把上面那条 SELECT 打出来的数据",
             "--         反馈给维护者，不要往下执行。它说明这个库里存在 DDL 挡不住的数据形状，",
             "--         而 MySQL 的 DDL 不在事务里，硬跑下去会留下「改了一半」的库。",
-            "--       ★ 用 mysql 命令行客户端执行，并在第一条出错的语句处停下",
-            "--         （命令行默认就是这样；图形工具要确认它没有开「出错继续」）。",
-            "--              mysql -h HOST -u USER -p --default-character-set=utf8mb4 DB < 本文件",
-            "--",
-            "--   第三步 · 核对：",
-            "--       SELECT version_num FROM alembic_version;",
-            f"--       应当是 {head}",
-            "--",
+        ]
+    else:
+        lines += [
+            f"--   第二步 · 把整个文件交给 mysql 执行。文件按迁移分成 {count} 条，每条只有",
+            "--       【DDL】一段——这一条线上一条检查都没有（见下面的说明）。",
+            f"--             第 1 条 / 共 {count} 条：{chain[0][0]}",
+            "--               【DDL】…    ← 这条迁移真正动手的地方",
+            "--       ★ 按文件里的次序往下走就行。这几条迁移全都是「只加不改」的：",
+            "--         只建新表、只加可空的新列、按条件回填，**没有一条会因为库里已有的",
+            "--         数据形状失败**，所以不需要事先问一遍（也就没有检查那一段）。",
+        ]
+
+    lines += [
+        "--       ★ 用 mysql 命令行客户端执行，并在第一条出错的语句处停下",
+        "--         （命令行默认就是这样；图形工具要确认它没有开「出错继续」）。",
+        "--              mysql -h HOST -u USER -p --default-character-set=utf8mb4 DB < 本文件",
+        "--",
+        "--   第三步 · 核对：",
+        "--       SELECT version_num FROM alembic_version;",
+        f"--       应当是 {head}",
+        "--",
+    ]
+
+    if precheck_count:
+        lines += [
             "--   注意三件事：",
             "--   ① 这个文件是 UTF-8、含中文注释，**必须**带 --default-character-set=utf8mb4，",
             "--      否则中文会按连接编码解成乱码（注释无所谓，但你要读的就是它）。",
@@ -332,33 +433,59 @@ def _header(chain: list[tuple[str, Path]], precheck_count: int) -> str:
             "--   ③ 开头建了一个临时用的存储过程（就是下面那道门），结尾删掉。它需要",
             "--      CREATE ROUTINE 权限（root 有）；建不出来时脚本会停在那几行——",
             "--      那是安全的一侧，因为它一行都还没执行。",
-            f"-- {RULE}",
-            "",
-            "-- 【那道门是什么】",
-            "--",
-            "--   每条【检查】后面都跟着两行：一句 `SELECT EXISTS(…) INTO @xlp_hits`",
-            "--   与一次 `CALL xlp_check_empty(@xlp_hits, '…')`。",
-            "--",
-            "--   检查本身只是一句 SELECT：它把可疑的数据**打出来给你看**，而 mysql 客户端不会",
-            "--   因为你看见了就停下——没有这道门时，脚本会带着这些问题继续往下跑 DDL，等到",
-            "--   某条 ALTER 真正撞上时才报一句与真正原因无关的英文错误，而那时库已经改了一半",
-            "--   （MySQL 的 DDL 不在事务里，中途失败不会回滚）。",
-            "--",
-            "--   所以紧跟的这两行把**同一条检查**再问一遍「有没有」——检查 SQL 原样套进",
-            "--   `EXISTS(...)`，一个字不改——有就 SIGNAL，客户端当场中断，一行 DDL 都还没跑。",
-            f"-- {LINE}",
-            f"DROP PROCEDURE IF EXISTS {GUARD_PROCEDURE};",
-            "DELIMITER //",
-            f"CREATE PROCEDURE {GUARD_PROCEDURE}(IN p_hits INT, IN p_what VARCHAR(255))",
-            "BEGIN",
-            "  IF p_hits > 0 THEN",
-            "    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = p_what;",
-            "  END IF;",
-            "END //",
-            "DELIMITER ;",
-            f"-- {LINE}",
         ]
-    )
+    else:
+        # 零检查时**不提存储过程**：这一份里不建它（`_guard_section` 的注释写着理由），
+        # 而一段说明一件不会发生的事的话，会让人以为权限没给对。
+        lines += [
+            "--   注意两件事：",
+            "--   ① 这个文件是 UTF-8、含中文注释，**必须**带 --default-character-set=utf8mb4，",
+            "--      否则中文会按连接编码解成乱码（注释无所谓，但你要读的就是它）。",
+            "--   ② 【只该执行一次】。跑第二遍会撞 Duplicate column / Duplicate key name 之类的错，",
+            "--      那是正常的，不是文件坏了。",
+        ]
+
+    lines += [f"-- {RULE}", ""]
+
+    if precheck_count:
+        lines += _guard_section()
+
+    return "\n".join(lines)
+
+
+def _guard_section() -> list[str]:
+    """那道门的一整段：说明 + 临时存储过程。**只在有检查的文件里出现。**
+
+    零检查的文件里不该有这一段，理由不是省几行字：它会在客户的库里 `CREATE PROCEDURE`
+    ——一个需要 `CREATE ROUTINE` 权限、且建完立刻删的动作，而那一份里**一次都不会
+    `CALL` 它**。代价是操作员可能卡在一句「权限不够」上，而那句错与这次升级毫无关系
+    （他只想升个库）。所以门与检查同进同出：没有检查就没有门。
+    """
+    return [
+        "-- 【那道门是什么】",
+        "--",
+        "--   每条【检查】后面都跟着两行：一句 `SELECT EXISTS(…) INTO @xlp_hits`",
+        "--   与一次 `CALL xlp_check_empty(@xlp_hits, '…')`。",
+        "--",
+        "--   检查本身只是一句 SELECT：它把可疑的数据**打出来给你看**，而 mysql 客户端不会",
+        "--   因为你看见了就停下——没有这道门时，脚本会带着这些问题继续往下跑 DDL，等到",
+        "--   某条 ALTER 真正撞上时才报一句与真正原因无关的英文错误，而那时库已经改了一半",
+        "--   （MySQL 的 DDL 不在事务里，中途失败不会回滚）。",
+        "--",
+        "--   所以紧跟的这两行把**同一条检查**再问一遍「有没有」——检查 SQL 原样套进",
+        "--   `EXISTS(...)`，一个字不改——有就 SIGNAL，客户端当场中断，一行 DDL 都还没跑。",
+        f"-- {LINE}",
+        f"DROP PROCEDURE IF EXISTS {GUARD_PROCEDURE};",
+        "DELIMITER //",
+        f"CREATE PROCEDURE {GUARD_PROCEDURE}(IN p_hits INT, IN p_what VARCHAR(255))",
+        "BEGIN",
+        "  IF p_hits > 0 THEN",
+        "    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = p_what;",
+        "  END IF;",
+        "END //",
+        "DELIMITER ;",
+        f"-- {LINE}",
+    ]
 
 
 def _guard_form(sql: str) -> str:
@@ -463,33 +590,48 @@ def _migration_section(
     )
 
 
-def _footer(chain: list[tuple[str, Path]]) -> str:
+def _footer(chain: list[tuple[str, Path]], has_guard: bool = True) -> str:
+    """文件尾。`has_guard` 与 `_guard_section` 同一个判据：没有门的时候不删一个不存在的东西。
+
+    原文那一句「把开头建的那个临时存储过程删掉」在一份零检查的文件里是**一句谎话**
+    （那一份里根本没建它），而 `DROP PROCEDURE IF EXISTS` 本身不会报错——所以它会静静地
+    留在那里，读的人只会以为自己漏看了开头那一段。
+    """
     head = chain[-1][0]
-    return "\n".join(
-        [
-            f"-- {RULE}",
-            "-- 到这里就结束了。核对一句：",
-            "--   SELECT version_num FROM alembic_version;",
-            f"-- 应当是 {head}。",
-            "--",
-            "-- 程序文件那一侧照常走一键安装包（升级模式不会重跑 seed、不会重置管理员密码、",
-            "-- 不会碰数据库里的数据，只更新程序文件并再跑一次迁移——那时这一步已经是空转的）。",
+    lines = [
+        f"-- {RULE}",
+        "-- 到这里就结束了。核对一句：",
+        "--   SELECT version_num FROM alembic_version;",
+        f"-- 应当是 {head}。",
+        "--",
+        "-- 程序文件那一侧照常走一键安装包（升级模式不会重跑 seed、不会重置管理员密码、",
+        "-- 不会碰数据库里的数据，只更新程序文件并再跑一次迁移——那时这一步已经是空转的）。",
+    ]
+    if has_guard:
+        lines += [
             f"-- {LINE}",
             "-- 把开头建的那个临时存储过程删掉（它只在这一趟里有意义）。",
             "-- 上一次执行被 SIGNAL 中断时这一句跑不到，所以开头还有一次 DROP ... IF EXISTS。",
             f"DROP PROCEDURE IF EXISTS {GUARD_PROCEDURE};",
-            f"-- {RULE}",
         ]
-    )
+    lines.append(f"-- {RULE}")
+    return "\n".join(lines)
 
 
 def compose(
     chain: list[tuple[str, Path]],
     prechecks: dict[str, list[tuple[str, str]]],
     blocks: dict[str, str],
+    baseline: Baseline = DEFAULT_BASELINE,
 ) -> str:
+    """把三段拼成那份文件。**纯函数**：一个字节都不落盘（守卫直接调它，理由见守卫那个文件）。
+
+    `baseline` 只影响文件头那两行与文件名——链、检查、DDL 三样全部由调用方给，
+    而它们各自都已经按同一条基线算好了（`migration_chain(baseline)` 那一条）。
+    这个参数存在的意义是「同一份实现、两个起点」：换起点换的是取数，不是排版。
+    """
     precheck_count = sum(len(checks) for checks in prechecks.values())
-    parts = [_header(chain, precheck_count)]
+    parts = [_header(chain, precheck_count, baseline)]
     for index, (revision, _path) in enumerate(chain, start=1):
         if revision not in blocks:
             # 渲染出来的块与链对不齐时当场停下：少一块意味着某条迁移的 DDL 没进文件，
@@ -502,22 +644,27 @@ def compose(
                 index, len(chain), revision, prechecks.get(revision, []), blocks[revision]
             ),
         ]
-    parts += ["", "", _footer(chain), ""]
+    parts += ["", "", _footer(chain, has_guard=bool(precheck_count)), ""]
     return "\n".join(parts)
 
 
-def build(output_dir: Path | None = None) -> list[Path]:
-    """生成增量 SQL，写两个地方，返回写出来的路径。
+def build(output_dir: Path | None = None, baseline: Baseline = DEFAULT_BASELINE) -> list[Path]:
+    """生成**某一个起点**的增量 SQL，写两个地方，返回写出来的路径。
 
     `backend/sql/` 那一份是**仓库里的快照**（随 `backend/` 一起进包，落在安装目录的
     `backend\\sql\\` 下）；`dist/` 那一份是拿给执行的人的那张。两处**同一个文件名**。
-    """
-    chain = migration_chain()
-    text = compose(chain, collect_prechecks(chain), render_ddl_blocks())
 
-    targets = [SQL_DIR / OUTPUT_NAME]
+    `output_dir` 排在 `baseline` 前面是**为了不动既有调用点**（`build_package.py` 里
+    那句 `build(DIST)` 是位置参数）。加第二个起点不该让老调用点跟着改——要生成全部
+    起点的是 `build_all`，而它的名字把这件事说出来了。
+    """
+    chain = migration_chain(baseline)
+    text = compose(chain, collect_prechecks(chain), render_ddl_blocks(baseline), baseline)
+
+    name = output_name(baseline)
+    targets = [SQL_DIR / name]
     if output_dir is not None:
-        targets.append(output_dir / OUTPUT_NAME)
+        targets.append(output_dir / name)
     for target in targets:
         target.parent.mkdir(parents=True, exist_ok=True)
         # `newline="\n"`：这个文件可能被拷到 Windows 上执行，而 CRLF 在 mysql 客户端里
@@ -526,9 +673,22 @@ def build(output_dir: Path | None = None) -> list[Path]:
     return targets
 
 
+def build_all(output_dir: Path | None = None) -> list[Path]:
+    """把 `BASELINES` 里每一份都生成出来，返回**全部**写出来的路径（仓库里 + `output_dir` 下）。
+
+    出包与 `make db-upgrade-sql` 走的是这一个。**不做成「只生成最新那一份」**：
+    客户手上不止一种库，而少生成一份的后果是那台机器上的操作员在安装目录里
+    `backend\\sql\\` 下找不到自己起点的那份文件——他会以为是自己看漏了。
+    """
+    written: list[Path] = []
+    for baseline in BASELINES:
+        written += build(output_dir, baseline)
+    return written
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="生成「从 V1.0.0 升到当前版本」的数据库增量 SQL"
+        description="生成「从各个交付基线升到当前版本」的数据库增量 SQL（每份一个起点、一个文件）"
     )
     parser.add_argument(
         "--output-dir",
@@ -537,9 +697,13 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    chain = migration_chain()
-    print(f"迁移链：{BASELINE_REVISION} → ... → {chain[-1][0]}（{len(chain)} 条）")
-    for target in build(Path(args.output_dir)):
+    for baseline in BASELINES:
+        chain = migration_chain(baseline)
+        print(
+            f"迁移链：{baseline.label}（{baseline.revision}）→ ... → "
+            f"{chain[-1][0]}（{len(chain)} 条迁移）"
+        )
+    for target in build_all(Path(args.output_dir)):
         size = target.stat().st_size
         print(f"  {target.relative_to(ROOT)}  ({size} 字节)")
     return 0
