@@ -4277,7 +4277,14 @@ test.describe('缺陷回归', () => {
     // 反过来写的话 `toHaveCount(0)` 会在详情还没返回那一帧就通过，
     // 扫的是一块空区域。这与 vocabulary.spec.ts 「先证明有东西可扫」是同一条教训。
     await expect(page.getByRole('button', { name: '重新打开档案' })).toBeVisible();
-    await expect(page.locator('.pill', { hasText: '已关闭' })).toBeVisible();
+    // `.first()` 不是随手挑一个。这一页上「当前阶段」**有意出现两处**（首屏摘要头一格、
+    // 「本次测评事实」卡一格），两处渲染的是同一个 `statusLabel(case_status)` 药丸——
+    // 于是 strict mode 下 `toBeVisible()` 会以「命中 2 个」报错：**两处都对，反而红**。
+    // 上面那句注释才是这条用例要说的事（「这一页显示了已关闭」），至少一处可见就成立；
+    // 「恰好一个」从来不是它的判据，只是那个定位器写法顺带的假设。
+    // 与 §24 那条同源：`.task-card').first()` 假设「第一张卡就是能点的那张」，
+    // 换成按意图定位才是那些用例真正要说的事。
+    await expect(page.locator('.pill', { hasText: '已关闭' }).first()).toBeVisible();
     await expect(page.getByText('关注档案不存在')).toHaveCount(0);
 
     // 还原：把这个档案打开回去，免得演示库里的 CLOSED 越攒越多

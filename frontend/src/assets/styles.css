@@ -408,6 +408,21 @@
 .pill.gray { color: #536274; background: #f0f3f6; }
 .pill.purple { color: var(--purple); background: var(--purplebg); }
 
+/* ========== 变化量（「较上次 +8 分」/「+12%」）==========
+ *
+ * 两个使用者：个案详情的「历次趋势」页签（`CareCaseDetailPage.vue`）与它里面那八个
+ * 维度格子（`DimensionTrends.vue`）——**父子两个组件都要用，所以它只能住在全局**：
+ * scoped 样式只覆盖自己模板里的元素，父组件那份到不了子组件内部。
+ *
+ * 方向由 `services/trend.ts` 的 `deltaTone()` 定（**升高是红、降低是绿**，与
+ * `levelTone` 同向：MHT 分越高、档越重），所以颜色与同一张卡上那个药丸不可能各说各话。
+ * 这里只负责把那个判断落成颜色——**不引新 Token**（用的都是 `.pill` 那一套里已有的三个）。
+ *
+ * `gray` 同时覆盖「持平」与「比不了」：两者都没有方向可说。 */
+.delta-red { color: var(--red); }
+.delta-green { color: var(--green); }
+.delta-gray { color: var(--muted); }
+
 /* ========== Buttons ========== */
 .btn {
   border: 1px solid #c8d3df;
@@ -2774,10 +2789,23 @@ tbody tr:hover td {
   margin-bottom: 5px;
 }
 
+/* `display` 在这里**刻意不声明**（2026-09-27，§5.15.9 UX-FINAL-02）。
+ *
+ * 它此前是 `display: flex; align-items: flex-start; gap: 10px` —— 那个形状服务的是
+ * 「图标 + 一段文字」两栏，而全站这 48 处 `.notice` 里**一处在用图标都没有**，每一处
+ * 都是一整段话。flex 的副作用是：段内每一个**行内元素**都变成一个独立的 flex item
+ * 横着排开、各自被挤窄。
+ *
+ * 最难看的一处在 `CareCaseDetailPage.vue` 的「历次趋势」页签：那条作废说明里两个
+ * `<b>`（场次数、`VOIDED_SITTING_LABEL`）飘成了两个浮块，中间那截长文本被压得
+ * 七零八落——**读起来像页面坏了**，而它说的是一件很正经的事。`ReportExportPage.vue`
+ * 与 `PrivacyNote.vue` 里的 `<strong>…</strong><br/>…` 是同一个成因，只是句子短、
+ * 看着没那么怪。回到 block 之后这些行内元素恢复成行内，也就是它们本来就该有的样子。
+ *
+ * 将来真要做「图标 + 文字」的那一天，加一个 `.notice.with-icon` 修饰类，**不要**
+ * 把这条基础规则改回 flex：那会让上面这几处重新破相，而它们看起来都只是「一段话」。
+ */
 .notice {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
   padding: 13px 14px;
   border-radius: 11px;
   color: #285665;

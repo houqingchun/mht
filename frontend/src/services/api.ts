@@ -552,10 +552,22 @@ export interface CareCaseDetail {
    * 那是另一条路（批量分配逐行带号用）。
    */
   case_version: number
+  /**
+   * 负责人（2026-09-27，UX-FINAL-02）。与 `CareCaseItem` 上那两个同名字段
+   * **同源同义**（服务端两处都是 `owner_id` + `owner.display_name`），
+   * 所以列表与详情拼得出同一个名字。未分配时 `owner_id` 为 `null`。
+   */
+  owner_id: number | null
+  owner_name: string | null
   assessment: AssessmentOverview
   risk_events: Array<{
     id: number
     risk_type: string
+    /**
+     * 筛查信号类型（三档，`SIGNAL_TYPE_LABELS`）。**由服务端从 `risk_type`
+     * 映射后下发**，前端不自己抄那份六→三的对照表。
+     */
+    signal_type: string
     risk_level: string
     trigger_rule: string
     status: string

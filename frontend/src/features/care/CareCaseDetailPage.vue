@@ -12,7 +12,8 @@ import DimensionRadar from '../../components/DimensionRadar.vue'
 import ClassComparisonPanel from '../../components/ClassComparisonPanel.vue'
 import { showToast } from '../../services/toast'
 import { useSettings } from '../../composables/useSettings'
-import { daysFromNow, formatDuration, today } from '../../services/dates'
+import { daysFromNow, formatDateTime, formatDuration, today } from '../../services/dates'
+import { deltaTone, latestScoreDelta, scoredPoints } from '../../services/trend'
 import {
   VOIDED_SITTING_LABEL,
   VOIDED_TASK_SOURCE_NOTE,
@@ -21,10 +22,13 @@ import {
   calculationStatusTone,
   careEventLabel,
   careEventTone,
+  dimensionLabel,
+  dimensionTone,
   genderLabel,
   levelLabel,
   levelTone,
   retestStatusLabel,
+  signalTypeLabel,
   sourceLabel,
   statusLabel,
   statusTone,
@@ -167,6 +171,151 @@ const latestDuration = computed(() => {
  * 却说「上面有 0 场已作废」，那是关于数据的一句错话（§14）。
  */
 const voidedCount = computed(() => (detail.value?.history || []).filter(h => h.task_voided).length)
+
+/* ---- 历次趋势页签的三块数据（2026-09-27，§5.15.9 UX-FINAL-02）------------------------
+ *
+ * 这一页原本只画一张折线，「他现在比上次好还是差」——**趋势页最该回答的那个问题**——
+ * 要读者自己从两三个点上看出来。这里把三个数一次算好交给模板：
+ *
+ * - `scoredHistory`：有分数的那些场。判据在 `services/trend.ts`，与 `TrendChart`
+ *   **同一处定义**：否则图上最后一个点与下面那个「最近一次」会在「有会话但没有结果行」
+ *   的场次上分岔，而两个数印在同一张卡上（CLAUDE.md §11 那一族）。
+ * - `latestSitting`：最近一次那一个点，没有就整格不显示。
+ * - `latestDelta`：最近一次减上一次。**`null` 不是 `0`**——只测过一次时是「比不了」，
+ *   不是「持平」（§11 那条 `rate_or_none` 的同一条）。
+ *
+ * 三个都是 `computed`，换学生 / 换档案时跟着 `detail` 重算，不留上一个人的数
+ * （§14：一次失败的读取不许留下上一次的答案）。
+ */
+const scoredHistory = computed(() => scoredPoints(detail.value?.history || []))
+const latestSitting = computed(() => scoredHistory.value[scoredHistory.value.length - 1] ?? null)
+const latestDelta = computed(() => latestScoreDelta(scoredHistory.value))
+
+/* ---- 个案摘要头（2026-09-27，§5.15.3 UX-FINAL-02）-----------------------------------
+ *
+ * 这一页有七个页签，而「这个学生现在什么状态」原本要翻进「测评概览」逐行读。摘要头
+ * 把七项并成一条，全是**读**的东西——**一个字段都不新取**：下面每一格的数据都来自
+ * `get_care_case` 已经在发的响应（其中 `owner_name` 与 `risk_events[].signal_type`
+ * 是本次补下发的两个键，理由见 `api.ts` 里那两条 JSDoc）。
+ *
+ * **刻意不给 `tier-primary`**（§5.15.2）：这一页的主工作区是下面那条「下一步操作」
+ * ——老师是来这儿干活的，摘要只是他动手前要看的那一眼。一页最多一个主工作区，给了
+ * 摘要就会与那条 sticky 的动作条抢同一层，而全页都重 = 全页都不重。
+ * 走 `tier-supporting`：它是「读的、次要的、不占工作时间的信息」那一档。
+ *
+ * **也不加 `role="status"` / `aria-live`**：`e2e/app.spec.ts` 的 `pageNotice` 取
+ * `p[role="status"]` 定位页级提示，而这一条是常驻内容、不是提示——挂一个 live region
+ * 上去会让读屏软件每次进这一页都把十格重念一遍。
+ * ---------------------------------------------------------------------------------- */
+
+/** 年级 + 班级。两段都可能为空，所以在脚本里拼而不是在模板里拼——模板里一个空值就会
+ *  留下一个多余的空格，渲染出「 1班」这种看不见的脏字符。 */
+const summaryClassName = computed(() => {
+  const student = detail.value?.student
+  if (!student) return '—'
+  return [student.grade, student.class_name].filter(Boolean).join(' ') || '—'
+})
+
+/**
+ * 关注来源：这份关注是从哪来的。
+ *
+ * 取 `risk_events[].signal_type`（三档），**不取 `risk_type`**：后者是六档的规则码，
+ * 界面上从来没有它的词条，而「六 → 三」那张对照表住在 `scale_engine` 里
+ * （`SIGNAL_TYPE_BY_RISK_TYPE`）——在 `labels.ts` 里再抄一份就是第二张映射表，两张
+ * 必漂而漂了不会有任何东西报错（§3「唯一映射层」）。所以由服务端映射好再下发。
+ *
+ * 去重、保留服务端给的次序（`id.desc()`，最新在前）：同一名学生复测过两轮时，两轮
+ * 可能是同一种信号，逐条印出来只会把这一格撑长。**去重只去重复的种类**——一份档案
+ * 同时有「普通筛查信号」与「重点题人工复核」时两个都要说出来，只留最新那一条会让
+ * 另一条看起来不曾发生过。
+ */
+const summarySignals = computed(() => {
+  const seen: string[] = []
+  for (const event of detail.value?.risk_events || []) {
+    if (event.signal_type && !seen.includes(event.signal_type)) seen.push(event.signal_type)
+  }
+  return seen
+})
+
+/**
+ * 主要关注维度：本次结果里落在 `HIGH` 的那几项。
+ *
+ * 判据是 `dimension.level === 'HIGH'`（`dimension_bands` 的第三档）。**这一格不印
+ * 任何等级词**：`levelLabel` / `levelTone` 映射的是 `total_level`（关注等级：重点关注
+ * / 需要关注 / 一般观察），与维度分档是**两个轴**——印上去会与旁边那格「当前关注等级」
+ * 读成同一件事（`SCORE_DISTRIBUTION_LABELS` 那段注释记着同一个坑）。
+ *
+ * 只印维度分、不印 `score / max_score`：`max_score` 是这一维的题量、各维不同，它是给
+ * 图表的百分比用的（`dimensionPercent`），两个数并排在这一格里反而要人去算。
+ */
+const summaryHighDimensions = computed(() => (detail.value?.dimensions || []).filter(d => d.level === 'HIGH'))
+
+/** 「主要关注维度」那一格最多列几项。理由见 `summaryDimensionText`。 */
+const SUMMARY_DIMENSION_LIMIT = 3
+
+/**
+ * 「主要关注维度」那一格的**值**，在这里拼而不是在模板里拼。
+ *
+ * **为什么只列前三项**（2026-09-27 实测后改，第一版列全）：这是十条里唯一长度不可控的
+ * 一格——一名六个维度都落在 `HIGH` 的学生会把它撑成四行，而同一行其它格子只有四个字，
+ * 于是**整条摘要的高度由最次要的那一格决定**，行内其余九格上下各空一大片。摘要头是
+ * 「扫一眼」的东西，不是维度明细；明细在下面「八维度结果」那张雷达图上，每一项都在。
+ *
+ * **取前三而不按分数排序**：维度分之间不可比——各维题量不同（`max_score` 有的是 10、
+ * 有的是 15），按原始分排会让题量大的维度永远占前三，那不是「主要」。这里保持服务端
+ * 给的次序，也就是量表规则里那八个维度自己的次序（MHT 的标准次序），它是稳定的、有
+ * 意义的，不是随机的。
+ *
+ * 折起来的那些**要说出来**（`等 N 项`）：只印三项而不说还有几项，读起来就是「他就这
+ * 三项高」，而屏幕上正少着三项没说（§10：凡是截断，都要自己说出来）。
+ */
+const summaryDimensionText = computed(() => {
+  const high = summaryHighDimensions.value
+  if (!high.length) return '本场无'
+  const head = high.slice(0, SUMMARY_DIMENSION_LIMIT)
+  const text = head.map(d => dimensionLabel(d.dimension_code) + ' ' + d.score).join('、')
+  return high.length > SUMMARY_DIMENSION_LIMIT ? `${text} 等 ${high.length} 项` : text
+})
+
+/** 有结果行才有维度可谈。「一场都没有维度」与「这一场一个维度都不高」是两句不同的话
+ *  （§14），所以模板里分两支，不共用一句「无」。 */
+const summaryHasDimensions = computed(() => (detail.value?.dimensions || []).length > 0)
+
+/**
+ * 最近一次跟进 / 下一次跟进。
+ *
+ * 两个都是**列表页已有的推导**，这里逐字镜像（`care_service.list_care_cases` 里
+ * `next_follow_up` 那一段）：最近一次 = `follow_ups[0]`（服务端按 `id.desc()` 发，
+ * 最新在前）；下一次 = 全部 `status === 'ACTIVE'` 的跟进记录里 `next_follow_up_date`
+ * **最大**的那一个。
+ *
+ * **不在这里写第二份「今天算不算逾期」的比较**：那是 `services/careQueue.ts` 的
+ * `isDueToday` 的活，而「逾期」在列表页是一枚药丸、在队列里是一个页签，两处必须
+ * 同一个判据（那个模块的注释里写着同一句）。摘要头只说日期——这一格要回答的是
+ * 「什么时候」，不是「还赶不赶得上」。
+ *
+ * 日期是 `YYYY-MM-DD`，字典序与时间序一致，所以取最大直接用 `>` 比字符串，与服务端
+ * 那条 `ORDER BY … DESC` 排的是同一个字段。
+ */
+const summaryLastFollowUp = computed(() => detail.value?.follow_ups[0]?.created_at ?? null)
+
+const summaryNextFollowUp = computed(() => {
+  const dates = (detail.value?.follow_ups || [])
+    .filter(record => record.status === 'ACTIVE' && record.next_follow_up_date)
+    .map(record => record.next_follow_up_date)
+  if (!dates.length) return null
+  return dates.reduce((latest, current) => (current > latest ? current : latest))
+})
+
+/**
+ * 最近一次测评的日期。`tested_at` 优先、历史行回落 `submitted_at`——与下面「本次测评
+ * 事实」那一卡的「测评日期」是**同一句口径**，两处必须取同一个值：一处取 `tested_at`、
+ * 另一处取 `submitted_at` 的话，同一屏会印出两个日期，而历史行的这两个字段都是 null
+ * （0013 刻意没有回填真实测评日，CLAUDE.md §21）。
+ */
+const summaryLastTestedAt = computed(
+  () => detail.value?.assessment.tested_at || detail.value?.assessment.submitted_at || null
+)
 
 async function load() {
   loading.value = true
@@ -519,6 +668,82 @@ onMounted(loadComparison)
     <ErrorState v-if="error && !loading" :message="error" :on-retry="load" />
 
     <template v-if="detail && !loading">
+      <!-- 个案摘要头（2026-09-27，§5.15.3 UX-FINAL-02）。
+
+           十格并成一条，回答的是老师进这一页时的第一句话：「这个学生现在什么状态」。
+           它排在页签**之上**——页签回答「你要看哪一类记录」，而摘要回答「他怎么了」，
+           后者是前者的问题。七项里五项（负责人 / 最近测评 / 最近跟进 / 下次跟进 /
+           关注来源）此前**在首屏一个字都没有**，要翻页签才找得到。
+
+           走 `tier-supporting`（§5.15.2）：这一页的主工作区是下面那条 sticky 的
+           「下一步操作」，摘要是读的东西，不占工作时间。**不加 `tier-primary`**——
+           一页最多一个，而老师是来干活的、不是来看摘要的。
+
+           **十格排成两行，一行五格**（列数由 `.case-summary` 的 `repeat(5, …)` 定死）：
+           第一行是「他是谁、现在怎么样、谁在管」（年级班级 / 学号 / 当前关注等级 /
+           当前阶段 / 负责人），第二行是「关注从哪来、时间线到哪了」（关注来源 /
+           主要关注维度 / 最近测评 / 最近跟进 / 下次跟进）。**列数为什么不交给
+           `auto-fit`**（2026-09-27 实测后改）：十格在 `auto-fit` 下按可用宽度自己折，
+           1440px 下折成 6+4、640px 下折成 3+3+3+1，两种都会在最后一行右侧空出两三格
+           ——那是「表格没填满」的长相，比任何一句文案都更像页面坏了。5 与 10 整除，
+           两行都填满。
+
+           每一格都**不条件渲染**：缺值出 `—`（或「未分配」），不留空框。一处空白
+           与「这里没有这一项」在屏幕上长得一样，而前者读起来像页面坏了（§14）。 -->
+      <div class="card tier-supporting case-summary">
+        <div class="case-summary-cell">
+          <span class="case-summary-label">年级班级</span>
+          <span class="case-summary-value">{{ summaryClassName }}</span>
+        </div>
+        <div class="case-summary-cell">
+          <!-- 学号单独一格：页头的标题只有姓名，而「同名的两名学生」在这套系统里是
+               明写成立的一种情况（导入按学号判重、按性别与年龄消歧，§18.4）。 -->
+          <span class="case-summary-label">学号</span>
+          <span class="case-summary-value">{{ detail.student.student_no || '—' }}</span>
+        </div>
+        <div class="case-summary-cell">
+          <span class="case-summary-label">当前关注等级</span>
+          <span :class="['pill', levelTone(detail.assessment.total_level)]">{{ levelLabel(detail.assessment.total_level) }}</span>
+        </div>
+        <div class="case-summary-cell">
+          <span class="case-summary-label">当前阶段</span>
+          <span :class="['pill', statusTone(detail.case_status)]">{{ statusLabel(detail.case_status) }}</span>
+        </div>
+        <div class="case-summary-cell">
+          <!-- 「未分配」而不是 `—`：它是这份档案**真实的**一种状态（关怀队列里就有
+               一个「未分配」页签），不是缺值。 -->
+          <span class="case-summary-label">负责人</span>
+          <span class="case-summary-value">{{ detail.owner_name || '未分配' }}</span>
+        </div>
+        <div class="case-summary-cell">
+          <span class="case-summary-label">关注来源</span>
+          <span class="case-summary-value">{{ summarySignals.length ? summarySignals.map(signalTypeLabel).join('、') : '—' }}</span>
+        </div>
+        <div class="case-summary-cell">
+          <span class="case-summary-label">主要关注维度</span>
+          <!-- 两支分岔不是罗嗦：没有维度行（还没测 / 没算出来）与「这一场一个维度都不高」
+               是两句不同的话，而共用一句「无」会让前一种读成后一种——一个还没测评的
+               学生看起来像「测过了，没事」（§11 那条「还没测」与「测了没事」不是一回事）。
+               值由 `summaryDimensionText` 拼（只列前三项 + 「等 N 项」，理由见那里）。 -->
+          <span class="case-summary-value">
+            <template v-if="!summaryHasDimensions">—</template>
+            <template v-else>{{ summaryDimensionText }}</template>
+          </span>
+        </div>
+        <div class="case-summary-cell">
+          <span class="case-summary-label">最近测评</span>
+          <span class="case-summary-value">{{ formatDateTime(summaryLastTestedAt) }}</span>
+        </div>
+        <div class="case-summary-cell">
+          <span class="case-summary-label">最近跟进</span>
+          <span class="case-summary-value">{{ formatDateTime(summaryLastFollowUp) }}</span>
+        </div>
+        <div class="case-summary-cell">
+          <span class="case-summary-label">下次跟进</span>
+          <span class="case-summary-value">{{ formatDateTime(summaryNextFollowUp) }}</span>
+        </div>
+      </div>
+
       <div class="tabs">
         <button
           v-for="tab in tabs"
@@ -614,10 +839,16 @@ onMounted(loadComparison)
                  所以改叫「测评日期」（在线作答时它就是交卷那一刻，两者本来相同），
                  并在下一行说明这个日期**是谁给的**。历史行两个字段都是 null：0013 刻意没有
                  回填真实测评日（CLAUDE.md §21），所以那时按 `submitted_at` 兜底，
-                 日期来源照实说「待核实」。 -->
+                 日期来源照实说「待核实」。
+
+                 取值与格式都走 `summaryLastTestedAt` + `formatDateTime()`（2026-09-27，
+                 §5.15.3）。此前这里是 `tested_at || submitted_at` 的**内联副本**、印的是
+                 原始 ISO 串——于是同一屏上摘要头写「09-20 13:24」、这一行写
+                 「2026-09-20T13:24:00」，同一个日期两个长相。取值与格式各归一处之后，
+                 两处**构造上不可能漂**。 -->
             <div class="detail-row">
               <span>测评日期</span>
-              <b>{{ detail.assessment.tested_at || detail.assessment.submitted_at || '—' }}</b>
+              <b>{{ formatDateTime(summaryLastTestedAt) }}</b>
             </div>
             <div class="detail-row">
               <span>日期来源</span>
@@ -758,16 +989,43 @@ onMounted(loadComparison)
           <!-- 折线取代了原来的「68 → 54」一行字：MHT 每学期约一次，两三次之后
                一句话报首尾就丢掉了中间那次的形状，而那往往是真正要看的。
                点的颜色 = 这一场自己的筛查分类（阈值属于量表规则版本，前端不画参考线）。 -->
-          <div style="margin-top:15px">
-            <TrendChart :history="detail.history" />
-          </div>
-          <div class="detail-grid" style="margin-top:18px">
-            <div class="detail-row"><span>测评次数</span><b>{{ detail.history.length }} 次</b></div>
-            <div class="detail-row">
-              <span>最近作答用时</span>
-              <b>{{ latestDuration === null ? '暂无记录' : formatDuration(latestDuration) }}</b>
+          <!-- 图与「最近一次」摘要并排。折线的 viewBox 是 560×224，而 `.chart` 是
+               `width:100%; height:auto`——所以在个案详情这张宽卡里它会一路撑到 300px
+               以上，而下面「八维度历次变化」那八个格子每个才 34px 高。给图一个宽度上限
+               （`.trend-split` 的第一列），右侧空出来的地方放摘要：不是把图缩小，
+               是把那一块地方还给真正要读的那几个数。 -->
+          <div class="trend-split" style="margin-top:15px">
+            <div class="trend-chart">
+              <TrendChart :history="detail.history" />
             </div>
-            <div class="detail-row"><span>解释边界</span><b>仅描述分值变化</b></div>
+            <div class="trend-facts">
+              <div v-if="latestSitting" class="detail-row">
+                <span>最近一次</span>
+                <b class="trend-latest">
+                  {{ latestSitting.total_score }} 分
+                  <span class="pill" :class="levelTone(latestSitting.total_level)">
+                    {{ levelLabel(latestSitting.total_level) }}
+                  </span>
+                </b>
+              </div>
+              <!-- 「较上次」是这次补上的一格：趋势页最该回答的就是「比上次升了还是降了」，
+                   而此前只有一张图让人自己看。**没有配「好转 / 恶化」这类词**——一次分值
+                   的升降不构成疗效结论（产品边界）；颜色只说往哪边走，方向与 `levelTone`
+                   一致（分越高、档越重、越红），所以同一张卡上两处颜色不可能互相矛盾。
+                   `—` 是「比不了」的界面占位符（§8 那条的同一个约定），不是 0。 -->
+              <div class="detail-row">
+                <span>较上次</span>
+                <b v-if="latestDelta === null" class="muted">—</b>
+                <b v-else :class="`delta-${deltaTone(latestDelta)}`">
+                  {{ latestDelta > 0 ? '+' : '' }}{{ latestDelta }} 分
+                </b>
+              </div>
+              <div class="detail-row"><span>测评次数</span><b>{{ detail.history.length }} 次</b></div>
+              <div class="detail-row">
+                <span>最近作答用时</span>
+                <b>{{ latestDuration === null ? '暂无记录' : formatDuration(latestDuration) }}</b>
+              </div>
+            </div>
           </div>
           <!-- 只有一场时这一页本来是一排孤零零的点。明说它画不出一张趋势图，
                并把读者送去此刻真正答得上问题的那个页签——MHT 每学期约一次，
@@ -781,12 +1039,13 @@ onMounted(loadComparison)
                `care_service` 那段刻意的「不加 `effective_session_predicate()`」逐字同源
                ——降级/作废说的是「现在以哪一份为准」，不是「那一次不算测评」。
                两句措辞都取自 `labels.ts`，视图里不另抄一份（§3）。 -->
+          <!-- 文本节点写成**连续的一段**（2026-09-27，§5.15.9 UX-FINAL-02）：Vue 的
+               `whitespace: 'condense'` 会把「文本 换行 文本」压成一个空格，而在中文里
+               那个空格是看得见的——此前屏幕上读出来是「都还在 ——但这几场」「他现在
+               怎么样」，两头各多一个不属于原句的空隙。**不是重新排版，是把换行折出来的
+               空格去掉**；标点与措辞一个字没动，两个常量也照旧取自 `labels.ts`（§3）。 -->
           <div v-if="voidedCount > 0" class="notice" style="margin-top:12px">
-            上面有 <b>{{ voidedCount }}</b> 场所属的筛查任务已作废（{{
-              VOIDED_TASK_SOURCE_NOTE
-            }}）。它们仍然画在图上——那几场是他真实考过的，答案、用时、当天的分都还在
-            ——但这几场<b>{{ VOIDED_SITTING_LABEL }}</b>：不要把它们的分数当成他现在
-            怎么样的依据，也不要据此比较变化。
+            上面有 <b>{{ voidedCount }}</b> 场所属的筛查任务已作废（{{ VOIDED_TASK_SOURCE_NOTE }}）。它们仍然画在图上——那几场是他真实考过的，答案、用时、当天的分都还在——但这几场<b>{{ VOIDED_SITTING_LABEL }}</b>：不要把它们的分数当成他现在怎么样的依据，也不要据此比较变化。
           </div>
           <div class="notice" style="margin-top:12px">
             趋势只描述历次分值变化，不构成诊断或疗效结论。
@@ -1008,3 +1267,115 @@ onMounted(loadComparison)
 
   </div>
 </template>
+
+<style scoped>
+/* 个案摘要头（2026-09-27，§5.15.3 UX-FINAL-02）。
+ *
+ * 这个文件此前**没有样式块**——这一页的长相全部来自全局 `styles.css`。摘要头是这一页
+ * 独有的形状（十个 label/value 格并成一条），而全局那三类网格各管各的：`.detail-grid`
+ * 是两列的「标签 → 值」详情（这一页的「本次测评事实」用的就是它）、`.perm-grid` 是角色
+ * 权限矩阵、`.conventions` 是取值约定对照表。没有一个是它，所以在这里新开一个 scoped
+ * 块，不去动全局。
+ *
+ * **只写排布，不写颜色与边框**：底色、边框、圆角、阴影全部由 `.card.tier-supporting`
+ * 给（§5.15.2 那条「不新增任何 Token」）——在这里再抄一遍 `--surface2` 与 `#e6ecf2`
+ * 就是把同一件事写成两份，而漂了不会有任何东西报错。
+ *
+ * **列数定死成五列，不交给 `auto-fit`**：十格在 `auto-fit` 下按可用宽度自己折，
+ * 1440px 下折成 6+4、640px 下折成 3+3+3+1，两种都会在最后一行右侧空出两三格。
+ * 那是「表格没填满」的长相——它比任何一句文案都更像页面坏了，而这一条摘要的全部
+ * 意义就是「扫一眼就懂」。5 与 10 整除，两行都填满；窄屏切两列（2 与 10 也整除），
+ * 于是从 320px 到 2560px 没有一种宽度会留出空位。
+ *
+ * 中间那一段（约 700–1180px）没有单独一档是有意的：10 的约数只有 1 / 2 / 5 / 10，
+ * 三列与四列都会在最后一行留白——**宁可格子宽一点，也不要一块填不满的表格**。 */
+.case-summary {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 11px 14px;
+  padding: 14px 17px;
+  margin: 0 0 14px;
+}
+
+.case-summary-cell {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.case-summary-label {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+/* `overflow-wrap: anywhere`：「主要关注维度」那一格可能是一串顿号连起来的长文本
+   （高分维度多的时候），不给它换行的机会就会把整格顶宽、把网格挤成一行一格。 */
+.case-summary-value {
+  font-size: 0.88rem;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+/* 药丸是 `inline-flex`，作为 grid item 默认会被 `stretch` 拉成整格宽——一个通栏的
+   药丸会读成「这一格是一条状态条」。靠左按内容宽。 */
+.case-summary-cell .pill {
+  justify-self: start;
+}
+
+/* 五列在这个宽度以下会把每格压到 130px 出头（「重点题人工复核」七个字要折两行），
+   所以切两列。两列时每格约 340px，是「一列标签一列值」都能并排的宽度。 */
+@media(max-width:1180px) {
+  .case-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 14px;
+    padding: 13px 14px;
+  }
+}
+
+/* 「历次趋势」页签：折线与摘要并排（2026-09-27，§5.15.9 UX-FINAL-02）。
+ *
+ * 折线的 `viewBox` 是 560×224，而全局 `.chart` 是 `width:100%; height:auto`——
+ * 在个案详情这张最宽 1560px 的卡里它会撑到 300px 以上，比下面那八个维度 sparkline
+ * （每个 34px 高）加起来还高。第一列给它一个上限，右侧空出来的地方放摘要。
+ *
+ * **是给图设上限，不是让图缩水**：`minmax(0, 660px)` 在宽屏上就是 660px（比原来的
+ * 560 viewBox 略宽，点不会挤），窄屏则跟着容器收窄，图本身一个像素都没动。
+ *
+ * 第二列的下限 190px 是「最近一次」那一格要的：它是「54 分 ＋ 一个药丸」，
+ * 药丸是 `white-space: nowrap`（全局 `.pill`），再窄就会把那一行挤出去。 */
+.trend-split {
+  display: grid;
+  grid-template-columns: minmax(0, 660px) minmax(190px, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+/* 四行之间靠 `.detail-row` 自带的下边框分隔（全局那一条已经是
+   `flex + space-between + padding: 12px 0 + border-bottom`），这里不再另加线——
+   两层线会在第一行上方多出一条孤零零的短横。 */
+.trend-facts {
+  display: grid;
+  gap: 0;
+  align-content: start;
+}
+
+/* 「54 分」与它那一档的药丸同一行。`<b>` 默认是 inline，改成 inline-flex 之后
+   `.detail-row` 的 `space-between` 仍然把它整体推到右侧，而里面那两段之间走 gap。 */
+.trend-latest {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+/* 窄屏叠成一列。断点取 860px：再宽一点两列都还站得住（660 + 190 + 20 = 870），
+   而 860 以下图会被压到 600px 以内、摘要那 190px 也开始挤药丸。 */
+@media(max-width:860px) {
+  .trend-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* `.delta-red` / `.delta-green` / `.delta-gray` 不在这里定义：`DimensionTrends`
+   同一天也要用同一套颜色，而 scoped 样式出不了这个组件——各写一份就是两个定义。
+   它们住在 `styles.css` 里 `.pill` 色调那一节后面（全局那一处）。这里只管排布。 */
+</style>

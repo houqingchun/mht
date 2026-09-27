@@ -11,6 +11,7 @@
  */
 import { computed } from 'vue'
 import { dimensionLabel, dimensionPercent } from '../services/labels'
+import { deltaTone } from '../services/trend'
 
 interface HistoryEntry {
   session_id: number
@@ -26,6 +27,14 @@ interface Series {
   percents: number[]
   first: number
   last: number
+  /**
+   * 首次 → 最近的变化量。只有一次时是 `null`（比不了），**不是 `0`**（CLAUDE.md §11）。
+   *
+   * 与 `services/trend.ts` 的 `latestScoreDelta` 不是同一个量：那个是「最近两次」之差
+   * （给总分那条摘要用），这个是「首次 → 最近」（跟着这一格的 `首次 x% / 最近 y%` 走）。
+   * 两者都不是随便挑的——各自与自己那两行文案同源。
+   */
+  delta: number | null
 }
 
 /**
@@ -51,7 +60,8 @@ const series = computed<Series[]>(() => {
       label: dimensionLabel(code),
       percents,
       first: percents[0],
-      last: percents[percents.length - 1]
+      last: percents[percents.length - 1],
+      delta: percents.length > 1 ? percents[percents.length - 1] - percents[0] : null
     }
   })
 })
@@ -85,7 +95,18 @@ function lineOf(percents: number[]) {
   <div v-if="!series.length" class="empty">暂无维度趋势数据</div>
   <div v-else class="spark-grid">
     <div v-for="item in series" :key="item.code" class="spark">
-      <div class="spark-title">{{ item.label }}</div>
+      <div class="spark-title">
+        <span>{{ item.label }}</span>
+        <!-- 「首次 → 最近」的变化量。此前脚下印着两个百分比，差值要读者心算八次，
+             而这一页要回答的恰恰是「哪个维度在往哪边走」。**只上色，不配「好转 /
+             恶化」这类词**——一次分值的升降不构成疗效结论（产品边界）。颜色方向与
+             总分那张卡同源：都在 `services/trend.ts` 的 `deltaTone` 里判。 -->
+        <span
+          v-if="item.delta !== null"
+          class="spark-delta"
+          :class="`delta-${deltaTone(item.delta)}`"
+        >{{ item.delta > 0 ? '+' : '' }}{{ item.delta }}%</span>
+      </div>
       <svg class="chart" :viewBox="`0 0 ${W} ${H}`" role="img" :aria-label="`${item.label} 历次变化`">
         <polyline v-if="item.percents.length > 1" class="spark-line" :points="lineOf(item.percents)" />
         <circle
@@ -106,3 +127,34 @@ function lineOf(percents: number[]) {
     </div>
   </div>
 </template>
+
+<style scoped>
+/* 标题行：维度名在左、变化量在右（2026-09-27，§5.15.9 UX-FINAL-02）。
+ *
+ * 这个文件此前**没有样式块**——八个格子的长相全部来自全局 `styles.css` 的 `.spark-*`
+ * 那一节。这里只加**一条**覆盖：那一节的 `.spark-title` 是纯文本（只有 `font-size` 与
+ * `font-weight`），而 Δ 要贴在右端，所以把它变成一个两端对齐的 flex 行。
+ * `justify-content: space-between` 而不是给 Δ 加 `margin-left: auto`：前者在**没有 Δ**
+ * 的那些格子（只测过一次的学生）里也成立——一个孤零零的维度名仍然靠左。
+ *
+ * 全局那一节一个字没动，其余几个类（`.spark-grid` / `.spark` / `.spark-line` /
+ * `.spark-dot` / `.spark-foot`）照旧——**只写这一条，不借着这次机会把整节搬进来**。
+ *
+ * Δ 的颜色（`.delta-red` / `.delta-green` / `.delta-gray`）住在全局，与个案详情那张
+ * 总分卡共用同一处定义：两处各写一份就是两个定义，而它们漂了不会有任何东西报错。 */
+.spark-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+/* Δ 比维度名弱一档——它是注解，不是第二个标题。`tabular-nums` 让八个格子里的数字
+   等宽：`+8%` 与 `-12%` 在各自格子右端对齐时，不会一个宽一个窄。 */
+.spark-delta {
+  font-size: 0.72rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+</style>
+

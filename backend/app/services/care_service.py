@@ -589,6 +589,13 @@ def get_care_case(db: Session, user: UserAccount, student_id: int) -> dict:
     # （`student_assessment_records`）。两处各拼一份时，同一个字段会在两个屏幕上各说各话，
     # 而漂了不会有任何东西报错——这一页与那一页回答的是同一个学生的同一批列。
     records = student_assessment_records(db, student)
+    # 负责人（2026-09-27，UX-FINAL-02）。`list_care_cases` 一直在发 `owner_id` /
+    # `owner_name`（那一页的「负责人」列与「我负责的 / 未分配」两个页签都读它），而
+    # **这一页此前一个都不发**——于是同一份档案在列表上写着「张三 · 负责」，点进去就
+    # 找不着负责人是谁。「负责」是这份档案自己的属性，与 `case_version` 同一类，
+    # 下发它是补一个已经在库里、列表页已经在用的字段，不是新增业务能力。
+    # 单行查询用 `db.get`，与 `list_care_cases` 那条 join 取的是同一列，结果一致。
+    owner = db.get(UserAccount, care_case.owner_id) if care_case.owner_id else None
     risk_events = db.scalars(select(RiskEvent).where(RiskEvent.student_id == student_id).order_by(RiskEvent.id.desc())).all()
     followups = db.scalars(
         select(FollowUpRecord).where(FollowUpRecord.student_id == student_id).order_by(FollowUpRecord.id.desc())
@@ -631,11 +638,22 @@ def get_care_case(db: Session, user: UserAccount, student_id: int) -> dict:
         # 乐观锁的版本号（§16.4）。**它必须出现在这里**，因为关闭 / 重开都要求
         # 客户端把它带回来——而客户端唯一拿得到它的地方就是这一个响应。
         "case_version": care_case.case_version,
+        # 负责人（2026-09-27）。`owner_name` 取 `display_name`，与 `list_care_cases`
+        # 逐字同源——同一个负责人在列表与详情上必须拼得出同一个名字。
+        "owner_id": care_case.owner_id,
+        "owner_name": owner.display_name if owner else None,
         "assessment": records["assessment"],
         "risk_events": [
             {
                 "id": event.id,
                 "risk_type": event.risk_type,
+                # **筛查信号类型**（2026-09-27）。它是 `risk_event` 表上本来就有的
+                # 一列（NOT NULL，由 `SIGNAL_TYPE_BY_RISK_TYPE` 六→三写入，§21），
+                # 只是这一个端点此前没下发。摘要头要回答「这份关注是从哪来的」，
+                # 而六档 `risk_type` 到三档 `signal_type` 的映射**只能由服务端给**：
+                # 前端 `labels.ts` 里再抄一份的话就是第二张映射表，两张必漂，
+                # 而漂了不会有任何东西报错（§3「唯一映射层」）。
+                "signal_type": event.signal_type,
                 "risk_level": event.risk_level,
                 "trigger_rule": event.trigger_rule,
                 "status": event.status,

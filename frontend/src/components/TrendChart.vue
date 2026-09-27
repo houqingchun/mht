@@ -18,6 +18,7 @@
  */
 import { computed } from 'vue'
 import { levelLabel, levelTone } from '../services/labels'
+import { scoredPoints } from '../services/trend'
 
 interface HistoryPoint {
   session_id: number
@@ -26,19 +27,14 @@ interface HistoryPoint {
   total_level: string | null
 }
 
-interface ScoredPoint extends HistoryPoint {
-  total_score: number
-}
-
 const props = defineProps<{ history: HistoryPoint[] }>()
 
 /**
- * 只画**有分数的**那些场：没有结果行的会话（迁移前只剩会话行）画成 0 分是在撒谎。
- * 缺值直接不画点，让空白自己说明那一场没有结果——比编一个 0 分诚实。
+ * 只画**有分数的**那些场。判据本身在 `services/trend.ts`——个案详情新加的「较上次」
+ * 摘要回答的是同一个问题（「最近一次是哪一次」），两处各写一遍就会在「有会话但没有
+ * 结果行」的场次上分岔，而那两个数印在同一张卡上（CLAUDE.md §11）。
  */
-const points = computed<ScoredPoint[]>(() =>
-  props.history.filter((entry): entry is ScoredPoint => entry.total_score !== null)
-)
+const points = computed(() => scoredPoints(props.history))
 
 const W = 560
 const H = 224
