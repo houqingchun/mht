@@ -260,10 +260,18 @@ onMounted(load)
           <div class="metric-value">{{ overview?.planned_retests ?? 0 }}</div>
           <div class="metric-foot">在办档案名下待完成的复测计划（按学生去重）</div>
         </article>
+        <!-- 这一格的分母是**任务目标**（`total_targets`，含请假 / 免测 / 已排除），
+             而心理老师侧几处写「实际应测」的地方分母是 `eligible_count`（减去那三类）。
+             两个分母都合法、各有各的用途，但**它们不相等**，所以本行把分母写出来
+             （§5.20.3：不同分母必须在界面上能分辨；§9：口径要写进界面）。
+             `completion_rate` 服务端是 `round(completed / total * 100) if total else 0`
+             ——**是 `number`、永不为 `null`**，所以 `?? 0` 在这里没有抹平任何既有的
+             null 语义（§5.20.4 禁的是抹平，不是禁止默认值），值行因此保持原样。
+             按 §5.20.7 第 10 条，既有统计公式不改：两个分母的差异只**说明**、不统一。 -->
         <article class="metric" data-tone="green" role="button" tabindex="0" @click="router.push('/leader/analytics')" @keydown.enter.prevent="router.push('/leader/analytics')" @keydown.space.prevent="router.push('/leader/analytics')">
           <div class="metric-label">测评完成率</div>
           <div class="metric-value">{{ overview?.completion_rate ?? 0 }}%</div>
-          <div class="metric-foot">{{ overview?.completed_targets ?? 0 }} / {{ overview?.total_targets ?? 0 }} 人</div>
+          <div class="metric-foot">{{ overview?.completed_targets ?? 0 }} / {{ overview?.total_targets ?? 0 }} 人（任务目标，含请假 / 免测 / 已排除）</div>
         </article>
       </div>
 

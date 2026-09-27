@@ -30,6 +30,20 @@ const sampleCount = computed(() => quality.value?.n_evaluable || 0)
 const signals = computed(() => overview.value?.signal_student_count || 0)
 const pendingReview = computed(() => overview.value?.pending_review_work_items || 0)
 /**
+ * 「实际应测人数」＝`eligible_count`（任务目标 − 请假 − 免测 − 已排除，CLAUDE.md §29）。
+ *
+ * **它与 `target`（`target_count`，任务目标）是两个数**，此前这一页只有一个 `target`，
+ * 于是「实际应测人数」那张卡的值与它的标签对不上——标签写的是应测，数的是目标。
+ * 两个都给出来，是因为两张卡要各写一个（§5.20.3：不同分母必须能在界面上分辨）。
+ */
+const eligible = computed(() => quality.value?.eligible_count || 0)
+// 覆盖率与信号占比都是**可能不发布**的比率：分母小于 MIN_COHORT_FOR_AGGREGATE 时服务端发
+// `null`。**不许 `?? 0`**——`0` 是「一个都没有」，`null` 是「这几个人算出来不足为凭」，
+// 两者在屏幕上必须长得不一样（CLAUDE.md §11）。所以两个 computed 都保留 `null`，
+// 由模板分两支渲染；`?? 0` 会把后者伪装成前者，而那正是 §5.20.4 禁止的那种抹平。
+const coverageRate = computed(() => quality.value?.coverage_rate ?? null)
+const signalRate = computed(() => overview.value?.signal_rate ?? null)
+/**
  * 效度复测建议的人数读 `sample_quality.validity_flagged_count`，**不读 `signal_type_stats`**。
  *
  * 这一格此前是 `signalCount('RETEST_RECOMMENDED')`，而在库里它恒为 0——`signal_type_stats`
@@ -106,11 +120,16 @@ function reset() { report.value = null; error.value = ''; loading.value = false 
   <ErrorState v-if="error" :message="error"/>
   <div v-else-if="loading" class="loading">加载中…</div>
   <template v-else-if="report">
+    <!-- 四张卡的口径（§5.20.3：同一屏上不同分母必须能在界面上分辨）：
+         卡 1 是**实际应测人数**（`eligible_count`＝目标 − 请假 − 免测 − 已排除），
+         卡 2 是它的**已完成**部分。两张卡的分母因此是同一个（实际应测），
+         而卡 1 的 hint 写出那个更大的一级数（任务目标，含被排除的几人）——
+         这正是此前缺的那句话：标签写「实际应测人数」而数是目标，两个数只出现了一个。 -->
     <div class="kpis">
-      <KpiCard label="实际应测人数" :value="target.toLocaleString('zh-CN')" hint="当前任务统计分母"/>
-      <KpiCard label="已完成测评" :value="completed.toLocaleString('zh-CN')" :hint="'完成率 '+ (target ? (completed/target*100).toFixed(1)+'%' : '—')" tone="green" icon="check"/>
-      <KpiCard label="可评价样本" :value="sampleCount.toLocaleString('zh-CN')" hint="用于当前聚合分析" icon="chart"/>
-      <KpiCard label="存在筛查信号" :value="signals" :hint="'占可评价样本 '+(sampleCount ? (signals/sampleCount*100).toFixed(1)+'%' : '—')" tone="red" icon="alert"/>
+      <KpiCard label="实际应测人数" :value="eligible.toLocaleString('zh-CN')" :hint="'任务目标 '+target.toLocaleString('zh-CN')+' 人（含请假 / 免测 / 已排除）'"/>
+      <KpiCard label="已完成测评" :value="completed.toLocaleString('zh-CN')" :hint="'实际应测 '+eligible.toLocaleString('zh-CN')+' 人'" tone="green" icon="check"/>
+      <KpiCard label="可评价样本" :value="sampleCount.toLocaleString('zh-CN')" :hint="coverageRate != null ? '覆盖率 '+coverageRate.toFixed(1)+'%（可评价 / 实际应测）' : '覆盖率：样本不足'" icon="chart"/>
+      <KpiCard label="存在筛查信号" :value="signals" :hint="signalRate != null ? '占可评价样本 '+signalRate.toFixed(1)+'%' : '占可评价样本：样本不足'" tone="red" icon="alert"/>
     </div>
 
     <!-- 前三格看起来是「同一批码的三类筛查信号」，**实际不是**：前两格来自 `risk_event`
@@ -142,7 +161,12 @@ function reset() { report.value = null; error.value = ''; loading.value = false 
       </section>
       <section class="card">
         <h2 class="section-title">测评完成情况</h2>
-        <CompletionDonut :completed="completed" :target="target"/>
+        <!-- `target` 传的是**实际应测人数**（`eligible`），不是任务目标（`target`）：
+             这一格问的是「该测的人里测了多少」，请假 / 免测 / 已排除的学生不进分母
+             （CLAUDE.md §29 那条算式）。传目标人数会让圆心与图例把一名免测学生算成
+             「未完成」——而 §5.20.4 要求「尚未完成测评」与「不可评价」分开表达。
+             任务目标那个数在卡 1 的 hint 与「统计解释边界」第 ⑦ 条里写着。 -->
+        <CompletionDonut :completed="completed" :target="eligible"/>
       </section>
       <!-- `cover-card` 是**只给这一张卡**的 flex 列（不加在 `section.card` 上：那三张卡里
            只有这一张需要「内容吃掉卡片剩余高度」，改公共那条会同时动另外两张的块间距，
@@ -160,20 +184,33 @@ function reset() { report.value = null; error.value = ''; loading.value = false 
       <section class="card">
         <h2 class="section-title">当前工作进展</h2>
         <div class="table-scroll">
+          <!-- **没有「完成率」这一列**（§5.20.3）。此前它只有第一行有值，而那个值是
+               `completed / target` 的**前端现算**——分母是任务目标（含请假 / 免测 / 已排除），
+               与同屏卡 3 的覆盖率（分母是实际应测）不是一个口径，两句话在同一屏上并列着
+               而没有任何一句说明它们的分母不同。服务端**没有**任何以 `completed_count`
+               为分子的权威比率（`coverage_rate` 的分子是 `n_evaluable`），
+               所以按「凡打印出来的数字必须来自服务端，否则不打印」把它去掉：
+               相邻两列已经给出分子与分母，读者要的那个比值自己就能读出来，
+               而印错了分母却没有任何东西会红。 -->
           <table>
-            <thead><tr><th>工作环节</th><th>应处理人数/项</th><th>已完成</th><th>完成率</th><th>操作</th></tr></thead>
+            <thead><tr><th>工作环节</th><th>应处理人数/项</th><th>已完成</th><th>操作</th></tr></thead>
             <tbody>
-              <tr><td>学生测评</td><td>{{ target }}</td><td>{{ completed }}</td><td>{{ target ? (completed/target*100).toFixed(1)+'%' : '—' }}</td>
+              <tr><td>学生测评</td><td>{{ eligible }}</td><td>{{ completed }}</td>
                 <td><button class="btn-link" @click="router.push(analyticsBase+'/dimensions')">查看维度分析</button></td></tr>
-              <tr><td>统计可评价样本</td><td>{{ sampleCount }}</td><td>{{ sampleCount }}</td><td>—</td>
+              <tr><td>统计可评价样本</td><td>{{ sampleCount }}</td><td>{{ sampleCount }}</td>
                 <td><button class="btn-link" @click="router.push(analyticsBase+'/dimensions')">查看八维度</button></td></tr>
-              <tr><td>重点题人工复核</td><td>{{ pendingReview }}</td><td>—</td><td>—</td>
+              <tr><td>重点题人工复核</td><td>{{ pendingReview }}</td><td>—</td>
                 <td><button class="btn-link" @click="router.push(route.path.startsWith('/leader/') ? '/leader/progress' : '/counselor/cases')">查看流程说明</button></td></tr>
-              <tr><td>后续关怀</td><td>{{ signals }}</td><td>—</td><td>—</td>
+              <tr><td>后续关怀</td><td>{{ signals }}</td><td>—</td>
                 <td><button class="btn-link" @click="router.push(route.path.startsWith('/leader/') ? '/leader/progress' : '/counselor/cases')">查看流程说明</button></td></tr>
             </tbody>
           </table>
         </div>
+        <!-- 分子分母写出来（§9：口径要写进界面）。放在 `.table-scroll` **之外**：
+             那一层是 `overflow: auto` 的窄屏横滚容器，说明句跟着一起滚会被人读成表头的一部分。
+             「已处理完」与「已处理完但被判为不可评价」是两个数，所以这里说的是两个列头
+             各自的定义，不是一个比值。 -->
+        <p class="hint">「应处理」在「学生测评」那一行是<strong>实际应测人数</strong>（任务目标 − 请假 − 免测 − 已排除）；「已完成」与「可评价样本」是两个数，后者按当前规则口径从已完成里筛出可评价的那些。</p>
       </section>
       <!-- `tier-supporting`（§5.15 UX-FINAL-01）：这一格是**统计口径说明**（「本页…
            不代表医学诊断」那四条），属于 Supporting Information 的第一类。它旁边的
@@ -187,7 +224,11 @@ function reset() { report.value = null; error.value = ''; loading.value = false 
           ③ "筛查信号"是需要进一步了解的线索，不等同心理疾病诊断。<br/>
           ④ 群体差异需结合覆盖率、效度提示、施测背景和心理老师专业判断。<br/>
           ⑤ 总分区间来自量表评分规则版本；学校调整过分段时，本页的区间文字随规则版本一起变。<br/>
-          ⑥ 德育领导默认只查看授权聚合信息。
+          ⑥ 德育领导默认只查看授权聚合信息。<br/>
+          ⑦ 本页有三个数容易混：<strong>任务目标</strong>（发放人数，含请假 / 免测 / 已排除）、
+          <strong>实际应测人数</strong>（任务目标减去那三类，是覆盖率与完成情况的分母）、
+          <strong>可评价样本</strong>（已完成里按当前评分规则能进入聚合的那些）。三者不是同一个数，
+          所以本页不把它们合并成一个"完成率"：任何一个比值都能在它旁边读到分子与分母。
         </div>
       </section>
     </div>

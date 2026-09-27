@@ -1522,12 +1522,16 @@ test.describe('Analytics report functions', () => {
     // ——标题说全校、徽标也说全校（对领导是对的），可同一条路由给心理老师走的时候
     // 标题仍然说全校，而数据其实是 scoped 的。
     await expect(page.getByRole('heading', { name: '筛查关注概览' })).toBeVisible();
-    // `exact: true` 是必须的：`getByText` 是**子串**匹配，而「实际应测人数」既是这一格 KPI 卡的
-    // 标签，也是覆盖率卡片脚注里那句分母口径（「可评价样本 ÷ 实际应测人数」）的一部分——
-    // 不收严就是 strict mode violation。这不改变这条断言要说的事（报表默认加载并渲染出 KPI），
-    // 只是把它从子串收成全等；脚注那句口径**不许**为了迁就定位器改措辞，那个词是
-    // `eligible_count` 的正式中文名（`labels.ts` 的口径表）。
-    await expect(page.getByText('实际应测人数', { exact: true })).toBeVisible();
+    // V2.0.1 §5.20 起这句收在 `.kpis` 里定位。**不是把断言改松，是把它钉到它本来要说的地方**：
+    // 这条用例要证明的是「报表默认加载并渲染出 KPI」，所以它该断的是**那张卡**。
+    // 此前靠 `exact: true` 收严就够了，因为全页只有一个「实际应测人数」；§5.20 给这一页
+    // 补了两句分母口径（工作进展表的说明句、统计解释边界的第 ⑦ 条），两处都把这个词
+    // 包在 `<strong>` 里——它们**必须**写全这个数，因为它是 `eligible_count` 的正式中文名
+    // （`labels.ts` 的口径表），少一个字就读成另一个数（「实际应测」= `eligible_count`，
+    // 与「实际应测人数」在别的句子里正是两个口径的名字）。
+    // 所以收窄定位器、**不改页面措辞**——上一版注释里那句「脚注那句口径不许为了迁就
+    // 定位器改措辞」在这里同样成立。
+    await expect(page.locator('.kpis').getByText('实际应测人数', { exact: true })).toBeVisible();
     await page.locator('.task-picker summary').click();
     await page.locator('.task-option input:not(:checked)').first().check();
     await page.getByRole('button', { name: /查询/ }).click();
@@ -1589,6 +1593,78 @@ test.describe('Analytics report functions', () => {
     // `key_both` 那一档带 8 道效度题，越过阈值 7）。
     expect(dimensions).toBeGreaterThan(0);
     expect(overview).toBe(dimensions);
+  });
+
+  // V2.0.1 §5.20.4（AUDIT-C）唯一能被证伪的那一面：**被抑制的维度不得印成 `0%`**。
+  //
+  // 为什么这条只能靠桩：抑制规则是「分母 < `MIN_COHORT_FOR_AGGREGATE`（=5）时不发这个
+  // 数」（CLAUDE.md §11），而演示库那场任务每个维度的 `n_evaluable` 都是 48，
+  // 八条 `suppression` 全是 `{suppressed: false}`——**真实的演示数据上这条分支不可达**。
+  // 而 §5.20 改的正是这条不可达分支（`DimensionsPage` 的两个 `|| 0` 摘掉、
+  // `HorizontalBars` 把 `null` 渲染成「样本不足」）。按本仓库自己的判据，一处没有任何
+  // 东西看得见的修复等于没有——所以这里造一个**只有服务端抑制时才出现**的载荷。
+  //
+  // 载荷以**真响应**为底、只改 `high_score_rate` / `mean_score` 两列（照
+  // `raceReportListReload` 那个脚手架的手法）：手搓一份完整 `AnalyticsReport` 会在
+  // 类型加字段时静默漂移，而这条用例要钉的不是那份结构。
+  //
+  // 判据分三层，而**这三层各自都能单独变红**（变异验证实测，见下）：
+  // ① **先证明有东西可扫**：`12.5%` 真的印出来了（图渲染了、条画了）；
+  // ② 七个被抑制的维度各印一次「样本不足」（8 维度 − 1 个有值）；
+  // ③ 整张 svg 里 `0%` 恰好一次——那是**坐标轴原点刻度**（`HorizontalBars` 的
+  //    `[0,.25,.5,.75,1]` 五根刻度，无论上限取多少，第一根恒为 `0`）。
+  //
+  // **②与③不是重复**：② 说的是「被抑制的那七格没印数」，③ 说的是「图上确实还有一根
+  // 坐标轴」——③ 挡的是「把值标签和轴一起删掉」那种更彻底的坏法（那样 ② 依然是绿的）。
+  // 变异验证三发，各自红的正是它该红的那一行：
+  //   M1 把 `DimensionsPage` 的 `highRates` / `means` 打回 `|| 0` → 红在 ②（收到 0）；
+  //   M2 把 `HorizontalBars` 的 `样本不足` 分支摘掉 → 红在 ②（收到 0）；
+  //   M3 把 `HorizontalBars` 的坐标轴刻度文字删掉 → **②仍绿**、红在 ③（收到 0）。
+  // 所以 `toBe(7)` 与 `toBe(1)` 都不是随手写的数：前者钉住那七根，后者钉住那条轴。
+  test('suppressed dimensions render 样本不足 instead of 0%', async ({ page }) => {
+    await page.route(
+      (url) => url.pathname === '/api/v1/analytics/report',
+      async (route) => {
+        const response = await route.fetch();
+        const body = (await response.json()) as {
+          data: { dimensions: Array<{ high_score_rate: number | null; mean_score: number | null }> } | null;
+        };
+        const dims = body.data?.dimensions;
+        if (Array.isArray(dims) && dims.length > 1) {
+          dims[0].high_score_rate = 12.5;
+          dims[0].mean_score = 7.25;
+          for (let i = 1; i < dims.length; i += 1) {
+            dims[i].high_score_rate = null;
+            dims[i].mean_score = null;
+          }
+        }
+        await route.fulfill({ response, json: body });
+      }
+    );
+
+    await page.goto('/counselor/analytics/dimensions');
+    await expect(page.getByRole('heading', { name: '八维度分析', exact: true })).toBeVisible();
+
+    // ① 有值的那一根条（默认子页签就是「高分比例」）。
+    await expect(page.locator('.chart svg text').filter({ hasText: '12.5%' })).toHaveCount(1);
+    // ② 被抑制的七根。
+    await expect(page.locator('.chart svg text').filter({ hasText: '样本不足' })).toHaveCount(7);
+    // ③ 只有坐标轴原点那一个 `0%`（见上面那段推导）。
+    await expect(page.locator('.chart svg text').filter({ hasText: /^0%$/ })).toHaveCount(1);
+
+    // 同一批 `null` 在「平均得分」那一页签上走的是同一条路（`|| 0` 当初也是两处各一个），
+    // 所以两个子页签都断一次。`0分` 在轴上是**不存在**的（轴印的是裸 `0`），
+    // 所以回归时它会出现七次，而正常时一次都没有。
+    await page.getByRole('button', { name: '平均得分' }).click();
+    await expect(page.locator('.chart svg text').filter({ hasText: '7.25分' })).toHaveCount(1);
+    await expect(page.locator('.chart svg text').filter({ hasText: '样本不足' })).toHaveCount(7);
+    await expect(page.locator('.chart svg text').filter({ hasText: /^0分$/ })).toHaveCount(0);
+
+    // **同一批 `null` 在这张表里印的一直是 `—`**（本节之前就是这样，AUDIT-C 的既有证据，
+    // 只记录、不改）：第 2 行那两个数值列各一个。数值列留 `—` 而不是留空，是
+    // CLAUDE.md §3 那条既有约定的另一面——`—` 是界面占位符，写进 CSV 会让整列被当成文本，
+    // 而留空在屏幕上与「这一格没加载出来」分不开。
+    await expect(page.locator('tbody tr').nth(1).getByText('—', { exact: true })).toHaveCount(2);
   });
 
   test('grade report changes dimension and renders the matching chart', async ({ page }) => {

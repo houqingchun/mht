@@ -17,7 +17,26 @@ const error = ref('')
 const selectedDimCode = ref('')
 const grades = computed(() => report.value?.grades || [])
 const totalTarget = computed(() => grades.value.reduce((a, g) => a + g.target_count, 0))
+/**
+ * **实际应测人数**（`eligible_count`＝任务目标 − 请假 / 免测 / 已排除，CLAUDE.md §29）。
+ * 它与 `totalTarget`（任务目标）是两个数，此前这一页只有一个 `totalTarget` 顶在
+ * 「实际应测人数」那张卡的标签下面——**标签与值对不上**，而屏幕上两个数只出现了一个
+ * （§5.20.3：同一屏上不同分母必须能分辨）。两个都给出来，各自写进各自那一格。
+ */
+const totalEligible = computed(() => grades.value.reduce((a, g) => a + g.eligible_count, 0))
 const totalValid = computed(() => grades.value.reduce((a, g) => a + g.sample_count, 0))
+/**
+ * 覆盖率取**服务端**那一个（`sample_quality.coverage_rate`：分子 `n_evaluable`、
+ * 分母 `eligible_count`），不在这里拿 `totalValid / totalEligible` 现算。
+ * 两条理由，任一条都够：
+ * ① 服务端 `_report_rate` 在分母 < `MIN_COHORT_FOR_AGGREGATE`（=5）时**发 `null`**
+ *    （§11：`null` 是「这几个人算出来不足为凭」，与 `0`「一个都没有」不是一回事），
+ *    而前端现算**永远给得出一个数**——那正是 §5.20.4 禁止的抹平；
+ * ② 打印出来的数字与服务端那一份在四舍五入上会差开一位（`CoverageColumns.vue:44-51`
+ *    记着这件事，那一条注释正因为如此拒绝在前端重算）。
+ * 所以 `null` 原样保留，由模板分两支渲染。
+ */
+const coverageRate = computed(() => report.value?.sample_quality?.coverage_rate ?? null)
 /**
  * 三档区间随规则版本走（§6）——与 `OverviewPage` 取的是同一个字段，因为这一页与那一页
  * 说的是同一批结果的同一件事，只是切成了按年级。取不到就是 `null`，图上只出人数、
@@ -59,10 +78,15 @@ function reset() { report.value = null; error.value = ''; selectedDimCode.value 
   <ErrorState v-if="error" :message="error"/>
   <div v-else-if="loading" class="loading">加载中…</div>
   <template v-else-if="report">
+    <!-- 四张卡的口径（§5.20.3：同一屏上不同分母必须能分辨）：
+         卡 1 是**实际应测人数**（`eligible_count`＝目标 − 请假 / 免测 / 已排除），
+         卡 2 是它的**已完成**部分；更大的那一级数（任务目标）写在卡 1 的 hint 里。
+         卡 3 的覆盖率取服务端 `sample_quality.coverage_rate`，取不到（`null`）时
+         **不印百分比、也不印 0%**，改说「样本不足」——`0%` 与「不足为凭」是两件事（§11、§5.20.4）。 -->
     <div class="kpis">
       <KpiCard label="参与年级数" :value="grades.length" hint="当前选定范围"/>
-      <KpiCard label="实际应测人数" :value="totalTarget.toLocaleString('zh-CN')" hint="合计"/>
-      <KpiCard label="可评价样本" :value="totalValid.toLocaleString('zh-CN')" :hint="'覆盖率 '+(totalTarget ? (totalValid/totalTarget*100).toFixed(1)+'%' : '—')" tone="green"/>
+      <KpiCard label="实际应测人数" :value="totalEligible.toLocaleString('zh-CN')" :hint="'任务目标 '+totalTarget.toLocaleString('zh-CN')+' 人（含请假 / 免测 / 已排除）'"/>
+      <KpiCard label="可评价样本" :value="totalValid.toLocaleString('zh-CN')" :hint="coverageRate != null ? '覆盖率 '+coverageRate.toFixed(1)+'%（可评价 / 实际应测）' : '覆盖率：样本不足'" tone="green"/>
       <KpiCard label="当前比较维度" :value="dimensionLabel(selectedDimension?.dimension_code || '')" hint="跨年级比较"/>
     </div>
 
@@ -101,19 +125,30 @@ function reset() { report.value = null; error.value = ''; selectedDimCode.value 
         </section>
       </div>
       <div class="side-panel">
+        <!-- 三列的分母必须同源（§5.20.3）。此前这一行的「应测」印的是 `target_count`（任务目标），
+             而同一行的覆盖率却拿 `eligible_count`（实际应测）做分母——**同一行里两个分母**，
+             于是读者按表头那两个数除一下，得到的与右格印的不是一个数：初一那一行
+             13 / 16 = 81.3%，而覆盖率写着 86.7%（= 13 / 15，分母是实际应测）。
+             两个数都「看起来对」，没有任何东西会红。
+             更严重的是末列是**前端现算**的：它绕过服务端 `_report_rate` 的抑制，也绕过
+             `coverage_rate` 那一份已经算好的数（`ReportCohort.coverage_rate: number | null`）。
+             现在三列分别是「实际应测 / 可评价 / 覆盖率」，末列直接印服务端那个数，
+             取不到（`null`，样本量不足）时说「样本不足」——与上面热力表同一句措辞，
+             与 `0.0%`（有样本、算出来确实是 0）在屏幕上长得不一样。 -->
         <section class="card">
           <h2 class="section-title">年级样本与覆盖率</h2>
           <table>
-            <thead><tr><th>年级</th><th>应测</th><th>可评价</th><th>覆盖率</th></tr></thead>
+            <thead><tr><th>年级</th><th>实际应测</th><th>可评价</th><th>覆盖率</th></tr></thead>
             <tbody>
               <tr v-for="g in grades" :key="g.grade_name">
-                <td>{{ g.grade_name }}</td><td>{{ g.target_count }}</td><td>{{ g.sample_count }}</td>
-                <td :class="g.eligible_count > 0 && g.sample_count/g.eligible_count >= 0.9 ? 'coverage-good' : 'coverage-warn'">
-                  {{ g.eligible_count > 0 ? (g.sample_count/g.eligible_count*100).toFixed(1)+'%' : '—' }}
+                <td>{{ g.grade_name }}</td><td>{{ g.eligible_count }}</td><td>{{ g.sample_count }}</td>
+                <td :class="g.coverage_rate != null && g.coverage_rate >= 90 ? 'coverage-good' : 'coverage-warn'">
+                  {{ g.coverage_rate != null ? g.coverage_rate.toFixed(1)+'%' : '样本不足' }}
                 </td>
               </tr>
             </tbody>
           </table>
+          <p class="hint">「实际应测」＝任务目标 − 请假 / 免测 / 已排除，它就是覆盖率的分母；「可评价」是其中按当前评分规则能进入聚合的那些。这两个数不相等，所以本页不印一个把二者混起来的"完成率"。</p>
         </section>
         <!-- `tier-supporting`（§5.15 UX-FINAL-01）：与总览页的「统计解释边界」同族
              ——四条读图口径（「不生成年级心理健康排名」那一条就在这里），是辅助信息，

@@ -25,10 +25,25 @@ const selectedDim = ref(0)
 
 const dims = computed(() => report.value?.dimensions || [])
 const quality = computed(() => report.value?.sample_quality)
-const highRates = computed(() => dims.value.map(d => d.high_score_rate || 0))
-const means = computed(() => dims.value.map(d => d.mean_score || 0))
+/**
+ * 传给图的两列**原样保留 `null`，不写 `|| 0`**（§5.20.4：`0` 是「有样本、算出来确实是 0」，
+ * `null` 是「分母 < `MIN_COHORT_FOR_AGGREGATE`，服务端按抑制规则没发这个数」）。
+ * 此前这两个 computed 各带一个 `|| 0`，于是只要**任一**维度有值，其余被抑制的维度就被
+ * 抹成 0，图上画出一根 0 长条、数字印成 `0%`——读者看到的是「这个维度一个高分都没有」，
+ * 而真相是「这个维度不足以给数」。`HorizontalBars` 现在收 `Array<number | null>`
+ * 并把 `null` 渲染成「样本不足」，所以这里只需把 `null` 递下去。
+ */
+const highRates = computed(() => dims.value.map(d => d.high_score_rate))
+const means = computed(() => dims.value.map(d => d.mean_score))
 const hasPublishedRates = computed(() => dims.value.some(d => d.high_score_rate != null))
 const hasPublishedMeans = computed(() => dims.value.some(d => d.mean_score != null))
+/**
+ * 刻度上限在 script 里算好（与 `GradesPage` 的 `:max` 同一个写法）：模板里对
+ * `Array<number | null>` 做 `Math.max(...)` 会先得到 `NaN`，而 vue-tsc 也看不出
+ * 「过滤之后就不是 null 了」——过滤判据只写一遍，写在这里。
+ */
+const rateMax = computed(() => Math.max(25, ...highRates.value.filter((v): v is number => v != null)))
+const meanMax = computed(() => Math.max(15, ...means.value.filter((v): v is number => v != null)))
 const distData = computed(() => dims.value.map(d => ({
   low: d.distribution?.[0]?.count || 0, medium: d.distribution?.[1]?.count || 0, high: d.distribution?.[2]?.count || 0
 })))
@@ -205,15 +220,19 @@ async function exportValidityRetest() {
           <button class="inner-tab" :class="{active: subTab==='average'}" @click="subTab='average'">平均得分</button>
           <button class="inner-tab" :class="{active: subTab==='distribution'}" @click="subTab='distribution'">得分分布</button>
         </div>
+        <!-- `v-if` 判的是「**有没有任何一个**维度发了数」，而条是**逐维度**画的：
+             所以两者不是一回事——只要有任一维度有值，其余被抑制的维度就会进同一张图。
+             它们的 `null` 现在由 `HorizontalBars` 渲染成「样本不足」+ 0 长条，
+             而**不是 `0%`**（§5.20.4：`0` 与「不足为凭」在屏幕上必须长得不一样）。 -->
         <template v-if="subTab==='rate'">
-          <HorizontalBars v-if="hasPublishedRates" :labels="dims.map(d=>dimensionLabel(d.dimension_code))" :values="highRates" :max="Math.max(25,...highRates)" suffix="%"/>
+          <HorizontalBars v-if="hasPublishedRates" :labels="dims.map(d=>dimensionLabel(d.dimension_code))" :values="highRates" :max="rateMax" suffix="%"/>
           <div v-else class="data-empty">当前样本量不足，暂不展示可反推个体的精确高分比例。</div>
-          <p class="hint">高分比例按维度可评价人数计算。</p>
+          <p class="hint">高分比例按维度可评价人数计算；标为「样本不足」的维度是样本量达不到发布门槛，不是该维度无人高分。</p>
         </template>
         <template v-else-if="subTab==='average'">
-          <HorizontalBars v-if="hasPublishedMeans" :labels="dims.map(d=>dimensionLabel(d.dimension_code))" :values="means" :max="Math.max(15,...means)" suffix="分"/>
+          <HorizontalBars v-if="hasPublishedMeans" :labels="dims.map(d=>dimensionLabel(d.dimension_code))" :values="means" :max="meanMax" suffix="分"/>
           <div v-else class="data-empty">当前样本量不足，暂不展示可反推个体的精确平均分。</div>
-          <div class="notice">不同维度满分不同，原始平均分不用于跨维度比较。</div>
+          <div class="notice">不同维度满分不同，原始平均分不用于跨维度比较；标为「样本不足」的维度是样本量达不到发布门槛，不是该维度得分为 0。</div>
         </template>
         <template v-else>
           <div class="dist-stack">
