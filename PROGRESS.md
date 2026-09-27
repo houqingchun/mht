@@ -4695,7 +4695,7 @@ ColumnChart、`:109` 侧栏覆盖率表、`:154` band-grid **四个**，加 `Ove
 > ② **后台跑 e2e 时不要用 `| tail -N` 收尾。** 那条管道会把 `N passed` 的汇总行截掉，只剩中间某段
 > 输出，于是「跑完了没有」这个问题在输出里答不出来。改成 `> /tmp/xlp_e2e.log 2>&1` 再 grep。
 
-### 5.20 V2.0.1 心理统计报表专业性与口径一致性终审（待 AI Coding，最后一个报表审计项）
+### 5.20 V2.0.1 心理统计报表专业性与口径一致性终审（已完成，2026-09-27）
 
 > **范围裁决（2026-09-27）**：本节是 V2.0.1 **最后一个报表审计项**，不是新一轮报表设计。
 > 在 §5.17、§5.18 完成后执行。目标是从心理测评专业表达和统计一致性角度，对现有报表做发布前终审。
@@ -4863,25 +4863,200 @@ ColumnChart、`:109` 侧栏覆盖率表、`:154` band-grid **四个**，加 `Ove
 - [ ] 全量 E2E 按当前权威 `workers: 1` 口径通过；
 - [ ] Backend Tests 无回归。
 
-#### 5.20.9 AI Coding 完成回填模板
+#### 5.20.9 AI Coding 完成回填
 
-- 实际审计页面：
-- 实际审计组件：
-- 数据源 / API：
-- AUDIT-A 样本量表达：已满足 / 修复；证据：
-- AUDIT-B 统计语义：已满足 / 修复；证据：
-- AUDIT-C 空值语义：已满足 / 修复；证据：
-- AUDIT-D 量表解释边界：已满足 / 修复；证据：
-- 跨角色 / 跨页面一致性：已满足 / 修复；证据：
-- 实际修改文件（没有则写“无”）：
-- 新增 / 调整测试：
-- 四档响应式：
-- `vue-tsc -b`：
-- `npm run build`：
-- 定向 E2E：
-- 全量 E2E：
-- Backend Tests：
-- Commit SHA：
-- 遗留问题：无 / （只记录，不得扩项）
+- **实际审计页面**（7 条路由 / 12 个 URL，跨心理老师与德育领导两个角色）：
+  1. 筛查关注概览 `/counselor/analytics/overview` 与 `/leader/analytics/overview`
+  2. 年级维度比较 `/counselor/analytics/grades` 与 `/leader/analytics/grades`
+  3. 八维度分析 `/counselor/analytics/dimensions` 与 `/leader/analytics/dimensions`
+  4. 班级维度画像 `/counselor/analytics/classes` 与 `/leader/analytics/classes`（**只读审计：零改动**）
+  5. 专业分析报告 `/counselor/analytics/report`（`ReportExportPage.vue`，含「我的报告」列表）
+  6. 领导总览 `/leader/overview`
+  7. 学校心理工作分析摘要 `/leader/analytics/report`
+  另有两条**复用同一批指标**的非报表路径一并核验：测评任务的完成明细 / 参与口径（`TasksPage.vue`）
+  与测评记录页（`StudentRecordsPage.vue`）——它们与报表页显示同名指标，是 §5.20.3 的跨页口径面。
+
+- **实际审计组件**：`OverviewPage.vue`、`GradesPage.vue`、`DimensionsPage.vue`、
+  `ClassPortraitPage.vue`、`ReportExportPage.vue`、`LeaderOverviewPage.vue`、
+  `LeaderAnalyticsReportPage.vue`、`ProfessionalReportList.vue`；被上述页面复用的图元
+  `CompletionDonut.vue`、`HorizontalBars.vue`、`ScoreBandBars.vue`、`CoverageColumns.vue`、
+  `RadarChart.vue`、`FilterBar.vue`、`PrivacyNote.vue`。
+
+- **数据源 / API**：报表唯一数据源 `GET /api/v1/analytics/report`（`taskIds` + `analysisMode`，
+  心理老师四个报表页与领导侧同名页共用）；领导总览 `GET /api/v1/analytics/overview`
+  ＋ `/analytics/by-grade` ＋ `/analytics/by-class`；任务口径 `GET /api/v1/assessment-tasks`
+  与 `…/{id}/participation`；领导摘要读 `GET /api/v1/professional-reports` 的**已发布快照**。
+  落到界面上的三条硬口径全部是服务端字段：`sample_quality.{target_count, eligible_count,
+  completed_count, n_evaluable, coverage_rate}`、`dimension.{high_score_rate, mean_score,
+  suppression}`、`overview.signal_rate`。**修复后前端不再打印任何自己算出来的比值**（见 AUDIT-B）。
+
+- **AUDIT-A 样本量表达：修复（3 处）；其余已满足并留证据**。此前三个报表页的比例 / 比较 /
+  分布都只有比值、没有说这个比值基于多少有效样本：
+  - 「筛查关注概览」的「实际应测人数」卡，**值写的是 `target_count`（任务目标，含请假 / 免测 /
+    已排除），而标签是「实际应测人数」——标签与值对不上**，两个数只出现了一个；同页覆盖率与
+    信号占比是前端现算的比值，分母既不说明、也不受服务端抑制规则约束。现改为：卡 1 印
+    `eligible_count` 并在 hint 里写出那个更大的一级数（「任务目标 N 人（含请假 / 免测 / 已排除）」），
+    卡 3 的覆盖率直接印服务端 `coverage_rate` 并写明「（可评价 / 实际应测）」，卡 4 印 `signal_rate`。
+  - 「年级维度比较」同样的问题更严重：末列覆盖率是**前端现算** `sample/eligible`，而同一行
+    「应测」列印的是 `target_count`——**同一行里两个分母**，读者按表头除一下得到的数与右格印的
+    不是一个数（真实数据初一那一行 13/16 = 81.3%，而覆盖率印的是 86.7% = 13/15，两个数都
+    「看起来对」）。现改为三列「实际应测 / 可评价 / 覆盖率」，末列印服务端 `row.coverage_rate`。
+  - 「八维度分析」的两个子页签此前用 `d.high_score_rate || 0` 抹平 `null`（见 AUDIT-C）；
+    样本量本身在表里有 `n_evaluable` 列、页首有「纳入分析人数」卡，**这一半已满足**。
+  - 已满足并留证据的四处：`ClassPortraitPage.vue:109-112` 四档 KPI（任务目标 / 实际应测 /
+    可评价样本 / 样本覆盖率）＋ 行内「应测 N 人 · 可评价 M 人」；`CoverageColumns.vue:90` 的
+    「可评价 X / 应测 Y」与 `:95` 脚注；`ScoreBandBars.vue:158` 的「样本不足」；
+    `LeaderOverviewPage.vue:243` 关注率的「样本过小，不给占比」。
+
+- **AUDIT-B 统计语义：修复（3 处）；1 处差异如实保留**。
+  - **「完成测评 ≠ 可评价」**：三处把 `completed` 当分子算比值的表达全部改掉——
+    `CompletionDonut` 圆心不再印自己算的百分比（`pct` 只喂 `conic-gradient` 的**弧长**，那是几何；
+    服务端 `coverage_rate` 的分子是 `n_evaluable`，与 `completed` 在 `n_evaluable ≠ completed` 时
+    不相等）；`OverviewPage.vue` 的「工作环节」表**删掉了「完成率」那一列**（全表只有第一行有值，
+    而那一行是前端现算、分母是任务目标，与同屏卡 3 的覆盖率不同源——服务端**没有**任何以
+    `completed_count` 为分子的权威比率）；`GradesPage.vue` 的覆盖率改用服务端那一份。
+  - **「同一指标跨页面不得有不同分母而没有说明」**：真实数据上**确实存在**——后端
+    `analytics_service.py:696 / :876 / :909` 用 `total_targets`，而 `task_service.py:241` 的
+    `task_participation_counts` 用 `expected_targets`（任务 36 上分别是 86 与 87）。按 §5.20.7
+    第 10 条**不改公式**，改为在界面上把分母写出来：`LeaderOverviewPage.vue` 的完成率卡脚注补
+    「（任务目标，含请假 / 免测 / 已排除）」，两页报表的系数卡与表格各写清自己的分母，
+    差异如实写进「遗留问题」。
+  - **「不新增前端二次统计」**：这一条正是本轮修复的准绳（本仓库既有先例：`CoverageColumns.vue:44-51`
+    的注释明确拒绝在前端重算覆盖率）。修复后所有打印出来的比值都取服务端字段；前端只保留
+    **几何**（条长、弧长、分布条宽）——那些在像素上分不出前后端。
+
+- **AUDIT-C 空值语义：修复（2 处）；2 处已满足并留证据；★ 有定向守卫**。
+  - 修复：`DimensionsPage.vue` 的 `highRates` / `means` 两个 computed 摘掉 `|| 0`
+    （`0` 是「有可评价样本、算出来确实是 0」；`null` 是「分母 < `MIN_COHORT_FOR_AGGREGATE`，
+    服务端按抑制规则**没有发**这个数」）；`HorizontalBars.vue` 的 `values` 从 `number[]`
+    放宽到 `Array<number | null>`，`null` 渲染成**「样本不足」**（措辞取 `ScoreBandBars` 已有的
+    那一句，不另造说法）＋ 0 长条；刻度上限改为只拿**有值的那些**算（`Math.max(...[null])` 得
+    `NaN`，而 `NaN` 参与宽度计算会让整张图一个像素都画不出来）。
+  - 已满足并留证据：「八维度详细数据」表对 `mean_score` / `high_score_count` / `high_score_rate`
+    的 `null` 一律印 `—`（`DimensionsPage.vue:260-262`，本页**此前就是这样**，只记录、不修改；
+    数值列留 `—` 而非留空是 CLAUDE.md §3 的既有约定）；「年级维度比较」的热力表与班级画像对
+    `n_evaluable == 0` 同理。
+  - **「尚未完成测评」与「不可评价」分开表达**：`CompletionDonut` 的图例改为**「尚未完成」**
+    （＝应测里还没交卷的），并把分母写成「实际应测 N 人（请假 / 免测 / 已排除不计入）」——
+    它此前叫「未完成」且分母是任务目标，一名免测学生会被画进那一格。
+  - **★ 这一条的可证伪守卫是本轮唯一新增的 e2e**：抑制分支在演示库上**不可达**（那场任务每个
+    维度 `n_evaluable` 都是 48、八条 `suppression.suppressed` 全是 `false`），所以
+    `e2e/app.spec.ts` 新增 `suppressed dimensions render 样本不足 instead of 0%`，用 `page.route`
+    以**真响应为底**只改两列（照 `raceReportListReload` 那个脚手架的手法），三层判据：
+    ① `12.5%` 计数 1（先证明有东西可扫）② `样本不足` 计数 7 ③ `/^0%$/` 计数 1——第三层是
+    **坐标轴原点刻度**（`HorizontalBars` 的 `[0,.25,.5,.75,1]` 五根刻度里第一根恒为 0），
+    所以正常恰好 1、回归时变 8。平均分那一支同断一次（`7.25分` 1 / `样本不足` 7 / `/^0分$/` 0，
+    轴印的是裸 `0`，没有「分」后缀）。
+
+- **AUDIT-D 量表解释边界：已满足（逐条记录证据，零改动）**。八维度页面**一个字都没改**
+  （它改动的是 `null` 渲染，属 AUDIT-C）：
+  - **不按柱高作「严重程度排名」**：平均分那一支带 `.notice`「不同维度满分不同，原始平均分
+    不用于跨维度比较」——这是八条里唯一可能被图表暗示的一条，页面已写出反向声明。
+  - **不把分值升降解释为「恶化 / 好转」**：全站无此文案（`StudentRecordsPage.vue` 的「总分变化」
+    卡只印区间与差值，`services/trend.ts` 的 `scoreRange()` 只给区间）。
+  - **不生成派生指标**：全站无「综合心理健康指数 / 情绪指数 / 风险指数」（检索为零）。
+  - 其余五条（不做诊断结论 / 不做自动干预建议 / 不做趋势预测 / 不引入 AI / 阈值随规则版本走）
+    在既有实现里成立，本轮未新增任何文案或图表类型。
+  - 班级维度画像的 `RadarChart` 是七维雷达（不是八维），口径由 `ClassPortraitPage.vue:109-112`
+    的四档 KPI 交代；`:134-136` 有一段 `v-if` 死分支（`:136` 的 `RadarChart` 不可达），
+    **本轮未动**——它不影响表达，改它属于「无理由代码变更」，写进「遗留问题」。
+
+- **跨角色 / 跨页面一致性：已满足 ＋ 1 处说明性修复**。
+  - 报表四个组件（概览 / 年级 / 八维度 / 班级画像）**心理老师与德育领导跑的是同一个 `.vue`**
+    （`routes.ts:53-56` 与 `:68-71` 各自 import 同一个文件），所以指标名与定义**构造上不可能漂**。
+    两侧差别只在数据范围（§9 的 scope 谓词）与明细可见性，**不改变指标定义**——这正是 §5.20.6
+    要求的那一条。
+  - 领导摘要（`LeaderAnalyticsReportPage.vue`）读 `GET /professional-reports` 的**已发布快照**，
+    `evaluableText` 对 `null` 印 `—`，`:158-162` 的注释逐字写明读的是**这一版冻结的那一份、
+    不是按现在的数据重算**——「历史快照语义」与「不重新计算 / 回写已发布报告」两条已满足、
+    未改动。
+  - 修复的那一处是**说明**不是公式：`LeaderOverviewPage.vue` 的完成率卡脚注补上分母——此前
+    它的 87% 与心理老师侧写「实际应测」的地方（`TasksPage.vue:1042` 的「有效完成率 = 已完成 ÷
+    应测人数」）分母不同而无处可辨。
+  - 隐私：`PrivacyNote.vue` 与领导端「不含逐人明细」的既有约束未动。
+
+- **实际修改文件（7 个源码文件，`+254 / -40`，无未跟踪文件）**：
+  1. `frontend/src/features/analytics/views/OverviewPage.vue`（**+52 / -11**：系数卡口径 ＋ 删「完成率」列 ＋ 统计解释边界第 ⑦ 条 ＋ `CompletionDonut` 改传应测分母）
+  2. `frontend/src/features/analytics/views/GradesPage.vue`（**+41 / -6**：`totalEligible` / `coverageRate` ＋ 末列表头与取值 ＋ 两处 hint）
+  3. `frontend/src/features/analytics/views/DimensionsPage.vue`（**+25 / -6**：摘掉两个 `|| 0` ＋ `rateMax` / `meanMax` ＋ 注释）
+  4. `frontend/src/features/analytics/components/HorizontalBars.vue`（**+23 / -6**：`Array<number | null>` ＋「样本不足」＋ 刻度上限只取有值的）
+  5. `frontend/src/features/analytics/components/CompletionDonut.vue`（**+22 / -4**：圆心只印人数 ＋ `remaining` ＋ 图例「尚未完成」与分母说明）
+  6. `frontend/src/features/leader/LeaderOverviewPage.vue`（**+9 / -1**：完成率卡脚注写分母——整段是注释 ＋ 一行文案）
+  7. `e2e/app.spec.ts`（**+82 / -6**：新增一条桩用例 ＋ 一处定位器收窄）
+  - 另有 `PROGRESS.md`：本节标题改为「已完成」并回填本块。
+  - **`ClassPortraitPage.vue` / `ScoreBandBars.vue` / `CoverageColumns.vue` / `RadarChart.vue` /
+    `FilterBar.vue` / `ReportExportPage.vue` / `LeaderAnalyticsReportPage.vue` / `TasksPage.vue` /
+    `DataCenterPage.vue` / `StudentRecordsPage.vue` 逐页读过、判定为已满足，因此一个字未改**
+    （§5.20 执行原则：「已正确的页面不得为了『统一代码』或『视觉优化』而修改」）。
+
+- **新增 / 调整测试**：
+  - **新增 1 条 e2e**：`e2e/app.spec.ts::suppressed dimensions render 样本不足 instead of 0%`
+    （桩载荷；理由与三层判据见 AUDIT-C）。
+  - **调整 1 条既有 e2e 的定位器**（不是断言）：`overview queries selected tasks…` 里
+    `getByText('实际应测人数', { exact: true })` 收窄为 `page.locator('.kpis').getByText(…)`——
+    修复后这一页同屏出现了第二个「实际应测人数」（卡 1 的 hint 与表格说明），原定位器撞严格模式。
+    **页面措辞未动**（「实际应测人数」是 `eligible_count` 的正式中文名）。
+  - **未新增后端测试**：后端**一行未改**（§5.20.7 第 10 条）。AUDIT-B 那处分母差异**不写断言**
+    ——写一条断言等于把「两个分母都合法」钉成缺陷。
+  - **变异验证 3/3 全红、逐字节还原**（`cp -p` 落盘备份 ＋ `cmp` 逐字节比对）：
+
+    | 变异 | 位置 | 结果 |
+    |---|---|---|
+    | M1 `highRates` / `means` 打回 `|| 0` | `DimensionsPage.vue` | **1 failed**，红在 ②（`样本不足` Expected 7 / Received 0），而 ① 已通过 |
+    | M2 摘掉「样本不足」分支 | `HorizontalBars.vue` | **1 failed**，红在 ②（Expected 7 / Received 0） |
+    | M3 删掉坐标轴刻度文字 | `HorizontalBars.vue` | **1 failed**，②仍绿、红在 ③（`/^0%$/` Expected 1 / Received 0） |
+
+    M3 是为**自证 ③ 不是恒真**而专门设计的：M1 / M2 都只红在 ②，若就此收工，那条 `/^0%$/`
+    断言**从未在变异中变红过**——按本仓库判据那等于一条没被验证过的守卫。M3 实测证明了
+    ② 与 ③ 互相独立。
+
+- **四档响应式**：全量 E2E 内的四档溢出组（`375 / 768 / 1024 / 1440`）**全绿**，含「专业报告
+  工作台」组的四档专项——**无新增横向溢出**。改动全部落在既有栅格内：`GradesPage` 是**列数不变、
+  表头与末列取值改变**；`OverviewPage` 是**删一列**；其余是把前端现算换成服务端字段与文案。
+
+- **`vue-tsc -b`**：`npx vue-tsc -b --force` → **`EXIT=0`**。
+  ⚠️ **实测到的边界，记下来免得下次误判**：`vue-tsc` **抓不出未闭合的模板标签**。本轮中途
+  `OverviewPage.vue` 丢过一个 `.stat-boundary` 的 `</div>`，`vue-tsc -b`（含 `--force`）仍然
+  `EXIT=0`，只有 `npm run build` 报了 `Element is missing end tag`。**两个都要跑，缺一不可。**
+
+- **`npm run build`**：→ **`EXIT=0`**，产物 `dist/assets/index-B5oViNTD.js`（513.28 kB）、
+  `index-D9zVS2vp.css`（72.09 kB）。
+
+- **定向 E2E**：`npx playwright test --grep "Analytics|Leader Overview|专业报告工作台"` →
+  **35 passed（54.8s）/ `EXIT=0`**（修前 34，＋1 即上面那条桩用例）。
+
+- **全量 E2E**：**201 passed (4.1m)**（权威口径 `workers: 1`，在**仓库根**运行；§5.19 基线 200，＋1）。
+
+- **Backend Tests**：**871 passed, 5 warnings in 539.67s (0:08:59)**（真 MySQL；与 §5.19 基线
+  **持平**——本轮后端零改动，这就是「无回归」的实测形式。5 条 warning 是既有的
+  `analytics_service.py:1125` / `export_service.py:124` 笛卡尔积误报（CLAUDE.md §23 已查清）
+  ＋ 1 条 Starlette 弃用提示）。
+
+- **Commit SHA**：`8c9f096`——`feat: V2.0.1 §5.20 心理统计报表专业性与口径一致性终审
+  （三处最小修复 + 一条定向 E2E）`，7 files changed, 254 insertions(+), 40 deletions(-)。
+
+- **遗留问题（只记录，不得扩项）**：
+  1. **`completion_rate` 有两个合法的分母，界面上已说明、公式未统一。** `analytics_service.py:696
+     / :876 / :909` 的分母是 `total_targets`（任务目标，含请假 / 免测 / 已排除），
+     `task_service.py:241` 的 `task_participation_counts` 分母是 `expected_targets`（实际应测）。
+     **按 §5.20.7 第 10 条不改**（那是筛查口径，不是报表表达），本轮只在出现它的三处界面写出分母。
+     真实数据上的活体：任务 36 的「初一」，13/16 = 81.3%（目标分母）vs 表里印的 86.7%（应测分母）。
+  2. `ScoreBandBars.vue:112-114` 的条长是前端按计数重算的（`:158` 的 `rateText` 才是服务端的
+     `rate`，且对 `null` 印「样本不足」——**全仓库做得最对的一处**）。条长属几何、不打印，
+     本轮未动。
+  3. `FilterBar.vue:55` 有第二份 `MIN_ANALYTICS_SAMPLE = 5` 字面量（服务端
+     `MIN_COHORT_FOR_AGGREGATE` 的镜像）。它只决定提示语措辞、不参与任何打印出来的数；
+     两处常量同源问题未解决。
+  4. `ReportExportPage.vue` 三处 `null` 兜底不一致（`:873` `tasks?.length || 1`、`:874`
+     `sample_quality?.n_evaluable || 0`、`:886` 裸渲染 → 空串）。它们都不打印比值，但
+     「`0` / `—` / 空串」三种写法并存，属 AUDIT-C 的同类问题；**未修**——改它会动导出那一栏的
+     既有版式，超出「最小修复」。
+  5. `ClassPortraitPage.vue:134-136` 有一段 `v-if` 死分支（`:136` 的 `RadarChart` 不可达，
+     `:59` 的 `radarData` 里 `?? 0` 随之不可达）。不影响任何表达，未动。
+  6. **AUDIT-C 的修复靠桩用例覆盖，不靠真实数据**——演示库上抑制分支不可达（每个维度
+     `n_evaluable` = 48）。这是一条**知情的取舍**，理由写在那条用例的注释里。
+  7. 后端 `analytics_service` 的两条 `cartesian product` SAWarning 是误报（CLAUDE.md §23 已查清），
+     未修。
+
 - **V2.0.1 报表/UI/UX扩项状态：关闭，进入发布终审**
 
