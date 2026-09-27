@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 1080" role="img" aria-labelledby="title desc">
+  <title id="title">心晴登录页成长连接插画</title>
+  <desc id="desc">由柔和的蓝绿波浪、成长叶片与连接节点构成的抽象装饰图形</desc>
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f7fbff"/><stop offset=".55" stop-color="#eef8fb"/><stop offset="1" stop-color="#f8fbf6"/>
+    </linearGradient>
+    <linearGradient id="waveA" x1="0" y1="0" x2="1" y2=".4">
+      <stop stop-color="#8fc9e8"/><stop offset="1" stop-color="#cfe9f5"/>
+    </linearGradient>
+    <linearGradient id="waveB" x1="0" y1="0" x2="1" y2=".3">
+      <stop stop-color="#58b9b0"/><stop offset="1" stop-color="#b8dfc9"/>
+    </linearGradient>
+    <linearGradient id="leaf" x1="0" y1="1" x2="1" y2="0">
+      <stop stop-color="#4eaaa8"/><stop offset="1" stop-color="#b9df9f"/>
+    </linearGradient>
+    <radialGradient id="sun"><stop stop-color="#ffe3a3" stop-opacity=".72"/><stop offset="1" stop-color="#fff2ca" stop-opacity="0"/></radialGradient>
+  </defs>
+  <rect width="960" height="1080" fill="url(#sky)"/>
+  <circle cx="110" cy="92" r="245" fill="url(#sun)"/>
+  <path d="M-40 760C165 670 260 760 408 820s310 42 592-85v345H-40Z" fill="url(#waveA)" opacity=".58"/>
+  <path d="M-50 825c180-92 302-46 438 28s310 112 622-16v243H-50Z" fill="url(#waveB)" opacity=".82"/>
+  <path d="M-40 885c212-72 354-16 486 50s286 77 554-9" fill="none" stroke="#fff" stroke-width="5" opacity=".8"/>
+  <path d="M-30 930c205-58 339-13 474 42s303 64 555-21" fill="none" stroke="#d9f0ec" stroke-width="3"/>
+  <g opacity=".78" fill="none" stroke="#7ec6dc" stroke-width="2">
+    <path d="M145 300c132-110 343-94 438 36 91 125 55 293-83 371"/>
+  </g>
+  <g>
+    <circle cx="145" cy="300" r="18" fill="#9dd7ad"/>
+    <circle cx="350" cy="245" r="20" fill="#7fbaf0"/>
+    <circle cx="574" cy="346" r="18" fill="#f5cf7b"/>
+    <circle cx="501" cy="707" r="17" fill="#9ed3ee"/>
+  </g>
+  <g transform="translate(120 425)">
+    <path d="M130 350c4-145 30-238 96-302" fill="none" stroke="#4ca9a4" stroke-width="9" stroke-linecap="round"/>
+    <path d="M133 275c-35-71-77-102-124-106 8 61 46 103 124 106Z" fill="url(#leaf)"/>
+    <path d="M144 217c48-91 116-140 207-153-17 105-86 166-207 153Z" fill="url(#leaf)"/>
+    <path d="M132 317c46-48 96-62 151-43-36 54-87 68-151 43Z" fill="url(#leaf)" opacity=".88"/>
+    <path d="M92 222C68 172 39 151 5 147" fill="none" stroke="#77c1b1" stroke-width="4" stroke-linecap="round" opacity=".7"/>
+  </g>
+  <g fill="url(#leaf)" opacity=".5">
+    <path d="M690 440c29-41 62-55 99-43-19 43-52 58-99 43Z"/>
+    <path d="M635 572c22-33 48-45 79-36-15 34-41 47-79 36Z"/>
+    <path d="M748 630c25-36 54-48 86-37-17 37-45 50-86 37Z"/>
+  </g>
+</svg>
