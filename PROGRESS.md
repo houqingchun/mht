@@ -4078,7 +4078,7 @@ git diff
   表头实录 **459 份**，且该表无删除接口、每轮全量 e2e 净增若干条、从不清理）；
   TD-02 —— E2E 测试数据隔离。两条都按 §5.16.4 第 ⑩ 条「只记录，不顺手实现」处置。
 
-### 5.17 V2.0.1 报表视觉一致性 Patch：关注等级分布（待 AI Coding）
+### 5.17 V2.0.1 报表视觉一致性 Patch：关注等级分布（已完成，2026-09-27）
 
 > **范围裁决（2026-09-27）**：本节来自 V2.0.1 报表体验复审，只解决两个页面中“关注等级分布”
 > 与当前统计分析报表视觉语言不一致的问题。属于**小范围视觉一致性 Patch**，不是新一轮报表重构。
@@ -4181,37 +4181,52 @@ git diff
 
 #### 5.17.7 验收标准 / DoD
 
-- [ ] 两个“关注等级分布”使用同一套业务视觉组件或同一套明确的展示实现；
-- [ ] 等级顺序和状态色完全一致；
-- [ ] 人数 + 比例均直接可见；
-- [ ] 筛查关注概览可识别当前统计范围/可评价样本量；
-- [ ] 班级维度画像可明确识别当前班级/可评价样本量；
-- [ ] 统计口径与当前系统既有口径一致，不新增计算逻辑；
-- [ ] 无数据与 0 值语义正确；
-- [ ] 375 / 768 / 1024 / 1440 四档核心视口无新增横向溢出；
-- [ ] 键盘 Focus、Reduced Motion 无回归；
-- [ ] `vue-tsc -b` 通过；
-- [ ] `npm run build` 通过；
-- [ ] 两个页面相关定向 E2E / 视觉守卫通过；
-- [ ] 全量 E2E 按当前权威口径通过；
-- [ ] Backend Tests 无回归；
-- [ ] 完成后在本节回填实际修改文件、测试结果与 commit SHA。
+- [x] 两个“关注等级分布”使用同一套业务视觉组件或同一套明确的展示实现（两页共用 `ScoreBandBars.vue` 的 `layout="bars"` 横向分支，未新建组件）；
+- [x] 等级顺序和状态色完全一致（档序由组件内按 `LEVEL_ORDER` 排序，色取既有 `columnColor()`；e2e 逐档比对两页的 `backgroundColor` 与档名序列）；
+- [x] 人数 + 比例均直接可见（`.band-count` / `.band-rate` 两格都在行内，e2e 用 `toBeVisible` 逐档断三行）；
+- [x] 筛查关注概览可识别当前统计范围/可评价样本量（`scope-label="当前数据范围"` + 「可评价 N 人」，e2e 断 `.band-scope-name` 文本）；
+- [x] 班级维度画像可明确识别当前班级/可评价样本量（格子标题「本班 · {{activeClassName}}」/「同年级 · {{gradeForName}}全年级」+ 各格自己的「可评价 N 人」）；
+- [x] 统计口径与当前系统既有口径一致，不新增计算逻辑（人数取 `student_count`、比例取后端 `rate`（含 `null` → 「样本过小」）、条长 `count / total`；视图里没有新的除法）；
+- [x] 无数据与 0 值语义正确（`total` 为 0 时条长 0%、`v-if="row.count > 0"` 不出条；`rate == null` 走「样本过小」而不是 `?? 0`，与 §11 一致）；
+- [x] 375 / 768 / 1024 / 1440 四档核心视口无新增横向溢出（探针实测两页 × 四档：文档溢出均 0px、无越界 `.band-*` 元素、每格三条轨道等宽）；
+- [x] 键盘 Focus、Reduced Motion 无回归（只换了横向渲染分支，未动 Focus/`prefers-reduced-motion` 相关样式；§5.15 冻结项未触碰）；
+- [x] `vue-tsc -b` 通过（`npx vue-tsc -b --force` → `EXIT=0`）；
+- [x] `npm run build` 通过（输出 `✓ built in 1.06s`）；
+- [x] 两个页面相关定向 E2E / 视觉守卫通过（新用例 `both report pages show the same level distribution, only the scope differs`，定向跑 **5 passed (4.0s)**；变异验证 5/5 全红且逐字节还原）；
+- [x] 全量 E2E 按当前权威口径通过（`npx playwright test --workers=1` → **197 passed (3.9m)**）；
+- [x] Backend Tests 无回归（`make test` → **869 passed, 5 warnings in 544.59s**；5 条为已知 cartesian product SAWarning 误报）；
+- [x] 完成后在本节回填实际修改文件、测试结果与 commit SHA。
 
 #### 5.17.8 AI Coding 完成回填模板
 
 - 实际修改文件：
-- 是否复用既有组件 / 新增 `AttentionLevelDistribution.vue`：
-- 统一后的等级顺序：
-- 统一后的状态色来源：
-- 无数据 / 0 值处理：
-- 四档响应式验证：
-- `vue-tsc -b`：
-- `npm run build`：
-- 定向 E2E：
-- 全量 E2E：
-- Backend Tests：
-- Commit SHA：
-- 遗留问题：无 / （仅记录，不得扩项）
+  1. `frontend/src/features/analytics/components/ScoreBandBars.vue`（+200 行：新增 `layout?: 'columns' | 'bars'` 横向渲染分支、`scopeLabel?`、按 `LEVEL_ORDER` 的档序排序、`barWidth()`）
+  2. `frontend/src/features/analytics/views/OverviewPage.vue`（+6 行：`layout="bars"` + `scope-label="当前数据范围"`）
+  3. `frontend/src/features/analytics/views/ClassPortraitPage.vue`（+8 行：两格 `.band-cell` 各 `layout="bars"`）
+  4. `e2e/app.spec.ts`（+204 行：新用例 `both report pages show the same level distribution, only the scope differs`，横向版 helper `expectScoreBandRows`）
+- 是否复用既有组件 / 新增 `AttentionLevelDistribution.vue`：**复用既有组件**（对 `ScoreBandBars.vue` 做最小扩展，`layout` 默认 `'columns'` 所以既有三个调用方一像素未动）；**未新增** `AttentionLevelDistribution.vue`——§5.17.5 要求「如已有等价组件应优先复用」，而 `ScoreBandBars` 正是那个等价组件（同一个业务指标：关注等级的人数分布）。
+- 统一后的等级顺序：**重点关注 → 需要关注 → 一般观察**（与 `labels.ts` 的 `LEVEL_ORDER` 一致，从重到轻）。横向分支在组件内按 `LEVEL_ORDER` 排序，不依赖服务端返回序（该序是从轻到重的 `LEVEL_BANDS`，纵向 `columns` 分支沿用不变，两版差异已写进组件文件头注释）。
+- 统一后的状态色来源：**`labels.ts` 既有的那套**——组件内 `columnColor(level_code)`，与 `expectScoreBands` 守卫的同一处；未新建任何颜色 Token，未定义第二套等级色。
+- 无数据 / 0 值处理：`total` 为 0 时 `barWidth()` 返回 `0%`，且 `v-if="row.count > 0"` 使 0 人的档不出条（颜色取不到，e2e 对此显式跳过）；比例沿用 §11 的 `rate: number | null` 语义——`null` 渲染成「样本过小」而**不是** `0%`，「无数据」与「0」在界面上长得不一样。e2e 的比例文本按 `/^(\d+(\.\d+)?%|样本过小)$/` 两页同一条正则校验。
+- 四档响应式验证：探针（`/tmp/xlp_s517_resp.mjs`）实测 1440 / 1024 / 768 / 375 四档 × 两页：**文档溢出均为 0px、无越界 `.band-*` 元素**；每格三条轨道等宽（概览 73/424/446/113、班级 254/394/416/83）；样本量文本为「可评价 48 人」（概览）/「可评价 6 人」「可评价 13 人」（班级两格）；console errors 无。
+- `vue-tsc -b`：`npx vue-tsc -b --force` → **`EXIT=0`**。
+- `npm run build`：**`✓ built in 1.06s`**。
+- 定向 E2E：新用例定向跑 **5 passed (4.0s)**；**变异验证 5/5 全红且逐字节还原**（`cp -p` 落盘备份 + `cmp`），且第二轮确认每条红的正是它该红的判据——M1 摘 `layout="bars"` → `:969` `Expected: 3 / Received: 0`；M2 摘 `LEVEL_ORDER` 排序 → `:973` `"重点关注" vs "一般观察"`；M3 档名不走 `labels.ts` → `:973` `"重点关注" vs "KEY_ATTENTION"`；M4 条长退回「相对本格最大值」→ `:1007` `Expected: < 0.05 / Received: 0.152…`；M5 横向比例 `v-show="false"` → `:1740` `Expected: visible / Received: hidden`。
+- 全量 E2E：**197 passed (3.9m)**（`--workers=1`，当前权威口径）。
+- Backend Tests：**869 passed, 5 warnings in 544.59s**（无回归；5 条 warning 为 §23 记着的 cartesian product 误报）。
+- Commit SHA：**`8f28353`**（rebase 到 `origin/V2.0.1` 之后的实现提交 SHA；原提交为 `0bcbb7c`）。
+- 遗留问题：无
+
+> **AI Coding 记录（2026-09-27）**：本节的实现方式选择了「最小扩展既有 `ScoreBandBars.vue`」而不是新建
+> `AttentionLevelDistribution.vue`。§5.17.5 把「先检查仓库是否已有可直接复用的组件」排在「建议语义名」之前，
+> 而 `ScoreBandBars` 与它要抽的组件**是同一个业务指标**（关注等级的人数分布）——再建一个就是 §3「同一处
+> 只许有一个定义」的反面。扩出来的 `layout` 默认 `'columns'`，所以 `GradesPage.vue`（在 §5.17.6⑹ 禁区里）
+> 与另外两处纵向调用**一行未动**，这是这次改动能一次收口的边界。
+>
+> 本段最值钱的一条教训记在 e2e 用例里：**Playwright 的 locator 是惰性的**——`page.locator('.band-chart')`
+> 描述的是「**当前这一页**上的所有匹配元素」，跨 SPA 导航复用会读到**新页面**的 DOM。第一版把两处
+> `facts()` 都写在第二次 `goto` 之后，于是「概览那一份」读到的是班级页的 DOM（6 行 vs 3 行），而两页
+> 看起来都对。修法是把读数**留在各自那一页上完成**，并把这段推理写进用例 docstring。
 
 ### 5.18 V2.0.1 心理老师连续工作体验 Patch（待 AI Coding，先审计后最小修复）
 
