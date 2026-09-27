@@ -5250,35 +5250,215 @@ ColumnChart、`:109` 侧栏覆盖率表、`:154` band-grid **四个**，加 `Ove
 
 #### 5.22.7 DoD
 
-- [ ] 先记录当前 `LoginPage.vue` 审计结果，再做最小修改；
-- [ ] 冻结 SVG 资产原样引用；
-- [ ] 桌面品牌区 + 登录区层级清楚；
-- [ ] 375 / 768 / 1024 / 1440 通过；
-- [ ] 200% zoom 登录可用；
-- [ ] Keyboard / Focus / Reduced Motion 无回归；
-- [ ] 登录成功、认证失败、网络失败、branding 失败均有回归验证；
-- [ ] 不修改认证/RBAC/Session/Token/API Contract；
-- [ ] `vue-tsc -b` 通过；
-- [ ] `npm run build` 通过；
-- [ ] Authentication 定向 E2E 通过；
-- [ ] 全量 E2E 按当前 `workers: 1` 权威口径通过；
-- [ ] Backend Tests 无回归；
-- [ ] 回填实际修改文件、测试结果、Commit SHA。
+- [x] 先记录当前 `LoginPage.vue` 审计结果，再做最小修改；（§5.22.9）
+- [x] 冻结 SVG 资产原样引用；（§5.22.8 的 SHA 行：`733f7d9c…` / 2805 B，逐字节未变）
+- [x] 桌面品牌区 + 登录区层级清楚；（§5.22.10 守卫 1 第①②段）
+- [x] 375 / 768 / 1024 / 1440 通过；（§5.22.8 的表 + 四档无横向溢出）
+- [x] 200% zoom 登录可用；（640×360 等效视口真实登录成功）
+- [x] Keyboard / Focus / Reduced Motion 无回归；（§5.22.10 守卫 2 的可聚焦 + Space 切换、
+      守卫 3 的焦点策略；Reduced Motion 本次未新增任何动画）
+- [x] 登录成功、认证失败、网络失败、branding 失败均有回归验证；（§5.22.10 守卫 3 与 5）
+- [x] 不修改认证/RBAC/Session/Token/API Contract；（零后端改动，`api.ts` 未动）
+- [x] `vue-tsc -b` 通过；（EXIT=0）
+- [x] `npm run build` 通过；
+- [x] Authentication 定向 E2E 通过；（5 条新增全过 + 既有 12 条零回归）
+- [x] 全量 E2E 按当前 `workers: 1` 权威口径通过；（208 passed (4.2m)）
+- [x] Backend Tests 无回归；（871 passed / 0 failed）
+- [x] 回填实际修改文件、测试结果、Commit SHA。（§5.22.8 十四个字段已逐条填）
 
 #### 5.22.8 AI Coding 完成回填
 
-- LoginPage 审计结论：
-- 实际修改文件：
-- SVG 资产 SHA（确认未被实现提交改写）：
-- 密码显隐：
-- Focus / 错误反馈：
-- 四档响应式：
-- 200% Zoom：
-- `vue-tsc -b`：
-- `npm run build`：
-- Authentication 定向 E2E：
-- 全量 E2E：
-- Backend Tests：
-- Commit SHA：
-- 遗留问题：无 / （只记录，不扩项）
+- LoginPage 审计结论：**11 项已满足（一个字不改）+ 6 条缺口**，逐条留证见 §5.22.9。
+  已满足的那 11 项包括 Enter 提交、Loading 防重复、失败不清空账号、三种错误语义可分、
+  错误表单内可见、`aria-pressed` 角色语义、隐式 label、branding 动态读取 + fallback、
+  不预填凭据、不新增后端没有的入口、隐私与筛查边界说明（**末句逐字保留**，§5.22.6 禁删）。
+  6 条缺口即本次的最小改动面：桌面无 55:45 品牌区且冻结 SVG 零引用 / 密码显隐无控制 /
+  `name` 与显式 `type` 缺失 / 无重入守卫 / 错误信息无 `role="alert"` / 无错误后焦点策略。
+- 实际修改文件：共 3 个。
+  ① `frontend/src/features/auth/LoginPage.vue`（6 处：`import nextTick`；新增 `showPassword`
+  / `togglePassword` 与三个 `ref`；`submit()` 加重入守卫 + 三种失败分类的焦点策略 +
+  `finally` 里的按钮焦点复原；模板外层换成 `.login-split` / `.login-brand`（`aria-hidden`
+  + `alt=""` + 固定 slogan/note）；账号框补 `name` / `type="text"` / `autocomplete` 与
+  `ref`；密码框补 `name` / `:type` 绑定 / `autocomplete` / `ref` + `.password-field`
+  包裹与显隐按钮；错误行加 `role="alert"`；提交按钮加 `ref`）。
+  ② `frontend/src/assets/styles.css`（替换 `.login-panel` 规则块为 `.login-split` /
+  `.login-brand` / `.login-brand-art` / `.login-brand-slogan` / `.login-brand-note` /
+  `.login-panel`（**修复：该规则此前与已退役的 `.work-card` 同在一个选择器组里，
+  删那个类时把它一起带走了，留下一个悬空的 `.login-panel,` 并进 `.brand-row`，
+  使面板把子元素排成一行**）/ `@media (max-width: 900px)` 单栏收敛 / `.password-field` /
+  `.password-toggle` 及其 `:hover`）。
+  ③ `e2e/app.spec.ts`（Authentication 块新增 4 条守卫）。
+  **未新增任何后端文件、未改 `api.ts`、未改 `login()` 契约、未改 `AppLayout` 等非登录页面。**
+- SVG 资产 SHA（确认未被实现提交改写）：`733f7d9c67edfb55928e2a87d9159980ae21cf535ce9b82ff3b49084b287b89d`
+  （2805 字节，`shasum -a 256` 实测，与 `ce22ba6` 加入时逐字节相同；实现提交前后各核一次，
+  `git status --short` 未把该文件列为已改）。实现只做了 `<img src>` 引用 + 外层容器
+  `width:100% / max-height:340px / object-fit:contain`，**viewBox / path / fill / stroke /
+  gradient 一个字节未动，未转 PNG，未生成替代插画**（§5.22.2）。
+- 密码显隐：默认**关闭**（共用电脑上默认明文会把上一个人的密码留在屏幕上）；`.password-toggle`
+  是 `type="button"`，只切 `:type`，**不碰 `password` 的值**——e2e 用 `'  Secret 密码  '`
+  断 `inputValue()` 逐字相等（含前后空格）。可键盘操作（`focus()` + Space 与 Enter 都能切），
+  `aria-label` 翻转「显示密码 / 隐藏密码」，**不加 `aria-pressed`**（翻转的 label 已说出当前
+  状态，再加按下态就是两个信号）。取名刻意避开「登录」二字——`getByRole(name)` 是子串匹配，
+  否则会把既有的 `getByRole('button', {name:'登录'})` 变成 strict mode 冲突。
+- Focus / 错误反馈：错误行 `<p class="form-error" role="alert">`（表单内可见、非 Toast，
+  `aria-live` 由 `alert` 隐含）。失败后的焦点分两类：**认证失败** → 焦点回**密码框**
+  （账号为空时回账号框，那才是缺的那一项）；**网络类 / 解析类失败**（`TypeError` /
+  `SyntaxError`）→ **不指认任何输入框**（重打密码永远不会让它好起来），但**也不许掉到
+  `<body>`**——提交按钮在请求期间被 `:disabled`，而 disabled 的按钮接不住焦点（实测
+  `activeElement.tagName === 'BODY'`），所以只把**按钮这一个位置**复原：`finally` 里
+  `loading.value = false` → `await nextTick()` → `if (document.activeElement === document.body)
+  submitButton.value?.focus()`（**必须等 `:disabled` 摘掉再 focus**）。
+  另加**重入守卫** `if (loading.value) return`：按钮的 `:disabled` 只挡鼠标那一条路，
+  回车连按两下会在 `loading` 回落前再进来一次，而两次登录都会签发会话、后一份顶掉前一份。
+  探针实测：连按三次回车只发出 **1 个**请求。
+- 四档响应式（几何探针实测 `scrollWidth == clientWidth` 五档全部成立，**无新增横向溢出**）：
+  | 视口 | `.login-panel` 宽 | `.login-brand` | 备注 |
+  |---|---|---|---|
+  | 1440 | 449.1 | 可见（art 高 340） | 两栏 55:45 |
+  | 1024 | 438.3 | 可见（art 高 340） | 两栏 55:45 |
+  | 768 | 460 | **隐藏** | 走 `≤900` 单栏分支 |
+  | 375 | 327 | **隐藏** | 单栏，登录按钮首屏可见可点 |
+  四档全部满足 `panel ≤ 480`（既有「布局完整性」守卫）与 `.brand-row` 在 `.login-form`
+  之上。`minmax(0, …)` 不能省：少了它列的宽度会被内容的 min-content 撑开，面板会超出 480。
+- 200% Zoom：`setViewportSize({ width: 640, height: 360 })`（1280×720 在 200% zoom 下的
+  **CSS 像素等效**视口，注释里写明了这不是真的设了缩放）→ 走 `≤900` 单栏分支 → 断无横向
+  溢出 → `scrollIntoViewIfNeeded()` 后**真实点击登录并成功跳转**（`waitForURL` 到非 `/login`），
+  即「200% zoom 下主登录操作仍可完成」（§5.22.5）。
+- `vue-tsc -b`：`npx vue-tsc -b --force` → **EXIT=0**（无输出）。
+- `npm run build`：**通过** —— `✓ 179 modules transformed` / `dist/index.html 0.61 kB` /
+  `dist/assets/index-CoMeUMe4.css 73.49 kB` / `dist/assets/index-UX8i9f_n.js 517.92 kB` /
+  `✓ built in 1.07s`。**`vue-tsc -b` 抓不出未闭合的模板标签**（本轮又一次现场验证：
+  丢一个 `</div>` 时 `vue-tsc -b --force` 仍然 EXIT=0，只有 `npm run build` 报
+  `Element is missing end tag`）——两个都要跑。
+- Authentication 定向 E2E：**5 条新增全部通过**（4 条那一次跑出 `5 passed (2.7s)`，含一条
+  被「焦点」正则顺带命中的既有无障碍契约用例；第 5 条 `branding 拉不到…` 单独跑
+  `1 passed (1.3s)`）；**既有 12 条零回归**（Authentication 6 + Mobile 2 +
+  布局完整性 2 + 品牌版本号 2 → `12 passed`）。
+- 全量 E2E：**`208 passed (4.2m)`**（仓库根、`workers: 1` 权威口径；基线 203 → **+5**，
+  即本次新增的 5 条，**无回归**）。
+- Backend Tests：**`871 passed, 5 warnings in 536.75s (0:08:56)`** —— **0 failed，无回归**。
+  本轮零后端改动。5 条 warning 与本次无关，其中 `analytics_service.py` 那条
+  cartesian product 是 CLAUDE.md §23 已查清的**误报**，不要修。
+- Commit SHA：**`b14cbad`**（实现那一条，`feat: V2.0.1 §5.22 登录页第一印象统一
+  （品牌视觉区 + 登录操作区 55:45）`）；紧随其后的**两条收尾提交**是 `test:` 补 DoD 要求的
+  branding 失败守卫、`docs:` 把上面这批实测数与本行回填进本节——
+  `git log` 上紧跟在 `b14cbad` 之后的那两条即是。
+- 遗留问题：无。（只记录，不扩项。唯一一条如实记：`.login-panel` 那条悬空选择器是**改前
+  就存在**的缺陷——它与已退役的 `.work-card` 同在一个选择器组里，删那个类时被一起带走，
+  留下 `.login-panel,` 并进 `.brand-row`，使面板把子元素排成一行；本次替换该规则块时一并
+  修好，**不是本轮引入的**。）
+
+#### 5.22.9 LoginPage 改前审计（DoD 第一条：先记录，再改）
+
+审计对象：`frontend/src/features/auth/LoginPage.vue`（145 行，`faa98ad`）+
+`frontend/src/assets/styles.css:1225–1345` + 窄屏块 `:3540`。
+
+**做对了、本次一个字不改的（逐条留证）：**
+
+| 项 | 现状 | 依据 |
+|---|---|---|
+| Enter 提交 | ✓ 原生 `<form @submit.prevent>`，两个 input 都在 form 内 | `LoginPage.vue:116` |
+| Loading 期间防重复提交 | ✓ `:disabled="loading"` + 按钮文案切「正在登录」 | `:126` |
+| 登录失败不清空账号 | ✓ `catch` 里只写 `error`，`account` / `password` 不动 | `:81-85` |
+| 三种错误语义可分 | ✓ `TypeError`（一个字没收到）/ `SyntaxError`（响应体解不开）/ 其余取服务端 `error.message` | `:69-73`（CLAUDE.md §2） |
+| 错误信息表单内可见、非 Toast | ✓ `<p class="form-error">` 在 form 内，提交按钮上方 | `:125` |
+| 角色切换语义 | ✓ 四个 `button` 带 `:aria-pressed`，切换时清空账号密码与错误 | `:104-113` / `:36-41` |
+| 输入项 label | ✓ 隐式 label（`<label>` 包住 `<span>` + `<input>`），无障碍名可达 | `:117-124` |
+| 品牌动态读取 + fallback | ✓ `getBranding()` 失败置 `null`，模板 `branding?.x \|\| '默认'` | `:43-51` |
+| 不预填凭据 | ✓ 注释与实现一致 | `:12-15` |
+| 不新增后端没有的入口 | ✓ 无「忘记密码 / 验证码 / SSO / 二维码」 | 全文件 |
+| 隐私与筛查边界说明 | ✓ `.login-assurance` 三句，末句「不等同于医学诊断」 | `:133-142` |
+
+**缺口（本次要补的，共 6 条）：**
+
+1. **桌面无 55:45 品牌视觉区** —— 现状是单张 460px 卡片（`.login-panel`），
+   冻结 SVG `login-illustration.svg` **零引用**（`grep` 全仓只有资产文件自身）。
+2. **密码显隐无控制** —— `<input type="password">` 固定，用户无法核对输入。
+3. **`name` 属性缺失** —— 两个 `<input>` 都没有 `name`，账号框也没有显式 `type`
+   （浏览器按 `type=text` 处理，但值不明确）。
+4. **无重入守卫** —— `submit()` 只靠按钮 `:disabled`；键盘/程序化重入没有兜底。
+5. **错误信息无 `role="alert"`** —— `<p class="form-error">` 渲染时读屏软件不会主动播报。
+6. **无错误后焦点策略** —— 认证失败后焦点停在提交按钮上，用户要手动回退到密码框。
+
+**本次新增样式前必须先确认的四条既有守卫（已逐条实测确认，见 5.22.10）：**
+
+- `e2e/app.spec.ts:5942` 布局完整性：`.login-panel` 宽度 ≤480 且 `.brand-row` 在 `.login-form` 之上；
+- `e2e/app.spec.ts:3254 / 3272` 移动端：品牌 `<h1>` 与副标题可见、`.role-tabs button` 恰好 4 个；
+- `e2e/helpers.ts:38` 与 11 处用例：`getByRole('textbox', { name: /密码/i })` 定位密码框
+  ——**探针实测：Playwright 的 `textbox` role 匹配 `input[type=password]` 与 `input[type=text]` 两种**，
+  所以显隐切换（只改 `type`）不会让这 12 处定位器失效；
+- `getByRole('button', { name: '登录' })` 是**子串**匹配，所以新增的显隐按钮
+  **取名不得含「登录」二字**（取「显示密码 / 隐藏密码」）。
+
+#### 5.22.10 守卫、变异验证与四条可复用的 Playwright / Vite 判据
+
+**四条既有守卫的逐条实测确认**（§5.22.9 前向引用的就是这一节）。改之前先证明「会被撞到
+的东西长什么样」，改完才知道有没有撞坏：
+
+| 既有守卫 | 位置 | 实测结论 |
+|---|---|---|
+| 布局完整性 | `e2e/app.spec.ts` 布局完整性组 | `.login-panel ≤ 480` 与 `.brand-row` 在 `.login-form` 之上，五档视口全部成立（见 §5.22.8 的表） |
+| 移动端 | 同文件 Mobile 组 | 品牌 `<h1>` 与副标题仍可见（它们在**面板**里，不在 `aria-hidden` 的品牌区里）、`.role-tabs button` 恰好 4 个 |
+| 密码框定位 | `e2e/helpers.ts` + 11 处用例 | `getByRole('textbox', { name: /密码/i })` 探针实测**共 2 个 textbox、`/密码/i` 命中 1 个** |
+| 按钮名 | 多处 | `getByRole('button', { name: '登录' })` 恰好 **1 个**（显隐按钮刻意不含「登录」） |
+
+**本次新增 5 条守卫**（`e2e/app.spec.ts` 的 Authentication 块）：
+
+1. `登录页是品牌视觉区 + 登录操作区，品牌区只承载装饰` —— 四段判据：① 桌面 1280 两栏且
+   `brand.w > panel.w`、`panel ≤ 480`；② `brand` 有 `aria-hidden="true"`，且
+   `['h1','form','.role-tabs','.login-assurance','.brand-mark']` 在 brand 内各 `toHaveCount(0)`，
+   **同时** 在 panel 内各可见（没有后半句，一个「整页空着」的实现也绿）；③ `img.login-brand-art`
+   `toHaveCount(1)` 且 `src` 匹配 `/(\.svg$|^data:image\/svg\+xml)/`；④ `[1440,1024,768,375]`
+   循环断 `scrollWidth - innerWidth <= 0`，375 上 `brand` `toBeHidden()` / `panel` `toBeVisible()`
+   / 登录按钮可见。
+2. `密码显隐可键盘操作、不改密码值，且不占用「登录」这个名字` —— `secret = '  Secret 密码  '`；
+   初始 `type=password` + `aria-label='显示密码'`；点击后 `type=text` + `aria-label='隐藏密码'`
+   且 `inputValue()` **逐字相等**；`toggle.focus()` + `toBeFocused()` + Space 再切回且值不变；
+   末尾断 `getByRole('button', {name:'登录'})` 1 个、`getByRole('textbox', {name:/密码/i})` 1 个。
+3. `登录失败把焦点送回密码框，网络类失败不把焦点丢给 body` —— ① 认证失败断文案 +
+   `activeElement.name === 'password'` + `.form-error` 有 `role="alert"`；
+   ② `page.route('**/api/v1/auth/login', r => r.abort())` 后断「无法连接服务器，请检查网络后重试」
+   + `activeElement.tagName !== 'BODY'`。
+4. `200% zoom 等效视口下仍能完成登录` —— 见 §5.22.8 那一行。
+5. `branding 拉不到时登录页回落到默认品牌，登录表单照常可用` —— 桩
+   `**/api/v1/public/branding` 成 500（真后端不会返回 500，所以这条分支靠演示数据永远
+   走不到），断 `<h1>` 是「心晴」、副标题是默认那一句、**「不等同于医学诊断」仍在**
+   （§5.22.6 禁删的那一块不该被品牌回落波及），末尾走一次**真实登录**落到学生首页
+   ——「按钮在、点了没反应」的实现也能过前半句，而这条用例要说的是「品牌拉不到不该让
+   任何人登不进来」。
+
+**变异验证 5/5 全部变红**（每条 `cp -p` 落盘备份、改完 `cmp` **逐字节**还原）：
+
+| 变异 | 位置 | 结果 |
+|---|---|---|
+| M1 `aria-hidden="true"` → `"false"` | `LoginPage.vue` | `登录页是品牌视觉区…` **1 failed** |
+| M2 `:type="showPassword ? 'text' : 'password'"` → `type="password"` | 同上 | `密码显隐可键盘操作…` **1 failed** |
+| M3 摘掉 `finally` 里 `restoreSubmitFocus` 那一段 | 同上 | `登录失败把焦点送回密码框…` **1 failed** |
+| M4 删掉 `≤900` 分支里的 `.login-brand { display: none }` | `styles.css` | `登录页是品牌视觉区…`（375 档 `toBeHidden`）**1 failed** |
+| M5 `<h1>{{ branding?.brand_name \|\| '心晴' }}</h1>` 的兜底改成 `''` | `LoginPage.vue` | `branding 拉不到时登录页回落…` **1 failed** |
+
+**四条可复用的判据**（都是本次探针实测出来的，不是推的）：
+
+- **Playwright 的 `getByRole('textbox')` 同时匹配 `input[type=password]` 与 `input[type=text]`**
+  —— 与严格 ARIA 相反。这条是「密码显隐会不会打破 12 处既有定位器」这个问题的答案：
+  显隐只改 `type`，而两种 type 都落在 `textbox` 上，所以一处都不会失效。**换角色切换、
+  `readonly`、`disabled` 之类的改动之前，先照这条量一次再动。**
+- **`getByRole(name)` 是子串匹配（大小写不敏感）** —— 新增按钮取名时要避开既有按钮名的子串，
+  否则既有的 `getByRole('button', {name:'登录'})` 会变成 strict mode 冲突（本次的显隐按钮
+  取名「显示 / 隐藏」正是为了这个）。
+- **`getByText(subtitle)` 会匹配隐藏 DOM** —— 所以左栏（`aria-hidden` 的那一块）只放固定
+  slogan / note，**绝不放 `branding.brand_name` / `brand_subtitle`**：放了的话 `≤900` 隐藏它
+  也拦不住 `getByText`，品牌版本号那两条用例会以「找到 2 个」的形式红。
+- **★ Vite 生产构建把 SVG 内联为 data URI** —— `dist/assets/` 下**不单独落地 `.svg`**，
+  构建产物里它是 `data:image/svg+xml,%3csvg%20xmlns=…`（URL-encoded，非 base64）；而 e2e
+  跑的 dev server 给的是 `/src/assets/login-illustration.svg` 这条真实路径。所以「它不是 PNG」
+  的断言必须两种都认：`src` 匹配 `/(\.svg$|^data:image\/svg\+xml)/`。**只写 `.svg$` 会在
+  构建产物上红，只写 `data:` 会在 dev 上红**，而这两条路各跑一半（e2e 走 dev，
+  出包走 build）。
+
+**另一条与 §5.20 同源的几何判据**：`.login-split` 的 `grid-template-columns` 必须写
+`minmax(0, 55fr) minmax(0, 45fr)`。少了 `minmax(0, …)`，每一列的宽度会被它内容的
+**min-content** 撑开，于是面板里一个长字符串就能把 45% 那一列顶过 480px——而
+「布局完整性」那条守卫断的正是 `panel ≤ 480`。加上它之后两列是容器的纯分数，
+宽度是算术值，与内容无关。
 
