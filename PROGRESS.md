@@ -3700,7 +3700,12 @@ UX-FINAL-03 要动的文件，届时一并确认。
 
 ##### 六、提交
 
-`<待回填> feat: V2.0.1 §5.15.9 UX-FINAL-02 历次趋势页签精修`，已 push 到 `origin/V2.0.1`。
+`206a8df feat: V2.0.1 §5.15.9 UX-FINAL-02 关怀档案详情与历次趋势页签精修`，已 push 到
+`origin/V2.0.1`（`9974bee..206a8df`）。
+
+**下一次提交要带上的**（本轮已知、刻意未做）：`StudentRecordsPage.vue:297` 的作废
+notice 有与本次同源的 whitespace 折叠空格；`ReportExportPage.vue` / `ProfessionalReportList.vue`
+/ `ProfessionalReportVersions.vue` 三个文件是 UX-FINAL-03 的剩余部分。
 
 ## 6. 关键文件
 
