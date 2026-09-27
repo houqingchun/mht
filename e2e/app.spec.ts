@@ -206,6 +206,29 @@ test.describe('Authentication', () => {
   });
 
   /**
+   * §5.22.7 的 DoD 逐字要求「branding 失败」也要有回归验证，而 §5.22.3 要求这次改版
+   * **不得改变**「品牌动态读取 + 失败 fallback」这套机制。
+   *
+   * 桩成 500 是唯一能在浏览器里把它逼出来的办法——真后端不会返回 500，所以这条分支
+   * 靠演示数据永远走不到。它落进 `catch { branding.value = null }`，模板的 `||` 兜底接手。
+   *
+   * 末尾是**真实登录**而不是「按钮可见」：一个「按钮在、点了没反应」的实现也能过前半句，
+   * 而这条用例要说的事情是「品牌拉不到不该让任何人登不进来」。
+   */
+  test('branding 拉不到时登录页回落到默认品牌，登录表单照常可用', async ({ page }) => {
+    await page.route('**/api/v1/public/branding', (r) => r.fulfill({ status: 500, body: '{}' }));
+    await page.goto('/login');
+
+    await expect(page.getByRole('heading', { level: 1 })).toHaveText('心晴');
+    await expect(page.getByText('中学生心理测评与关怀平台')).toBeVisible();
+    // 隐私与筛查边界说明是 §5.22.6 明确禁止删除的那一块，品牌回落不该波及它。
+    await expect(page.getByText('不等同于医学诊断')).toBeVisible();
+
+    // 表单真的能用：走一次真实登录，落到学生首页。
+    await loginAs(page, 'student');
+  });
+
+  /**
    * §5.22.4 逐字要求：密码显隐**必须可键盘操作、具备明确 accessible name、
    * 且不得改变密码值**。
    *
