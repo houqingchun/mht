@@ -146,6 +146,154 @@ test.describe('Authentication', () => {
     await expect(page.locator('.brand-name')).toBeVisible();
     await expect(page.locator('.brand-version')).toHaveCount(0);
   });
+
+  /**
+   * §5.22.3 / §5.22.5：桌面是「品牌视觉区 + 登录操作区」（≈55:45），≤900 收敛成单栏。
+   *
+   * 三段判据各盯一个面，**放一起是有意的**：它们说的是同一句话「品牌区只是装饰，
+   * 而且不挤占操作」。
+   * ① 桌面两栏、品牌区更宽、登录卡片仍是既有守卫要求的那张卡（≤480）；
+   * ② 品牌区整块 `aria-hidden="true"`，且**产品名 / 角色页签 / 表单 / 隐私说明
+   *    一个都不在里面**——§5.22.5 那条「SVG 不作为任何业务信息的唯一载体」靠这一条
+   *    成立，而不是靠人去看（②在变异「把 h1 挪进品牌区」下会红）；
+   * ③ 375 隐藏品牌区，四档视口都无横向溢出（§5.22.5 的 375/768/1024/1440）。
+   *
+   * 插画那一项断的是**引用形式**：`<img>` 且 src 是 SVG 路径或 `data:image/svg+xml`
+   * ——§5.22.2 禁止转 PNG / 另生成替代插画，而「换了张 PNG」在页面上看着完全正常。
+   * 它**守不住**「SVG 的 path 有没有被改」：那是冻结资产的 SHA，记在 §5.22.8 的回填里，
+   * 不是 e2e 能断的东西。
+   */
+  test('登录页是品牌视觉区 + 登录操作区，品牌区只承载装饰', async ({ page }) => {
+    await page.goto('/login');
+    const brand = page.locator('.login-brand');
+    const panel = page.locator('.login-panel');
+
+    // ① 桌面 1280：两栏，品牌区更宽
+    await expect(brand).toBeVisible();
+    const brandBox = (await brand.boundingBox())!;
+    const panelBox = (await panel.boundingBox())!;
+    expect(brandBox.width).toBeGreaterThan(panelBox.width);
+    expect(panelBox.width).toBeLessThanOrEqual(480);
+
+    // ② 装饰区：读屏软件里不存在，且业务内容一个都不在其中
+    await expect(brand).toHaveAttribute('aria-hidden', 'true');
+    for (const selectors of ['h1', 'form', '.role-tabs', '.login-assurance', '.brand-mark']) {
+      await expect(brand.locator(selectors)).toHaveCount(0);
+    }
+    // 业务内容确实在操作区那一侧（否则上面那几条在「整页都是空的」时也成立）
+    await expect(panel.locator('h1')).toBeVisible();
+    await expect(panel.locator('form')).toBeVisible();
+    await expect(panel.locator('.login-assurance')).toBeVisible();
+
+    // ③ 插画是引用来的矢量，不是 PNG，也不是在页面里另画一份
+    const art = brand.locator('img.login-brand-art');
+    await expect(art).toHaveCount(1);
+    const src = (await art.getAttribute('src')) ?? '';
+    expect(src).toMatch(/(\.svg$|^data:image\/svg\+xml)/);
+
+    // ④ 品牌区里被撑到最宽也不会把操作区推出屏幕
+    for (const width of [1440, 1024, 768, 375]) {
+      await page.setViewportSize({ width, height: 800 });
+      const overflow = await page.evaluate(
+        () => document.documentElement.scrollWidth - window.innerWidth
+      );
+      expect(overflow, `${width} 上有横向溢出`).toBeLessThanOrEqual(0);
+    }
+    await expect(brand).toBeHidden();
+    await expect(panel).toBeVisible();
+    // 隐藏之后登录操作仍然完整可点（375 是主任务那一档）
+    await expect(page.getByRole('button', { name: '登录' })).toBeVisible();
+  });
+
+  /**
+   * §5.22.4 逐字要求：密码显隐**必须可键盘操作、具备明确 accessible name、
+   * 且不得改变密码值**。
+   *
+   * 末尾那两行是**给这个页面自己的定位器上保险**，不是顺带：显隐按钮与输入框同在
+   * 一个 `<label>` 里，而 `getByRole(name)` 是**子串**匹配——按钮一旦取名带「登录」，
+   * 页面里就有两个叫「登录」的按钮，`helpers.ts` 的 `loginAs` 以及本文件十几处
+   * `getByRole('button', { name: '登录' })` 会一起变成 strict mode 冲突。
+   * 所以这里把「只有一个」钉住，红的时候原因一眼看得见。
+   */
+  test('密码显隐可键盘操作、不改密码值，且不占用「登录」这个名字', async ({ page }) => {
+    await page.goto('/login');
+    const pwd = page.locator('input[name=password]');
+    const toggle = page.locator('.password-toggle');
+    // 值里带空格与中文：任何 trim / 编码级别的「顺手处理」都会显形
+    const secret = '  Secret 密码  ';
+    await pwd.fill(secret);
+
+    await expect(pwd).toHaveAttribute('type', 'password');
+    await expect(toggle).toHaveAttribute('aria-label', '显示密码');
+
+    await toggle.click();
+    await expect(pwd).toHaveAttribute('type', 'text');
+    await expect(toggle).toHaveAttribute('aria-label', '隐藏密码');
+    // 切换是显示层的事：值、长度、两端空格都必须一模一样
+    expect(await pwd.inputValue()).toBe(secret);
+
+    // 键盘：Tab 可达 + Space 可切（`type="button"` 不会顺手提交表单）
+    await toggle.focus();
+    await expect(toggle).toBeFocused();
+    await page.keyboard.press('Space');
+    await expect(pwd).toHaveAttribute('type', 'password');
+    expect(await pwd.inputValue()).toBe(secret);
+
+    await expect(page.getByRole('button', { name: '登录' })).toHaveCount(1);
+    await expect(page.getByRole('textbox', { name: /密码/i })).toHaveCount(1);
+  });
+
+  /**
+   * §5.22.4 的错误后焦点策略，两条分支**必须都在**（只测一条等于另一条没守）。
+   *
+   * 网络类那一条断的是「焦点没掉到 `<body>`」：提交按钮在请求期间是 `disabled`，
+   * 而 disabled 的按钮接不住焦点——修之前实测 `activeElement` 就是 BODY。
+   * 断言写成「不是 body」而不是「等于提交按钮」，是因为「焦点在哪」可以有多种正确
+   * 答案（浏览器行为、未来换成别的位置），而「掉进 body = 键盘用户找不到自己」
+   * 只有一种读法。
+   */
+  test('登录失败把焦点送回密码框，网络类失败不把焦点丢给 body', async ({ page }) => {
+    // ① 认证失败 → 回密码框
+    await page.goto('/login');
+    await page.getByRole('textbox', { name: /学号/ }).fill('S001');
+    await page.getByRole('textbox', { name: /密码/i }).fill('wrongpassword');
+    await page.getByRole('button', { name: '登录' }).click();
+    await expect(page.locator('.form-error')).toHaveText('账号、角色或密码不正确');
+    expect(await page.evaluate(() => document.activeElement?.getAttribute('name'))).toBe('password');
+    // 错误必须**在表单里**可见，并且是 `role="alert"`（可被辅助技术感知）
+    await expect(page.locator('.form-error')).toHaveAttribute('role', 'alert');
+
+    // ② 网络类失败 → 不指认输入框，但也不能掉到 body
+    await page.route('**/api/v1/auth/login', (r) => r.abort());
+    await page.getByRole('textbox', { name: /密码/i }).fill('whatever');
+    await page.getByRole('button', { name: '登录' }).click();
+    await expect(page.locator('.form-error')).toHaveText('无法连接服务器，请检查网络后重试');
+    const where = await page.evaluate(() => document.activeElement?.tagName ?? 'null');
+    expect(where).not.toBe('BODY');
+  });
+
+  /**
+   * §5.22.5：200% zoom 下主登录操作仍可完成。
+   *
+   * Playwright 没有「设置浏览器缩放」这一项，等价做法是把 CSS 视口减半
+   * （200% zoom 在 1280×720 上就是 640×360 CSS 像素）——分辨率不是重点，
+   * 重点是在那个视口里登录**能完成**：`≤900` 那一档收敛成单栏，滚到底就能提交。
+   * 所以断言落在「登录后离开了 /login」而不是某个元素可见。
+   */
+  test('200% zoom 等效视口下仍能完成登录', async ({ page }) => {
+    await page.setViewportSize({ width: 640, height: 360 });
+    await page.goto('/login');
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - window.innerWidth
+    );
+    expect(overflow).toBeLessThanOrEqual(0);
+    await page.getByRole('textbox', { name: /学号/ }).fill('S001');
+    await page.getByRole('textbox', { name: /密码/i }).fill('123456');
+    const submit = page.getByRole('button', { name: '登录' });
+    await submit.scrollIntoViewIfNeeded();
+    await submit.click();
+    await page.waitForURL((u) => !u.pathname.endsWith('/login'), { timeout: 15000 });
+  });
 });
 
 // ========== 账号管理 ==========

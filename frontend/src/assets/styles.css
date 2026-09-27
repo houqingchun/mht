@@ -1230,17 +1230,139 @@ input {
   background: #eaf1f6;
 }
 
+/* Desktop: brand visual area + sign-in area ≈ 55:45 (V2.0.1 §5.22.3).
+ *
+ * `minmax(0, …)` must not be dropped: without it a column's width is floored by
+ * its content's min-content size, so a long string in the panel would push the
+ * 45% column past 480px — and the `布局完整性` e2e guard asserts exactly that
+ * the panel stays ≤ 480. With it the two columns are pure fractions of the
+ * container and the widths are arithmetic, not content-dependent.
+ *
+ * Width budget (verified against the 1280px `Desktop Chrome` project):
+ *   1280 → available 1232 → split min(1232, 1000) = 1000 → panel 450 ≤ 480 ✓
+ *   1024 → split 976 → panel 439.2 ✓
+ *    768 → ≤900 branch below → panel 460 ✓
+ *    375 → split min(327, 460) = 327 ✓
+ *   200% zoom on 1280×720 ≈ 640×360 CSS px → ≤900 branch → single column ✓
+ */
+.login-split {
+  display: grid;
+  grid-template-columns: minmax(0, 55fr) minmax(0, 45fr);
+  width: min(100%, 1000px);
+  background: #fff;
+  border: 1px solid #dce4ec;
+  border-radius: 10px;
+  box-shadow: 0 10px 32px rgba(20, 43, 69, 0.09);
+  overflow: hidden;
+}
+
+/* Purely decorative (see the `aria-hidden` on the aside itself): the product
+   name, subtitle, role tabs, form and privacy note all live in the panel, so
+   §5.22.5's "the SVG is never the sole carrier of business information" holds
+   by construction rather than by review. */
+.login-brand {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 26px;
+  padding: 44px 40px;
+  background: linear-gradient(160deg, #eef5fa 0%, #e8f1ef 100%);
+  border-right: 1px solid #e2eaf1;
+  overflow: hidden;
+}
+
+/* Frozen asset (§5.22.2): referenced only. The SVG's own viewBox / paths /
+   gradients are untouched and it is never rasterised — everything below is
+   outer-container sizing, which is the one thing that section allows. */
+.login-brand-art {
+  display: block;
+  width: 100%;
+  max-height: 340px;
+  object-fit: contain;
+}
+
+.login-brand-slogan {
+  margin: 0 0 8px;
+  color: #1d3557;
+  font-weight: 800;
+  font-size: 1.05rem;
+}
+
+.login-brand-note {
+  margin: 0;
+  color: #5b6b7d;
+  font-size: 0.84rem;
+  line-height: 1.7;
+}
+
 /* Restored: this rule was part of a selector group with the retired `.work-card`
    class, and removing that class took the whole rule with it — leaving a
    dangling `.login-panel,` that silently merged into `.brand-row` and made the
    panel lay its children out in a row. */
 .login-panel {
-  width: min(100%, 460px);
-  background: #fff;
-  border: 1px solid #dce4ec;
-  border-radius: 8px;
-  box-shadow: 0 8px 28px rgba(20, 43, 69, 0.075);
-  padding: 26px;
+  width: 100%;
+  padding: 32px 30px;
+}
+
+/* ≤900: collapse to a single column and drop the brand area, and hand
+   `.login-panel` back its own card — visually identical to what this page was
+   before §5.22, so the existing 375px assertions are unaffected. */
+@media (max-width: 900px) {
+  .login-brand {
+    display: none;
+  }
+
+  .login-split {
+    display: block;
+    width: min(100%, 460px);
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    overflow: visible;
+  }
+
+  .login-panel {
+    width: min(100%, 460px);
+    background: #fff;
+    border: 1px solid #dce4ec;
+    border-radius: 8px;
+    box-shadow: 0 8px 28px rgba(20, 43, 69, 0.075);
+    padding: 26px;
+  }
+}
+
+/* The toggle is positioned against this wrapper, and the wrapper lives inside
+   the same `<label>` as the input — so this is a positioning box, not a new
+   form row. */
+.password-field {
+  position: relative;
+}
+
+/* Must come after `.login-form input`: same specificity, so source order is
+   what keeps the text from running under the button. */
+.password-field input {
+  padding-right: 62px;
+}
+
+.password-toggle {
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  height: 34px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #4a5c70;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.password-toggle:hover {
+  background: #eef3f8;
 }
 
 .brand-row {
