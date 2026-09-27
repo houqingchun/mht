@@ -162,6 +162,12 @@ test.describe('Authentication', () => {
    * ——§5.22.2 禁止转 PNG / 另生成替代插画，而「换了张 PNG」在页面上看着完全正常。
    * 它**守不住**「SVG 的 path 有没有被改」：那是冻结资产的 SHA，记在 §5.22.8 的回填里，
    * 不是 e2e 能断的东西。
+   *
+   * ④ 是**追加调整**那一轮补的（用户报「图片占满左侧，文字放于图片上面」）。它与 ③
+   * 断的是同一张图的**另一个面**：③ 问「它是怎么来的」，④ 问「它摆在哪儿」。两半各自
+   * 都有过一种「看着正常」的坏法——铺成一块居中的图（旧版就是），或者字幕被图盖住
+   * （视觉上「有字，但看不见」）。**它们都不是文案断言能发现的**，所以这一条断几何
+   * 计算值，与「布局完整性」那一组同一个理由。
    */
   test('登录页是品牌视觉区 + 登录操作区，品牌区只承载装饰', async ({ page }) => {
     await page.goto('/login');
@@ -191,7 +197,39 @@ test.describe('Authentication', () => {
     const src = (await art.getAttribute('src')) ?? '';
     expect(src).toMatch(/(\.svg$|^data:image\/svg\+xml)/);
 
-    // ④ 品牌区里被撑到最宽也不会把操作区推出屏幕
+    // ④ 插画**铺满整栏**、字幕**叠在它上面**
+    //
+    // 铺满断的是 `<img>` 自己的盒子与品牌区同宽同高（`position: absolute; inset: 0`），
+    // 而不是断 CSS 属性——属性写对了却被别的规则覆盖掉，几何上看得见。允许 2px 的
+    // 子像素舍入（实测三档桌面各差 0.9~1.0px，来自 `width: 100%` 与包含块的取整）。
+    const artBox = (await art.boundingBox())!;
+    expect(Math.abs(artBox.width - brandBox.width), '插画没有铺满品牌区的宽').toBeLessThanOrEqual(2);
+    expect(Math.abs(artBox.height - brandBox.height), '插画没有铺满品牌区的高').toBeLessThanOrEqual(2);
+    // 而「盒子铺满」不等于「画满」：`object-fit` 换掉之后元素盒一模一样，图却会缩到
+    // 中间留出白边。它是 §5.22.2 白名单里明写的那一个，所以这里断死。
+    expect(await art.evaluate((el) => getComputedStyle(el).objectFit)).toBe('cover');
+
+    // 字幕在图片**之上**：拿字幕的中心点去问「这一层是谁」。命中必须是字幕自己
+    // （或它的子元素 `<p>`），命中 `<img>` 或 `.login-brand`（遮罩的宿主）就是被盖住了。
+    //
+    // 那行临时样式不能省，它正是这条判据的全部判别力所在：遮罩带 `pointer-events: none`，
+    // 而 `elementFromPoint` 是**命中测试**——默认情况下它会直接穿过遮罩，「遮罩盖在字幕上」
+    // 这个坏法于是看不出来（命中照样回字幕）。把指针事件临时打开，这次问答问的才是真实的
+    // 层叠结果。**它验的是结果不是写法**：`z-index: 1` 换成别的做法同样能过。
+    const topAtCopy = await page.evaluate(() => {
+      const copy = document.querySelector('.login-brand-copy');
+      if (!copy) return null;
+      const probe = document.createElement('style');
+      probe.textContent = '.login-brand::after { pointer-events: auto; }';
+      document.head.appendChild(probe);
+      const b = copy.getBoundingClientRect();
+      const el = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2);
+      probe.remove();
+      return el ? el.closest('.login-brand-copy') !== null : false;
+    });
+    expect(topAtCopy, '字幕被插画（或遮罩）盖住了').toBe(true);
+
+    // ⑤ 品牌区里被撑到最宽也不会把操作区推出屏幕
     for (const width of [1440, 1024, 768, 375]) {
       await page.setViewportSize({ width, height: 800 });
       const overflow = await page.evaluate(
@@ -203,6 +241,104 @@ test.describe('Authentication', () => {
     await expect(panel).toBeVisible();
     // 隐藏之后登录操作仍然完整可点（375 是主任务那一档）
     await expect(page.getByRole('button', { name: '登录' })).toBeVisible();
+  });
+
+  /**
+   * §5.22 追加调整（第二轮，用户报「系统管理员换行了，没有显示完整」）：
+   * 四个角色页签**始终在一行里**，每枚的宽度跟着自己的文字走。
+   *
+   * 根因不是字号，是**分配方式**。`.role-tabs` 此前是 `repeat(4, 1fr)`——它分的是
+   * **总量**，每枚拿到的宽度与自己的文字无关：1280 下四枚都是 91.3px，内容盒 77.3px，
+   * 而「系统管理员」五个字要 80px——**只差 2.7px**，于是它换成两行（本机实测：Range 行盒
+   * 数是 2、那个按钮被撑到 48px），而用户看到的正是一枚页签里的字被拆开。改成
+   * `flex: 1 1 auto` 之后分的是**剩余**：每枚先拿足自己那条文字（字宽之和 240 + padding
+   * 48 + border 8 + gap 24 = 320），再把多出来的 69px 均分（每枚 17.3px），所以四枚
+   * 宽度不再等分。
+   *
+   * **判据是 `lines`（Range 的行盒数），不是 `rows`（按钮顶坐标去重）。** 这是本条用例
+   * 第一版踩到的坑，记下来免得下一个人重走：`rows` 数的是「四个按钮排成几行」，而它们
+   * 一直是横向一排——无论「系统管理员」在按钮**内部**换没换行，`rows` 都是 1。第一版
+   * 还断过「没被裁」（`scrollWidth > clientWidth`），那条同样测不出换行：旧写法下按钮
+   * 内高 48px 装得下两行，而换行的文字反而不溢出。两条一起漏掉，于是上一版守卫回退到
+   * 旧写法时只有 ①（宽度不等分）会红——补上 `lines` 之后，**同一次变异改成红在 ②**，
+   * 而那一条说的正是用户报的那件事。
+   *
+   * ① 与 ② 在本机是**互斥**的，如实记：只要文字不换行（② 绿），那一列的 `auto`
+   * min-content 就把自己撑宽（① 红）；只要格宽真的等分（① 绿），五个字必然换行
+   * （② 红）。所以 ① 没有独立的判别力，它留着是守那个**成因形状**（宽度与内容无关），
+   * 不是守结果——别拿它去证明「换行被修好了」。
+   *
+   * **③（限宽压力）是 `white-space: nowrap` 唯一的判别力来源，而且它守的正是用户报的
+   * 那件事。** 常态下 grow 已经把 69px 余量给足了，「装不下」根本不会发生，所以摘掉
+   * `nowrap` 在本机五档里**一条断言都不会红**（实测过）。把容器压到 280px（低于 320 的
+   * 内容需求）之后两条路才分开：有 `nowrap` → 文字仍是一行、容器 `scrollWidth 320 >
+   * clientWidth 280`（**溢出**，看得见也滑得到）；摘掉它 → 四枚全部换成两行（连两个字
+   * 的「学生」都是，因为 min-content 掉到一个字宽），`scrollWidth === clientWidth`，
+   * **装不下这件事在屏幕上没有任何表现**。所以那次挤压是判据的一部分，不是凑数；注入的
+   * 宽度用完立刻撤掉，④ 才不会量在一个被压扁的容器上。
+   *
+   * ④ 是 `@media (max-width: 680px)` 里那处改动的镜像：`.role-tabs` 变成 flex 之后，
+   * 留在原来那组 grid 选择器里的 `grid-template-columns: 1fr` 会变成空转（对 flex 容器
+   * 无效），375 上四个页签挤成一行并溢出。
+   */
+  test('登录页四个角色页签不换行，宽度跟着各自的文字走', async ({ page }) => {
+    await page.goto('/login');
+
+    const measure = () =>
+      page.evaluate(() => {
+        const wrap = document.querySelector('.role-tabs');
+        if (!wrap) return null;
+        const btns = Array.from(document.querySelectorAll<HTMLElement>('.role-tabs button'));
+        return {
+          wrapWidth: +wrap.getBoundingClientRect().width.toFixed(1),
+          // 按钮顶坐标去重 = 按钮排成了几行（守 375 那一档的单列）
+          rows: new Set(btns.map((b) => Math.round(b.getBoundingClientRect().top))).size,
+          // 文字**自己**占了几行：`Range.getClientRects()` 每个行盒一个 rect，与按钮
+          // 怎么排无关。这才是「换行」的判据。
+          lines: btns.map((b) => {
+            const range = document.createRange();
+            range.selectNodeContents(b);
+            return range.getClientRects().length;
+          }),
+          widths: btns.map((b) => +b.getBoundingClientRect().width.toFixed(1)),
+          // 装不下时容器溢出了多少——`nowrap` 之下这是它唯一的出口
+          overflowX: wrap.scrollWidth - wrap.clientWidth
+        };
+      });
+
+    // ① ② 桌面 1280：一排、每枚的文字都是一行、宽度跟内容走
+    const desktop = (await measure())!;
+    expect(desktop.rows, '四个角色页签排成了多行').toBe(1);
+    expect(desktop.lines, '有角色页签的文字换行了').toEqual([1, 1, 1, 1]);
+    expect(desktop.overflowX, '桌面常态下页签容器不该溢出').toBeLessThanOrEqual(1);
+    expect(
+      Math.max(...desktop.widths),
+      '四枚页签等宽：宽度与各自的文字无关（这正是「系统管理员换行」的成因）'
+    ).toBeGreaterThan(Math.min(...desktop.widths));
+
+    // ③ 限宽压力：压到内容需求（320px）以下，逼出「装不下」。
+    // 此时 `nowrap` 让它**溢出**（文字完整），摘掉它则**换行**（用户报的那个形状）。
+    await page.evaluate(() => {
+      document.querySelector<HTMLElement>('.role-tabs')!.style.width = '280px';
+    });
+    const squeezed = (await measure())!;
+    expect(squeezed.lines, '容器装不下时角色页签的文字换行了，应当溢出').toEqual([1, 1, 1, 1]);
+    expect(
+      squeezed.overflowX,
+      '压到 280px 后容器没有溢出：文字是被压窄换行，而不是顶出去'
+    ).toBeGreaterThan(0);
+    await page.evaluate(() => {
+      document.querySelector<HTMLElement>('.role-tabs')!.style.width = '';
+    });
+
+    // ④ 375：四行单列，每枚占满整栏，文字仍是一行
+    await page.setViewportSize({ width: 375, height: 667 });
+    const narrow = (await measure())!;
+    expect(narrow.rows, '375 下四个页签没有排成单列').toBe(4);
+    expect(narrow.lines, '375 下有角色页签的文字换行了').toEqual([1, 1, 1, 1]);
+    for (const width of narrow.widths) {
+      expect(Math.abs(width - narrow.wrapWidth), '375 下页签没有占满整栏').toBeLessThanOrEqual(1);
+    }
   });
 
   /**
