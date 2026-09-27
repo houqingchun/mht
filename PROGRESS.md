@@ -4677,7 +4677,7 @@ ColumnChart、`:109` 侧栏覆盖率表、`:154` band-grid **四个**，加 `Ove
   e2e 用例，改的是一条既有用例的判据函数）。
 - **Backend Tests**：**871 passed, 5 warnings in 562.80s (0:09:22)**（真 MySQL；§5.18 的基线是 869，
   +2 即上面那两条新用例；5 条 warning 是 §23 记过的那两条 `cartesian product` 误报）。
-- **Commit SHA**：见紧随其后的 `docs:` 提交（本节随 `feat:` 提交落地，实测数与 SHA 由下一条回填）。
+- **Commit SHA**：`4990a0a`（`feat:` 那一条；紧随其后的 `docs:` 提交把这批实测数与 SHA 回填进本节）。
 - **遗留问题（有意保留的两处「零调用方」）**：`ScoreBandBars.vue` 的 `layout="columns"` 分支与
   `e2e/app.spec.ts` 的 `expectScoreBands` 现在都没有调用方，**两处都没删**，理由与代价各自写在
   它们自己的文件头 / docstring 里（§5.18「禁止为了『完成任务』而制造无必要代码变更」）。它们的
