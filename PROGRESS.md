@@ -192,7 +192,9 @@ e2e 数不变是因为它这一轮只动了注释（唯一那次红与被测代�
 
 - [x] UX-FINAL-01 全局视觉层级精修（**已完成**，2026-09-27，落地记录见 §5.15.7）；
 - [ ] UX-FINAL-02 关怀档案详情精修；
-- [ ] UX-FINAL-03 专业报告工作台精修；
+- [ ] UX-FINAL-03 专业报告工作台精修（**进行中**：领导端 `LeaderAnalyticsReportPage.vue`
+  已落地，2026-09-27，见 §5.15.8；其余三个文件
+  `ReportExportPage.vue` / `ProfessionalReportList.vue` / `ProfessionalReportVersions.vue` 待做）；
 - [ ] 三项完成后 V2.0.0 UI/UX 正式收口，不再新增 UX-FINAL-04。
 - **当前系统不计划引入 AI 分析能力；本轮不得增加任何 AI 分析/诊断/预测/建议能力。**
 - 部署包已在更新并将包含 §5.14 改动，**不作为本节待办**。
@@ -3354,7 +3356,9 @@ MySQL」，出包时重生成会**掩盖**「有人改了 `seed.py` 却没跑 `m
 
 1. [x] **UX-FINAL-01**：全局视觉层级精修（2026-09-27，见 §5.15.7）；
 2. [ ] **UX-FINAL-02**：关怀档案详情精修；
-3. [ ] **UX-FINAL-03**：专业报告工作台精修；
+3. [ ] **UX-FINAL-03**：专业报告工作台精修（**进行中**——四个文件里领导端
+   `LeaderAnalyticsReportPage.vue` 已落地，2026-09-27，见 §5.15.8；其余三个待做。
+   第 4～8 项那四行仍是 UX-FINAL-01 收尾时的记录，本轮那一份在 §5.15.8）；
 4. [x] `vue-tsc -b` 通过（UX-FINAL-01 收尾时跑过，退出码 0）；
 5. [x] `npm run build` 通过（定稿那次：`index-Cq1JRR6d.css` 67.60 kB / `index-BqfQ8iBP.js` 498.71 kB）；
 6. [x] 相关 E2E 定向回归通过（UX-FINAL-01 一次改全站视觉，定向范围就是全量，见第 7 条）；
@@ -3471,6 +3475,116 @@ MySQL」，出包时重生成会**掩盖**「有人改了 `seed.py` 却没跑 `m
 `padding` 上）。它们拿到的是背景与边框的降重，内边距不变——**不是坏掉，是这一档的降重
 在那几张卡上少了一半**。要收口得逐个改页面容器类，那正是 §5.15.5 第 13 条禁止的
 「为了改而改」，留给后续按需处理。
+
+#### 5.15.8 UX-FINAL-03（领导端）落地记录（2026-09-27）
+
+**本节的即时起因**是用户报的：
+
+> 德育老师的  学校心理工作分析摘要  界面 需要优化，当前展示不符合整体规范
+
+指向 `/leader/analytics/report`（`routes.ts:72` 的 `meta.title = '学校心理工作分析摘要'`），
+文件是 `frontend/src/features/leader/LeaderAnalyticsReportPage.vue`。
+
+**关于顺序**：§5.15.6 写的是「严格按 01 → 02 → 03 执行」，而用户此刻点名的是 03 范围内的
+文件。**即时指令优先**，所以本次只做 UX-FINAL-03 里的这一个文件，02 不动、03 的另外三个
+文件也不动——它们各自的落地记录另开一节。
+
+##### 一、诊断：八条落点，其中第一条是最直白的证据
+
+**最硬的一条**：`section.card { min-width: 0; padding: 18px; overflow: hidden }` 这一行，
+在 `ClassPortraitPage.vue:214`、`DimensionsPage.vue:262`、`GradesPage.vue:165`、
+`OverviewPage.vue:206`、`ReportExportPage.vue:979` **五处逐字完全相同**——**只有这一页没有**。
+于是它的两张卡内容**贴着边框**渲染（零内边距）。这不是「差一点」，是「不属于那一套」。
+
+其余七条：
+
+| # | 问题 | 全站已有的做法 |
+|---|---|---|
+| 2 | 两张卡都没有 tier 层级（该文件 0 处 tier 类），主次不分 | §5.15.2 的三层语义 |
+| 3 | 同类「报告列表」两个角色两种长相：领导页是 **4 行堆叠文本、没有状态药丸**、边框 `#dce6ef`；老师端 `ProfessionalReportList.vue` 是 `.row` 两列 + `.pill`、边框 `#e2eaf4` | 同一件事该长得一样 |
+| 4 | 元信息用自成一派的 `dl.meta`（`grid-template-columns: max-content 1fr`） | 全站 13 个文件用 `.detail-grid` / `.detail-row` |
+| 5 | 四段正文平铺（`h3` + `p` 连排），四段之间没有任何东西说得出「这是四段」还是「这是一段很长的话」 | —— |
+| 6 | 没有显式的「只读」声明 | §5.13.5 与 §5.15.4 第 6 条都要求保住领导端只读边界 |
+| 7 | 底部提示是自写的 `.hint`，而另外四张分析页用 `<PrivacyNote/>` | 同一个意思、两种长相 |
+| 8 | `selected` 为 null 时右侧整块不渲染，只剩左栏 380px + 大片空白 | §14：空态是一句关于数据的话 |
+
+##### 二、改动：九处 Edit
+
+九处全部是**逐条 `Edit`**，没有一处是整份 `Write`（教训见本节末尾）。
+
+1. import `PrivacyNote`；
+2. `labels.ts` 的 import 加 `analysisModeLabel`（**给它补上第一个读者**——此前这张表在前端
+   零读者，正是 CLAUDE.md §3 那条「表在 `labels.ts` 里而没人从那儿取也算没接上」）；
+3. 新增 `itemTone()`（**取法与 `ProfessionalReportList.vue` 的 `statusOf` 同源**：版本行状态
+   优先、报告头兜底——两处各写一套判断，同一个东西在两个角色屏幕上会是两种颜色）与
+   `detailEmptyText`（两态，判据是左栏有没有报告；不做第三态，`load()` 已保证选中项一定在
+   列表里）；
+4. `ReportPageHeader` 之后加只读声明。**用 `.notice` 而不是 `p[role="status"]`**：后者是全站
+   「操作回执」的定位器（`app.spec.ts:1174` 的 `pageNotice`），一条常驻说明落在那里会把那一族
+   断言一起污染；
+5. `.picker-head` 之后加口径小字（**只列已发布的；同一份报告有多版时显示最新发布的那一版**）；
+6. 列表行两列化（`.item-main` / `.item-side`），照 `ProfessionalReportList.vue` 的
+   `.row` 一套**只换类名**，并补上此前缺的状态药丸；
+7. 详情卡整块重写：`.card.tier-primary` + `.status-bar`（药丸 + 口径 + 「导出这一版」）+
+   `.detail-grid.meta`（六行，**新增「统计口径」一行**）+ `.prose-blocks`（四段各成一块、
+   极淡分隔线）+ `v-else` 空态卡；
+8. `<template v-else>` 包裹 `.report-layout` 与页脚 `<PrivacyNote>`（一个元素只能带一个
+   `v-else`，而下面还要加一条 `<PrivacyNote>`，它的兄弟会掉到条件之外）；
+9. scoped `<style>` 整块重写。
+
+**为什么详情卡拿 Primary、左栏不拿**（§5.15.2 第 3 条：一页最多一个 Primary）：
+判据是「谁在干活谁是主工作区」——这一页只有详情卡这一处能动手（「导出这一版」），左栏是
+**选择器**不是工作区。它与 `ClassPortraitPage.vue:177-184` 那条「不给 tier-primary」**不冲突**：
+那一条的两点理由（落在窄栏 / 产物是本机 localStorage 草稿）在这里**都不成立**——这一张落在
+宽栏（`.report-layout` 的右列），而它的产物是一份走导出治理的文件。
+
+**`.status-bar` 为什么不叫 `.open-bar`**（grep 坐实）：`.open-bar` 是 `ReportExportPage.vue`
+的 **scoped** 样式，跨组件不生效（只在该文件出现：模板 `:772-777`、样式 `:968-971`、媒体查询
+`:1005`）；而且那边它**自己就是一张 `<section class="card open-bar">`**（自带底色与边框），
+这里它是这张卡**内部**的一条。所以布局值逐字照抄、类名另起，理由写在注释里。
+
+##### 三、必须逐字保住的 e2e 契约（三条）
+
+| 契约 | 位置 | 做法 |
+|---|---|---|
+| `pageNotice = page.locator('p[role="status"]')` | `app.spec.ts:1174` | 导出回执从 `<span class="hint" role="status">` 改成 **`<p class="hint" role="status">`**。这**其实是一处修正**：原写法是 `<span>`，`pageNotice` 一直匹配不到它，而 `:1827` 那条断言此前靠的是另一条更宽的定位器。改完两条定位器都能命中 |
+| `.meta` 里含「已发布 · V1」 | `app.spec.ts:1782` | **保留 `meta` 这个类名**（写成 `class="detail-grid meta"`），同时删掉 scoped 的 `.meta` / `.meta dt` / `.meta dd` 三条规则，让全局的 `.detail-grid` / `.detail-row` 生效 |
+| `.report-item` + `aria-pressed` + `.report-detail` + `.prose`（第一个是「整体情况说明」）+ 按钮名「导出这一版」+ 两条空态文案 + placeholder「按标题或报告编号筛选」+ `textarea` 计数 0 | `app.spec.ts:1782 / 1979 / 2011 / 2046` | 类名、次序、文案**一个字节没动** |
+
+「只读」提示用 `<div class="notice">`（**不带 role**），刻意不与上面那一族抢定位器。
+
+##### 四、验证结果
+
+| 项 | 结果 |
+|---|---|
+| `npx vue-tsc -b` | 退出码 0 |
+| `npx playwright test e2e/app.spec.ts -g "专业报告工作台"` | **10 passed (30.8s)**（1716 / 1745 / 1782 / 1811 / 1856 / 1911 / 1979 / 2011 / 2046 / 2078 全绿） |
+| `npx playwright test e2e/vocabulary.spec.ts`（全文件 19 条） | **19 passed (1.1m)** |
+| 其中三条先单独跑过一遍 | 「V2 草稿期间」3 passed / 「德育领导页面」1 passed / 「四档视口不溢出」1 passed |
+| `make seed-demo` | 跑 e2e 之前已执行（常设要求） |
+
+**跑之前的前后端探活**：`backend=200` / `frontend=200`。
+
+**本项没有新增 e2e 用例**，理由与 §5.15.7 那条相同：能加的多半是「某个 class 在不在」，
+而那种断言在「类加了但视觉没生效」时照样是绿的。既有那 29 条（10 + 19）覆盖的正是
+本页真正会坏的地方（版本标签、空态分岔、只读边界、四档视口、裸编码扫描）。
+
+diff 体量：**180 insertions(+) / 35 deletions(-)**。35 条删除已**逐条核对为「有意识的
+替换」**，没有一处是丢失的资产——导出那一段（含 `exportDescription` 的七句、
+`placeholder: '请选择用途'`）、文件头那段四理由注释、模板开头关于
+`ReportPageHeader` 不接 `title` prop 的注释，**全部原样未动**。
+
+##### 五、记一次教训（本项开工时的失误，已完全回退）
+
+第一版用的是 `Write` **整份覆盖**这个文件，`192 insertions(+) / 130 deletions(-)`，
+三类损失：①`exportDescription` 从七句被压成四句、`placeholder` 被删（**丢信息**）；
+②文件头那段精心写下的注释被缩写版替换（**资产损失**）；③模板里写了 markdown 星号
+`**发布时冻结**`，会原样渲染成字符（**真 bug**）。处置是 `git checkout --` 整份还原，
+此后一律逐条 `Edit`。
+
+**可复用的那条**：`Write` 覆盖一个已有文件时，「我记不记得住全部原文」是唯一的防线，
+而它恰恰是记不住的——尤其当文件里有大段的**理由注释**时，那些注释不会被当成资产，
+会被当成啰嗦的话顺手删掉。**改这类文件只用 `Edit`。**
 
 ## 6. 关键文件
 
