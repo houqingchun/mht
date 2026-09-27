@@ -1710,6 +1710,94 @@ async function openReportPage(page: Page) {
   ).toBeVisible()
 }
 
+/** 竞态用例里那两次读数各自的答案：成功换一个标题，失败换一句话。 */
+type ListAnswer = { ok: true; title: string } | { ok: false; message: string }
+
+/**
+ * 「报告列表连着读两次、先发的那一次回来晚了」的脚手架（§5.16 的竞态守卫）。
+ *
+ * **触发器为什么是那一枚「重试」。** `loadReports` 的调用点里能从界面上连点两次的只有它：
+ * 列表自己那一枚重试被 `v-if="loading"` 挡在 DOM 之外（读的过程中它不在页面上），
+ * 保存 / 发布 / 新建版本三处要先真的写一次库，挂载只能发生一次。而打开报告失败时那一枚
+ * （`<ErrorState v-if="openError" :on-retry="loadReports"/>`）**不在 `opened` 那两个分支
+ * 里**，所以 `opened` 还是 null 的时候它照样在——连点两下就是人手快点了两次「重试」。
+ *
+ * **次序是构造出来的，不是掐表比出来的。** 先发的那一次一直扣在闸门上，直到第二次的答案
+ * **已经交出去**之后才被放行。§5.16 的 DoD 明确禁了「依赖随机网络时序」，所以这里没有
+ * 任何一个 `setTimeout` 参与决定谁先谁后（断言那一侧的 400ms 只是留给渲染的落地窗口）。
+ *
+ * 两份答案都以**真载荷**为底、只换第一行的标题：自己拼一份假载荷的话，「状态」与
+ * 「任务范围」那两列会随着页面改动而失效，而这条用例要钉的不是它们。第一行一定在第 1 页
+ * 上——组件里的 `filtered` 不改次序、`PAGE_SIZE` 是 20。
+ */
+async function raceReportListReload(page: Page, slow: ListAnswer, fast: ListAnswer) {
+  type Row = Record<string, unknown>
+  let real: Row[] = []
+  let racing = false
+  let raceCalls = 0
+  let releaseSlow = () => {}
+  const slowGate = new Promise<void>((resolve) => {
+    releaseSlow = resolve
+  })
+  let settleSlow = () => {}
+  const slowDone = new Promise<void>((resolve) => {
+    settleSlow = resolve
+  })
+
+  const payload = (answer: ListAnswer) =>
+    answer.ok
+      ? { success: true, data: { items: [{ ...real[0], title: answer.title }, ...real.slice(1)] } }
+      : {
+          success: false,
+          data: null,
+          request_id: 'e2e-race-probe',
+          error: { code: 'INTERNAL_ERROR', message: answer.message },
+        }
+
+  await page.route(
+    (url) => url.pathname === '/api/v1/professional-reports',
+    async (route) => {
+      if (!racing) {
+        // 竞态开始之前的读数（挂载那一次）照常走真后端，顺手留一份载荷当底子。
+        const response = await route.fetch()
+        real = ((await response.json()) as { data: { items: Row[] } }).data.items
+        await route.fulfill({ response })
+        return
+      }
+      raceCalls += 1
+      if (raceCalls === 1) {
+        await slowGate // 扣住：第二次的答案交出去之前，它一直答不出来
+        await route.fulfill({ status: slow.ok ? 200 : 500, json: payload(slow) })
+        settleSlow()
+        return
+      }
+      // 后发的那一次先把答案交出去，再放行先发的那一次——次序就此定死。
+      await route.fulfill({ status: fast.ok ? 200 : 500, json: payload(fast) })
+      releaseSlow()
+    }
+  )
+
+  await loginAs(page, 'counselor')
+  await openReportPage(page)
+  // 先证明有东西可扫：下面两次读数换掉的是第一行的标题。
+  await expect(page.locator('.report-list .row').first()).toBeVisible()
+
+  // 让「打开报告」失败一次，逼出那一枚不受列表 loading 约束的重试按钮。
+  await failApiPathsMatching(page, /^\/api\/v1\/professional-reports\/\d+$/, '报告加载失败')
+  await page.locator('.report-list .row').first().click()
+  const retry = page
+    .locator('.error-state')
+    .filter({ hasText: '报告加载失败' })
+    .getByRole('button', { name: '重试' })
+  await expect(retry).toBeVisible()
+
+  racing = true
+  await retry.click() // 先发的那一次
+  await retry.click() // 后发的那一次
+
+  return { slowDone }
+}
+
 /**
  * 这一次写入会不会**留在共享演示库**里？会——每跑一次就多几份报告。
  *
@@ -6809,6 +6897,65 @@ test.describe('失败与竞态不留下旧数据', () => {
     await page.waitForTimeout(900);
     await expect(page.getByText('慢的答案')).toHaveCount(0);
     await expect(page.getByText('共 22 条')).toBeVisible();
+  });
+
+  test('报告列表连着读两次，先发的那个回来晚了也不算数', async ({ page }) => {
+    // §5.16：`loadReports` 此前是本页唯一没有 §14 Latest Request Wins 守卫的读取方
+    // （兄弟 `loadAnalysis` 有）。三条用例分别钉住「晚到的成功」与「晚到的失败」两个方向。
+    const { slowDone } = await raceReportListReload(
+      page,
+      { ok: true, title: 'e2e-慢的答案' },
+      { ok: true, title: 'e2e-快的答案' }
+    );
+
+    const list = page.locator('.report-list');
+    await expect(list).toContainText('e2e-快的答案');
+    await slowDone;
+    // 先发的那一次此刻才落地（它被放行的时候，第二次的答案已经交出去了）。这 400ms 是
+    // 留给「交付 → 渲染」的落地窗口，不是用来赌谁先谁后——谁先谁后上面已经定死了。
+    await page.waitForTimeout(400);
+    await expect(list).not.toContainText('e2e-慢的答案');
+    await expect(list).toContainText('e2e-快的答案');
+  });
+
+  test('报告列表：晚到的失败不覆盖已经读回来的列表', async ({ page }) => {
+    const { slowDone } = await raceReportListReload(
+      page,
+      { ok: false, message: '报告列表读取失败（慢）' },
+      { ok: true, title: 'e2e-快的答案' }
+    );
+
+    const list = page.locator('.report-list');
+    await expect(list).toContainText('e2e-快的答案');
+    await slowDone;
+    await page.waitForTimeout(400);
+    // 没有守卫时这一支最要命：`catch` 里会 `reports.value = []` 并把那句话挂上去，
+    // 于是连点两下重试把刚读回来的列表换成了一句「读取失败」（§14：一次失败的读取
+    // 不许留下上一次的答案——反过来，一次过期失败的读取也不许抹掉最新的答案）。
+    await expect(list.locator('.list-error')).toHaveCount(0);
+    await expect(list).toContainText('e2e-快的答案');
+  });
+
+  test('报告列表：晚到的成功不洗掉已经落地的失败', async ({ page }) => {
+    const { slowDone } = await raceReportListReload(
+      page,
+      { ok: true, title: 'e2e-慢的答案' },
+      { ok: false, message: '报告列表读取失败（快）' }
+    );
+
+    const list = page.locator('.report-list');
+    await expect(list.locator('.list-error')).toContainText('报告列表读取失败（快）');
+    await slowDone;
+    await page.waitForTimeout(400);
+    // 「第 2 次的失败状态被保留」：那句话还在。
+    await expect(list.locator('.list-error')).toContainText('报告列表读取失败（快）');
+    // 而**这一次失败的读数不许被一次过期的成功改写**。判据落在表头那一行上：
+    // `共 N 份` 只由 `reports.length` 决定，且它在 `v-if` 链**之外**（上面那张表更是
+    // 整块被 error 那一支挡住，看不出差别）——一次失败的读取把 `reports` 清成了空，
+    // 所以此刻表头不该还声称知道有几份。没有守卫时那个过期的成功会把它写回去，
+    // 于是屏幕上同时写着「读取失败」和「共 459 份」。
+    await expect(list.locator('.list-head .muted')).toHaveCount(0);
+    await expect(list.locator('.list-error')).toContainText('报告列表读取失败（快）');
   });
 
   test('明细读失败时说「没读到」，不说「暂无完成明细」', async ({ page }) => {

@@ -65,6 +65,15 @@ const analysisRequest = createLatestRequest()
 const reports = ref<ProfessionalReportListItem[]>([])
 const reportsLoading = ref(false)
 const reportsError = ref('')
+/**
+ * 列表读数的序号（§14 的 Latest Request Wins，与上面的 `analysisRequest` 同一个机制）。
+ *
+ * `loadReports` 有六个调用点：挂载、列表自身的重试、打开失败时那一枚重试，以及
+ * 保存 / 发布 / 新建版本三处写入之后的刷新。两个动作挨得近时（保存完紧接着发布、
+ * 或者重试被连点两下），先发的那一次可能**后**回来——它会把后来的答案连同 `loading`
+ * 一起盖掉。守卫只管这一件事，不改变任何取数口径。
+ */
+const reportsRequest = createLatestRequest()
 /** 任务 id → 名称，把 `task_scope.task_ids` 说成人看得懂的范围摘要。 */
 const taskNames = ref<Record<number, string>>({})
 
@@ -307,16 +316,25 @@ function onTasksLoaded(list: AssessmentTaskItem[]) {
 }
 
 async function loadReports() {
+  const token = reportsRequest.begin()
   reportsLoading.value = true
   reportsError.value = ''
   try {
-    reports.value = await listProfessionalReports()
+    const data = await listProfessionalReports()
+    // 过期的这次读数一律不落地：它既不该换掉列表，也不该关掉后发那次留下的 loading。
+    if (!reportsRequest.isCurrent(token)) return
+    reports.value = data
   } catch (err) {
+    if (!reportsRequest.isCurrent(token)) return
     reports.value = []
     reportsError.value = err instanceof Error ? err.message : '报告列表加载失败'
   } finally {
-    reportsLoading.value = false
+    if (reportsRequest.isCurrent(token)) reportsLoading.value = false
   }
+  // 这里**刻意不**在取数之前清空列表（与 `loadAnalysis` 的 `analysis.value = null` 不同）：
+  // 那一条 §14 是针对「换对象」的（换一组任务之后，屏幕上不该还留着上一组的数据），
+  // 而这一页每次读的都是同一份「我的报告」——刷新期间保住旧列表是对的，
+  // 保存 / 发布之后的刷新正是靠这一条才不会闪一下空表。
 }
 
 async function loadAnalysis(taskIds: number[]) {

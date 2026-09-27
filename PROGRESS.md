@@ -3957,7 +3957,7 @@ git diff
    - 不静默猜测；
    - 在 `PROGRESS.md` 记录差异、影响和最终处理方式。
 
-### 5.16 V2.0.1 发布前代码审计补充（范围冻结，待 AI Coding）
+### 5.16 V2.0.1 发布前代码审计补充（范围冻结，2026-09-27）
 
 > **来源（2026-09-27）**：基于远端 `V2.0.1` HEAD `da25cec` 的代码级复审。
 > §5.15 UX-FINAL-01～03 已完成并收口，本节**不是新一轮 UI/UX 优化**，只补一个已经被源码审计识别的
@@ -4027,18 +4027,56 @@ git diff
 9. 不把“分值升高/降低”解释成“恶化/好转”等心理疗效结论；
 10. 发现超出本节范围的问题时，只记录到 `PROGRESS.md`，不得顺手实现。
 
-#### 5.16.5 AI Coding 完成回填模板
+#### 5.16.5 AI Coding 完成回填
 
 - 实际修改文件：
-- 实现方式（复用的 Latest Request Wins 机制）：
-- 新增/调整测试：
-- `vue-tsc -b`：
-- `npm run build`：
-- 专业报告定向 E2E：
-- 全量 E2E：
-- Backend Tests：
-- Commit SHA：
-- 遗留问题：无 / （列明，但不得扩项）
+  1. `frontend/src/features/analytics/views/ReportExportPage.vue`（3 处：第 76 行新增
+     `const reportsRequest = createLatestRequest()`；`loadReports` 里 `begin()` 取号 +
+     成功 / 失败 / `finally` 三处 `isCurrent(token)` 判定）；
+  2. `e2e/app.spec.ts`（新增 helper `raceReportListReload()`，与「失败与竞态不留下旧数据」
+     组内三条用例）。
+- 实现方式（复用的 Latest Request Wins 机制）：**逐字复用 `services/latest-request.ts`
+  的 `createLatestRequest()`**，未新增任何并发设施（无 AbortController、无请求队列）。
+  守卫形状照抄**同文件内**的 `loadAnalysis`（`analysisRequest`）——出发前 `begin()` 拿号，
+  成功前先 `isCurrent(token)` 再写 `reports.value`；`catch` 里同样先判再写
+  （`reports.value = []` 与 `reportsError` 都不落地）；`finally` 里
+  `if (isCurrent(token)) reportsLoading.value = false`，**迟到的请求不能替后来者关掉 loading**。
+  守卫**按页**构造、与状态并列（§14），不做成 composable。
+  **刻意保留**的一点：取数之前**不清空** `reports.value`（与 §14「失败的读取不许留下上一次的
+  答案」不冲突）——那一跳治的是「换对象」（换一组任务后屏幕上还留着上一组的数据），而本页
+  每次读的都是同一份「我的报告」；清空会让「保存 / 发布之后的刷新」闪一下空表。理由已写进
+  该函数的注释里。
+- 新增/调整测试：`e2e/app.spec.ts` 新增 helper `raceReportListReload(page, slow, fast)` 与
+  三条用例，逐条覆盖 §5.16.2 的场景 ①②③：
+  ① `报告列表连着读两次，先发的那个回来晚了也不算数`（晚到的成功不得换掉列表）；
+  ② `报告列表：晚到的失败不覆盖已经读回来的列表`（晚到的失败不得抹掉已读回的列表）；
+  ③ `报告列表：晚到的成功不洗掉已经落地的失败`（第 2 次的失败状态保留，且判据落在
+  `.list-head .muted` 的「共 N 份」上——那一行在 `v-if` 链**之外**，`error` 那一支遮不住它；
+  「晚到的成功没有把 `reports.length` 写回去」因此在这个格子上可见）。
+  **不依赖随机网络时序**（DoD 逐字要求）：先发的那一次被一个闸门 promise 扣住，直到**第二次的
+  答案已经交出去**之后才放行，谁先谁后是构造出来的；断言侧那个 400ms 只是「交付 → 渲染」的
+  落地窗口。触发入口是打开报告失败后那一枚「重试」（`openError` 的 ErrorState 在模板**顶层**，
+  不受列表 `loading` 与 `opened` 约束）——那是本页界面能连点两次 `loadReports` 的唯一落点。
+  载荷以 `route.fetch()` 取回的**真载荷**为底、只换第一行标题，避免自拼假载荷让「状态 /
+  任务范围」列随页面改动而失效。
+  **变异验证**：摘掉 `reportsRequest` 与三处 `isCurrent` 判定 → ①② 直接红；③ 第一稿的判据
+  （`not.toContainText('e2e-慢的答案')`）在坏实现下**空转**（`v-else-if="error"` 把整块行列表
+  挡住了，迟到的成功写进 `reports.value` 的那一行根本不渲染），补上「表头那一行必须消失」之后
+  ③ 也红——**3/3 全部由守卫拦下**。全程 `cp -p` 落盘备份 + `cmp` **逐字节还原**，还原后 3 passed。
+- `vue-tsc -b`：通过（EXIT=0）。
+- `npm run build`：通过（`✓ built in 1.07s`，产物 `index-BGUFVq_w.js` / `index-CyzQWhBs.css`）。
+- 专业报告定向 E2E：通过 —— `npx playwright test --workers=1 -g "专业报告|报告列表"`
+  → **13 passed (40.6s)**（专业报告工作台 10 条 + 本次三条竞态守卫）。
+- 全量 E2E：通过 —— `npx playwright test --workers=1` → **196 passed (4.0m)**
+  （较上一轮的 193 正好 +3，即本次新增的三条；口径为当前权威的 `workers: 1`）。
+- Backend Tests：无回归 —— `make test` → **869 passed, 5 warnings in 554.61s (0:09:14)**，
+  退出码 0。零后端改动，按发布前口径执行；5 条 warning 是既有的 cartesian product SAWarning
+  （已知误报，见 CLAUDE.md §23 末段），本轮未新增。
+- Commit SHA：（本节回填提交，见下一条提交）
+- 遗留问题：无（本轮未新增）。本轮实测到的两处**均已在 §5.16.3 登记为本轮禁止实施的技术债**，
+  未动手：TD-01 —— `professional_report` 列表无服务端分页/限量（本次跑 e2e 时「我的报告」
+  表头实录 **459 份**，且该表无删除接口、每轮全量 e2e 净增若干条、从不清理）；
+  TD-02 —— E2E 测试数据隔离。两条都按 §5.16.4 第 ⑩ 条「只记录，不顺手实现」处置。
 
 ### 5.17 V2.0.1 报表视觉一致性 Patch：关注等级分布（待 AI Coding）
 
