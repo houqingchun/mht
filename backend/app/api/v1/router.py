@@ -5,6 +5,7 @@ from app.api.v1.assessment import router as assessment_router
 from app.api.v1.assessment_import import router as assessment_import_router
 from app.api.v1.audit import router as audit_router
 from app.api.v1.auth import admin_router, permission_router, router as auth_router
+from app.api.v1.backup import router as backup_router
 from app.api.v1.care import router as care_router
 from app.api.v1.exports import router as exports_router
 from app.api.v1.health import router as health_router
@@ -30,6 +31,7 @@ api_router.include_router(scales_router)
 api_router.include_router(settings_router)
 api_router.include_router(public_settings_router)
 api_router.include_router(audit_router)
+api_router.include_router(backup_router)
 api_router.include_router(exports_router)
 api_router.include_router(tasks_router)
 api_router.include_router(reporting_router)

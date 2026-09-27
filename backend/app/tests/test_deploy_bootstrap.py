@@ -310,6 +310,10 @@ def test_the_client_options_file_carries_the_decoded_password(tmp_path):
     编码漏掉的后果特别难认：`mysqldump` 报的是「Access denied」，与「密码打错了」
     长得一模一样，而人会去重打密码。这一条同时钉住 `parse_database_url` 的解码——
     两边是同一个契约的两半。
+
+    **值一律带引号**（`_option_value`）：选项文件里 `#` 与 `;` 在值中间也开注释，
+    下面那个口令里的 `#` 正是靠引号才活下来的（不带引号时它会静默截断成
+    `pa@ss:word/x`，而报出来仍然是「Access denied」）。所以这一条同时钉住那个形状。
     """
     from urllib.parse import quote
 
@@ -322,11 +326,29 @@ def test_the_client_options_file_carries_the_decoded_password(tmp_path):
     text = client_options_file(target)
 
     assert text.startswith("[client]\n")
-    assert f"password={raw}\n" in text
+    assert f'password="{raw}"\n' in text
     assert "%40" not in text  # 没有解码的话 `@` 会以 %40 留在文件里
-    assert "user=root\n" in text and "host=10.0.0.5\n" in text
+    assert 'user="root"\n' in text and 'host="10.0.0.5"\n' in text
+    # `port` 是唯一不经过 `_option_value` 的值：它是 `int`，引号对它没有意义。
     assert "port=3307\n" in text
-    assert "default-character-set=utf8mb4\n" in text
+    assert 'default-character-set="utf8mb4"\n' in text
+
+
+def test_the_option_values_escape_the_two_characters_quoting_cannot_hold():
+    """引号里只有 `\\` 与 `"` 是转义符，其余字符原样收着。
+
+    这两条是**互补**的，不是二选一：不转义 `\\`，一个反斜杠结尾的口令会把收尾引号
+    吃掉、把后面那一行吞进值里（选项文件报的是 1064）；不转义 `"`，引号提前闭合，
+    口令被截断——报出来还是那句 `Access denied`。
+    """
+    from app.db.mysql_url import _option_value
+
+    assert _option_value("plain") == '"plain"'
+    assert _option_value("中文口令 带空格") == '"中文口令 带空格"'
+    assert _option_value('back\\slash') == '"back\\\\slash"'
+    assert _option_value('has"quote') == '"has\\"quote"'
+    # `#` 与 `;` 不转义，靠引号收着——这才是这一整条规矩存在的理由。
+    assert _option_value("a#b;c") == '"a#b;c"'
 
 
 def test_the_client_file_is_written_private_and_never_echoes_the_password(
@@ -349,7 +371,7 @@ def test_the_client_file_is_written_private_and_never_echoes_the_password(
     path = tmp_path / "runtime" / "mysql.cnf"  # 父目录还不存在，脚本要自己建
     assert mysql_url.main(["--client-file", str(path)]) == 0
 
-    assert path.read_text(encoding="utf-8").splitlines()[2] == "password=secretpw"
+    assert path.read_text(encoding="utf-8").splitlines()[2] == 'password="secretpw"'
     if os.name == "posix":
         # 这一位是 `touch(mode=0o600)` 挣来的；去掉它就变成 0644，同一个学校的
         # 其他账号都读得到这台库的口令。

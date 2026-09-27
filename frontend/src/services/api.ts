@@ -1285,7 +1285,7 @@ export async function resetScaleRule(
 }
 
 // --- 系统配置 ---
-export type SettingsNamespace = 'org' | 'care' | 'export' | 'cadence' | 'ui'
+export type SettingsNamespace = 'org' | 'care' | 'export' | 'cadence' | 'ui' | 'backup'
 
 export interface SystemSettings {
   org: {
@@ -1333,6 +1333,21 @@ export interface SystemSettings {
     seconds_per_question: number
     page_size_default: number
   }
+  /**
+   * 数据库备份（V2.2.0 §5.25）。**四个键全在「数据备份」那一页上改，不在 `.env` 里**——
+   * 局域网用法下 `.env` 只授 SYSTEM 与 Administrators（§18），而备份路径正是运维该在
+   * 界面上改的东西。这也是原来那枚 `备份数据.bat` 必然失败的原因之一。
+   */
+  backup: {
+    /** 空 = `<安装目录>\backups`。服务端会把展开之后的**实际路径**一并下发，界面显示那个。 */
+    dir: string
+    /** 空 = 不复制第二份。第二路径不可写时主备份照样成功，只记一条警告。 */
+    secondary_dir: string
+    /** 保留天数。`<= 0` = 只增不删。 */
+    keep_days: number
+    /** 关掉之后定时那一路**不跑**（线程不退出，所以重新打开立刻生效），手动按钮不受影响。 */
+    auto_enabled: boolean
+  }
 }
 
 export interface SettingsResponse {
@@ -1375,6 +1390,80 @@ export async function resetSystemSettings(
   namespace: SettingsNamespace
 ): Promise<{ namespace: string; values: SystemSettings[SettingsNamespace] }> {
   return apiRequest(`/admin/settings/${namespace}/reset`, { method: 'POST' })
+}
+
+// --- 数据备份（V2.2.0 §5.25）---
+/**
+ * 一行备份记录。`file_exists` 由**服务端**判（它才知道备份目录在哪），
+ * 所以「这一份还在不在盘上」不在前端猜——照 `ExportJob.downloadable` 那条：
+ * 按钮亮不亮与点下去会不会成功必须是同一句话的两个说法。
+ */
+export interface BackupRecord {
+  id: number
+  /** `AUTO` / `MANUAL` / `CLI` —— 中文走 `labels.ts` 的 `BACKUP_TRIGGER_LABELS`。 */
+  trigger: string
+  /** `SUCCEEDED` / `FAILED` —— 中文走 `BACKUP_STATUS_LABELS`。 */
+  status: string
+  file_name: string | null
+  file_size: number | null
+  message: string | null
+  created_at: string | null
+  /** 自动与命令行那两次没有操作人（`—`）。 */
+  operator_name: string | null
+  file_exists: boolean
+}
+
+export interface BackupOverview {
+  /** **服务端展开之后的实际路径**。`dir` 配空时它就是 `<安装目录>/backups`。 */
+  dir: string
+  dir_is_default: boolean
+  /**
+   * **服务端展开之后的第二路径，没配就是 `null`**（不是空串）——「没配第二份」与
+   * 「配了一个空路径」在界面上要说不同的话，而 `''` 把这两件事抹成了一件。
+   */
+  secondary_dir: string | null
+  keep_days: number
+  auto_enabled: boolean
+  last_success: BackupRecord | null
+  last_failure: BackupRecord | null
+  records: BackupRecord[]
+}
+
+export async function getBackupOverview(): Promise<BackupOverview> {
+  return apiRequest<BackupOverview>('/admin/backup')
+}
+
+/**
+ * 立刻备份一次，**同步**返回那一行结果。
+ *
+ * 失败**不抛**：mysqldump 报错时服务端照常回一行 `status=FAILED` 的记录（200），
+ * `message` 里是它自己的输出。唯一会抛的是「正在备份中」（409）——那是**没跑**，
+ * 不是失败，所以它照旧走 `apiRequest` 的错误分支抛 `Error`。
+ */
+export async function runBackupNow(): Promise<BackupRecord> {
+  return apiRequest<BackupRecord>('/admin/backup/run', { method: 'POST' })
+}
+
+/** 取回一份 `.sql` 并让浏览器存盘。文件名用记录里那一个（服务端生成的 ASCII 形状）。 */
+export async function downloadBackupRecord(record: BackupRecord): Promise<void> {
+  const headers = new Headers()
+  const token = getToken()
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+  const response = await fetch(`${API_BASE}/admin/backup/records/${record.id}/download`, {
+    headers
+  })
+  if (!response.ok) {
+    // 服务端那几句话本来就是写给用户看的（文件不在 / 内容与记录对不上），照搬（§2）。
+    let message = '下载失败'
+    try {
+      const body = await response.json()
+      message = body.error?.message || message
+    } catch {
+      // 响应体不是 JSON —— 保住兜底那句，不要在这里抛一个 SyntaxError 盖掉真正的原因。
+    }
+    throw new Error(message)
+  }
+  saveBlob(await response.blob(), record.file_name || `backup-${record.id}.sql`)
 }
 
 // --- 角色权限矩阵 ---

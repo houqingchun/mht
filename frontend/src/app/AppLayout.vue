@@ -79,6 +79,7 @@ const navConfig: Record<string, { name: string; avatar: string; nav: NavItem[] }
       { key: 'scale', label: '量表题库', icon: 'list', path: '/admin/scale' },
       { key: 'exports', label: '导出中心', icon: 'download', path: '/admin/exports' },
       { key: 'settings', label: '系统配置', icon: 'sliders', path: '/admin/settings' },
+      { key: 'backup', label: '数据备份', icon: 'database', path: '/admin/backup' },
       { key: 'audit', label: '审计日志', icon: 'clock', path: '/admin/audit' }
     ]
   },

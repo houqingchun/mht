@@ -43,6 +43,18 @@ Windows 服务器上才第一次被 cmd.exe 和 PowerShell 5.1 读。所以那�
    一路把这份坏配置带到了 `import app.db.session` 那一刻。下面那一组钉住这之后的形状：
    值表唯一、升级就地补坏行、补不动的那一项回来问人、任何一步都不把口令或密钥写进日志。
    详见 CLAUDE.md §18 与 `deploy/README.md`。
+
+7. **备份那条链路的逻辑在 Python 里，`.ps1` 只留一枚薄壳。** 2026-09-27（§5.25）把
+   `Backup-Database` 自己找 mysqldump、自己读 `.env`、自己清旧文件的那三段整段删掉，
+   换成 `python -m app.db.backup` —— 用户报的「这个按钮总是报错」有四种互相独立的成因，
+   而其中两种（局域网下 `.env` 普通用户读不到、整条链路零日志）**只在应用进程之外才
+   成立**，所以处置不是修它们，是消掉它们脚下的地。
+
+   本文件那一组钉的是「薄壳」这个形状本身，**不是**那段 Python 的行为（那是
+   `test_backup.py` 在真 MySQL 上管的事）：`backup` 这个动作与它的按钮还在、代码里
+   不再出现 `Find-Mysqldump` / `-BackupDir`、卸载删目录之前先把备份搬出来。
+   判据一律走 `code_only` —— 那两个名字现在还留在注释里（说明「这里原先是什么」正是
+   那几句注释的价值），算进来会让守卫**因为文档写得对而变红**。
 """
 
 from __future__ import annotations
@@ -3045,3 +3057,157 @@ def test_the_packager_keeps_the_manual_button_and_its_script_together(tmp_path):
         "deploy/手工启动前端.bat",
     ):
         assert f'"{path}"' in required, f"REQUIRED_PATHS 里少了 {path}"
+
+
+# ---------------------------------------------------------------- 备份：薄壳
+#
+# 见模块 docstring 第 7 条。2026-09-27（§5.25）把备份的逻辑整段搬进了 Python：
+# 用户报的「备份数据.bat 总是报错」有四种互相独立的成因，而其中两种（局域网下
+# `.env` 普通用户读不到、整条链路零日志）**只在应用进程之外才成立**——所以处置
+# 不是修它们，是消掉它们脚下的地。
+#
+# **判据一律过 `code_only`。** `Find-Mysqldump` / `-BackupDir` / `mysqldump` 这几个
+# 名字现在还留在注释里，而它们正是「这里原先是什么」的说明——算进正文会让守卫
+# **因为文档写得对而变红**，而改注释去迁就测试是更糟的方向（`code_only` 的
+# docstring 写着这句话）。
+
+#: 那枚按钮请的动作。它与 `ops.ps1` 的 `[ValidateSet]` 之间隔着一个文件名，
+#: 而两处任一处改名都会让操作员双击之后「一闪就没」（ValidateSet 之外的值）。
+BACKUP_BUTTON = "备份数据.bat"
+
+
+def test_the_backup_button_still_reaches_its_action() -> None:
+    """那枚按钮、它请的动作、`ops.ps1` 的声明、分发的那一行——四者仍然对得上。
+
+    `test_every_declared_action_has_exactly_one_button` 断的是「声明的动作与按钮
+    集合**相等**」，`test_action_names_are_stable` 断的是那八个名字逐字不变。这两条
+    合起来已经钉住了「`backup` 还在、且恰好一枚按钮」，所以这里**刻意不重复**它们
+    ——加了第三种数法只会让改动作名时多一处要改。
+
+    它断的是那两条**看不见**的那一半：链子的两端。集合相等说不出「那枚按钮叫
+    `备份数据.bat`」（它可以是任何名字），也说不出 `ops.ps1` 分发到哪个函数上
+    （`'backup' { Backup-Database }` 那一行掉一个词，`switch` 就没有分支可走，
+    而上面两条守卫全绿）。
+    """
+    wired = wired_actions()
+    assert BACKUP_BUTTON in wired, (
+        f"{BACKUP_BUTTON} 不在了——它是「服务起不来、进不去界面」时唯一还能备份的入口"
+        f"（与那两枚手工启动按钮同一个先例）。现在有的按钮：{sorted(wired)}"
+    )
+    action = wired[BACKUP_BUTTON]
+    assert action == "backup", (
+        f"{BACKUP_BUTTON} 请的动作是 {action!r}，不再是 backup ——"
+        "`ops.ps1` 里那个 switch 是按这个词分发的，改名要两处一起改"
+    )
+    assert action in declared_actions(), (
+        f"{action!r} 不在 ops.ps1 的 [ValidateSet] 里——PowerShell 会在参数绑定那一步"
+        "就拒绝它，而窗口一闪而过，操作员只看到「什么也没发生」"
+    )
+
+    dispatch = f"'{action}' {{ Backup-Database }}"
+    assert dispatch in code_only(ops_text()), (
+        f"ops.ps1 的 switch 里找不到 `{dispatch}` —— 按钮请对了动作，而那个动作没有"
+        "落到任何函数上（`switch` 找不到匹配时**不报错**，直接往下走完）"
+    )
+
+
+def test_the_backup_shell_delegates_to_python_and_nothing_else() -> None:
+    r"""`Backup-Database` 只做三件事：请 `app.db.backup`、判退出码、把出路写给操作员。
+
+    **正向那一半**（少了它，一个空函数也满足反向断言）：它真的调 Python 那个模块、
+    真的看退出码、真的在失败时说得出「以管理员身份重试」。最后那句是
+    `Resolve-BasePython` 那条「错误信息要写得出怎么办」的同一条约定，而它是
+    `-ne 0` 那一支里**唯一**能告诉操作员出路的东西。
+
+    反向那一半逐条都有出处：
+
+    - `Find-Mysqldump` / `-BackupDir`：那两个名字从此不存在。2026-09-27 之前那两行
+      `-replace` 是**串联**的，带引号的服务路径先被正确剥掉引号、紧接着被第二行按
+      空格砍成 `C:\Program`；而 MySQL Installer 装出来的服务 `PathName` 默认就带
+      引号——**最准的那条定位路径一直是坏的**，全靠 `C:\Program Files\MySQL\*`
+      通配兜着。删掉它是为了让这类 bug 没有地方长回来。
+    - `mysqldump` / `-replace`：见上。逻辑在 Python 里，这里一个字的 SQL 工具都不碰。
+    - `build.json` / `$Usage` / `Get-InstalledUsage`：**用户明确要求备份不依赖操作系统**
+      （原文：「配置在应用系统中的备份，不应该依赖OS(WINDOWS或linux)，均可以适用」）。
+      这一处在 `.ps1` 侧的可执行形式就是「薄壳不读用法」——它不知道这台机器是
+      `single` 还是 `lan`，也不知道自己跑在哪个平台上。`$needsAdmin` 那一处**不动**：
+      备份仍不该弹 UAC，那是另一件事。
+    """
+    body = code_only(function_body(ops_text(), "Backup-Database"))
+
+    assert "@('-m', 'app.db.backup')" in body, (
+        "薄壳没在调 `python -m app.db.backup` —— 备份的逻辑（找 mysqldump、读连接参数、"
+        "清理旧文件、写记录）整段在 Python 那一侧，这是它进得来应用管理端的前提"
+    )
+    assert "-ne 0" in body and "Stop-WithError" in body, (
+        "薄壳没有判退出码。Python 那边成功/失败是靠退出码说的，漏了它之后**失败会被"
+        "报成成功**，而屏幕上写着「备份完成」"
+    )
+    assert "以管理员身份运行" in body, (
+        "失败那一支没说「以管理员身份运行再试」——局域网用法下 backend\\.env 只授 "
+        "SYSTEM 与 Administrators，而这是操作员唯一能自己试的那条出路"
+    )
+
+    for gone in ("Find-Mysqldump", "-BackupDir", "mysqldump", "-replace"):
+        assert gone not in body, (
+            f"`Backup-Database` 的正文里又出现了 {gone!r}。这一段 2026-09-27 整段搬进"
+            "了 Python（`app/services/backup_service.py`）——搬回来就等于把「同一件事"
+            "两处定义」重新种下，而两处会在某次改动之后各说各话"
+        )
+    for os_specific in ("build.json", "$Usage", "Get-InstalledUsage"):
+        assert os_specific not in body, (
+            f"`Backup-Database` 的正文里读 {os_specific!r} 了。备份层**不依赖操作系统**"
+            "（也不该知道「用法」这一维）：同一个动作在 Windows 与 Linux 上、在单机与"
+            "局域网下走的是同一条路，差别只在配置里那个目录"
+        )
+
+
+def test_the_uninstall_rescues_the_backups_before_deleting_the_directory() -> None:
+    r"""卸载删目录之前，先把 `backups\*.sql` 搬到旁边去——**搬不动就不删**。
+
+    默认备份目录就在 `$InstallDir\backups` 底下，而卸载那一句是
+    `Remove-Item -LiteralPath $InstallDir -Recurse -Force`。§18 说「卸载不删数据」，
+    所以库里的东西不会丢——但**「系统在帮我备份」与「备份被静默删掉」不能同时成立**。
+    用户唯一的一份离线副本不该跟着程序文件一起走。
+
+    判据是**字符次序**，照 `test_the_service_is_stopped_before_the_thing_that_needs_it_stopped`
+    那个先例：两句都在，只是搬的那一句被挪到了后面，而这种错在文本上完全看不出来
+    （两句话各自都对）。第三段另断「搬不动那一支 `return` 排在同一句之前」——少了它，
+    一次 `Move-Item` 失败（文件被占用、目标盘满）会走进 catch 里**打个招呼然后照删**，
+    而那正是它要防的那件事。
+
+    网眼：它判的是这两句话的先后，判不了那段 `try` 真的能挡住删除（那要真机）。
+    """
+    text = code_only(ops_text())
+    body = function_body(text, "Uninstall-Platform")
+
+    assert "Test-Path -LiteralPath $backupDir" in body, (
+        "卸载里找不到「备份目录在不在」这一判——没有它就没有东西可搬"
+    )
+
+    move = body.find("Move-Item")
+    assert move != -1, "卸载里找不到 Move-Item：备份不再被搬出来了"
+
+    removals = [
+        found.start()
+        for found in re.finditer(
+            r"Remove-Item\s+-LiteralPath\s+\$InstallDir\s+-Recurse", body
+        )
+    ]
+    assert removals, "卸载里找不到 `Remove-Item -LiteralPath $InstallDir -Recurse`"
+    for start in removals:
+        assert move < start, (
+            "搬备份那一句排在了删安装目录的后面——那时 backups\\ 已经跟着一起没了。"
+            "这两句各自都对，错的是次序"
+        )
+
+    # 搬不动的那一支：`return` 必须挡在删除之前，否则它会「打个招呼然后照删」。
+    failure = body.find("没能把备份搬出来")
+    assert failure != -1, "找不到「搬不动」那一支（它正是「搬不动就不删」这句话的落点）"
+    guard = body[failure:]
+    stop = re.search(r"Remove-Item\s+-LiteralPath\s+\$InstallDir\s+-Recurse", guard)
+    assert stop, "「搬不动」那一支后面没有删除语句——这条守卫要断的比对子不在了"
+    assert re.search(r"^\s*return\b", guard[: stop.start()], re.MULTILINE), (
+        "「搬不动」那一支没有 return：它会打一句「没能把备份搬出来」，然后照样把安装"
+        "目录（连同里面的备份）删掉。**没有删除任何东西**那句话就成了假话"
+    )

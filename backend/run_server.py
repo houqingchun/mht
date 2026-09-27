@@ -175,6 +175,26 @@ def main() -> int:
     )
     logger.info("监听 %s:%s", settings.host, settings.port)
 
+    # 定时备份（CLAUDE.md §34）。**必须留在这个 `while True:` 之外**：写进循环体里的话，
+    # 每一次崩溃重启都会多起一个线程，而下面那个重试循环正是这个项目的常态。
+    #
+    # 它起在这里而不是 `app/main.py` 的 lifespan，是因为 pytest 每一个 `TestClient` 用例
+    # 都会走一次 lifespan——那样几百条后端用例会各跑一次 `mysqldump`。`run_server.py` 是
+    # 生产专用启动器（计划任务跑的就是它），`make backend` 与 pytest 都不经过它。
+    #
+    # **不传 `settings`**：这一条链路上要读的配置（目录、保留天数、要不要自动跑）住在
+    # `system_setting` 里，由管理员在界面上改，与 `.env` 无关——而 `.env` 在局域网用法下
+    # 只授 SYSTEM 与 Administrators（§18），那正是原 `备份数据.bat` 必然失败的四个原因之一。
+    # 也不看一眼「用法」：单机与局域网共用这一条定时。**不判断操作系统**：同一份代码在
+    # Windows 与 Linux 上都成立，mysqldump 的位置由 `backup_service` 按平台枚举候选。
+    #
+    # `import` 写在函数里（与上面 `database_reachable` 那两处同一个手法）：这个模块在
+    # `app.core.config` 之外不该在导入期就把 services / models 整棵拉进来——`run_server.py`
+    # 是启动器，而 `make test` 与 `make e2e` 从不经过它。
+    from app.services.backup_service import start_backup_scheduler
+
+    start_backup_scheduler()
+
     while True:
         # 每一步都先等库。首次是「开机时 MySQL 还没好」，其后是「MySQL 中途重启过」。
         wait_for_database(settings, logger)

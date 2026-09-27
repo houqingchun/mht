@@ -4906,6 +4906,250 @@ M2 让取数的 `numberIn` 恒返回 0 → 红在 `toBeGreaterThan(0)`（**先�
 **摘掉其中一个不会有任何东西变红**——除非有为它单独写的用例。`test_a_deadlocked_task_creation_is_rerun_too`
 就是为任务那一半写的（M4 验过）。新增第三个调用点时照办。
 
+### 34. 备份搬进应用管理端：一份 dump 的配置、调度、记录与下载（2026-09-27）
+
+用户报安装包里那枚 `备份数据.bat` **总是报错**，而且「窗口一闪就关了、记不得是哪一句」。
+分诊下来是**四个各自独立**的原因，四种错误文案用户都见过：
+
+| # | 原因 | 性质 |
+|---|---|---|
+| 1 | `ops.ps1` 里那两行 `-replace` 是**串联**的：带引号的服务路径先被正确剥掉引号、紧接着被第二行按空格砍成 `C:\Program` —— 而 MySQL Installer 装出来的服务 `PathName` **默认带引号**，所以最准的那条定位路径一直是坏的，全靠 `C:\Program Files\MySQL\*` 通配兜底 | 真缺陷 |
+| 2 | mysqldump 退出码非 0 时只 `throw "退出码 N"`，**它 stderr 里那句话被扔掉了** | 真缺陷，也是「一闪就关、记不得」的直接成因 |
+| 3 | 局域网用法下 `backend\.env` 只授 SYSTEM 与 Administrators，而 `backup` 不在 `$needsAdmin` 名单里（§18） | 已知设计 |
+| 4 | 整条链路**零日志**，输出只打在那个控制台窗口上 | 缺口 |
+
+**处置不是修这四条，是把它们脚下的地抽掉。** 原因 3 与 4 只在**应用进程之外**才成立：
+服务早就把配置读进内存了，而它手上有 `server.log`、审计表与界面。所以备份整个搬进应用——
+配置、找 mysqldump、调度、记录、下载全在 Python 里，界面是主入口，安装目录里那枚按钮
+只剩一层薄壳（它是服务起不来时的出路，与 §18 那两枚手工启动按钮同一个先例）。
+
+#### 逻辑只有一处：`services/backup_service.py`，而它**不依赖操作系统**
+
+用户明确要求过：「配置在应用系统中的备份，不应该依赖 OS(WINDOWS或linux)，均可以适用」。
+所以这一层**没有任何平台判断**：不读注册表、不做 `os.name` 检查、不读
+`runtime\build.json`、不询问「用法」。候选表本身是按平台**枚举**的，但那是「在哪儿找
+mysqldump」，不是「要不要跑」——同一份代码在 Windows 与 Linux 上都成立，**单机与局域网
+共用同一套定时**。给下一个人：别在这里加 `if os.name == "nt"`。
+
+`find_mysqldump()` 的候选次序：`shutil.which("mysqldump")` → 已知位置（Windows
+`C:\Program Files\MySQL\MySQL Server *\bin`、darwin `/usr/local/mysql/bin`）→ 从 MySQL
+服务的 `PathName` 同级推（`_parse_service_image_path` 用 `shlex` 拆，**不再是手写的
+`-replace`**）。**每个候选真跑一次 `--version`、只看退出码**（`_probe`），照
+`install.ps1` 的 `Resolve-BasePython` 那条：`Test-Path` 只说「有个文件」，而别名、半截
+安装、另一个软件带进来的同名 exe 都会让它为真。
+
+**这一支不是只有目标机才会走到的代码**：开发机上 `mysqldump` 不在 PATH，但存在于
+`/usr/local/mysql/bin/mysqldump`（`mysql` / `mysqladmin` 同样），所以本机跑得动整条回路。
+
+口令两条老约定原样成立，只是执行者换成了 Python：`_client_file()` 生成
+`--defaults-extra-file` 的内容（复用 `db/mysql_url.py` 的 `client_options_file`）、写进
+临时文件、`try/finally` 删掉；**口令绝不进命令行**（Windows 上任何账号都能通过 WMI
+`Win32_Process` 读到别的进程的命令行），也绝不进日志与审计 `detail`。
+
+#### 一次备份：九步，其中三步是「这次改动真正的产出」
+
+1. 取配置（`settings_service.get_namespace(db, "backup")`）→ 解析目录：
+   `dir` 为空 = `<安装目录>/backups`（`_install_root()` 走 `parents[3]`，与
+   `db/seed.py` 找 `data/mht_scale.json` 同一手法；`backend/` 整个拷进安装目录，所以
+   落点与 `ops.ps1` 的既有默认值**同址**，没配过的实例行为一字不变）
+2. `mkdir(parents=True, exist_ok=True)`；`_available_path()` 取一个没被占用的文件名
+   （同一秒里两次备份不互相覆盖）
+3. 写临时 cnf
+4. 跑 `mysqldump --defaults-extra-file=… --single-transaction
+   --default-character-set=utf8mb4 --no-tablespaces --routines --events <库>
+   --result-file=<目标>.part`，**stderr 收进变量**（超时 `DUMP_TIMEOUT_SECONDS = 600`）
+5. `os.replace(part, final)` —— 「文件存在 ⇒ 备份成功」因此成立，去重与列表都靠它
+6. 算 sha256 与大小
+7. `secondary_dir` 非空时拷一份过去；**拷失败不算失败**（主备份成功了），只写进
+   `message` 当警告——「多存一份没存成」不该把一次成功的备份变成失败
+8. `_prune()` 按 `keep_days` 清理
+9. 写一行 `backup_record`（+ 审计，见下）
+
+**调用方提交**（服务层不提交，全库一致）。
+
+三条「默认值不能是破坏」的边界，都在 `_prune` 里：**`keep_days <= 0` = 只增不删**
+（照 `export.max_rows: 0 = 不限` 那条先例 §29；0 绝不能被读成「删掉所有比 0 天旧的」）；
+**只 glob `xinliceping-*.sql`**（运维自己放进这个目录的 `dump.sql`、`README.txt` 一条都不
+碰——这也是「第二路径可以指向一个已经有别的东西的目录」的前提）；单个文件删不掉只跳过
+（它是收尾动作，不该让整次备份失败）。
+
+#### 失败必须留痕——**这条是这个功能存在的理由本身**
+
+`_execute` 失败时**照常写一行** `status=FAILED` + `message`。原来的按钮恰恰相反：它把
+mysqldump 自己那句话扔了、只留一句「退出码 N」，而窗口一闪就关。
+
+`failure_message(exc)` 决定那一列给操作员看的是什么：`_ReadableFailure` 的子孙
+（`_DumpFailed` 是它唯一的子类）**原样返回 `str()`、不加类型名前缀**——这个内部类名会
+出现在界面的「说明」列上，而下一个人排查时唯一能提供的东西就是那一列。其余异常才加
+`类型名:` 前缀。
+
+#### `backup_record`：「存事实、推结论」的又一处
+
+库里只写**发生过的事**：跑过没有、成没成、文件叫什么。**「今天该不该再跑一次」是推出来的**
+（`succeeded_today`：今天的 `SUCCEEDED` 行**且文件还在盘上**）。与 §12 的
+`effective_task_status`、§29 的 `effective_export_status` 同口径。
+
+- 读**表**而不是读目录：这样「手动点过一次」也抑制当天后面那一次自动的（同一天两份 1MB
+  的 dump 没有意义），而读目录答不出「这一份是谁什么时候搞的」。
+- 文件被判丢了只让去重**不生效**（于是再备份一次）——方向是安全的那一侧：宁可多一份。
+- **不写 `started_at` / `finished_at`**：行在结束时写一次，`created_at` 就是「备份时间」。
+- **`message` 一个列担两种话**（失败原因 / 成功但第二路径没拷成），由 `status` 分辨。
+  拆成两列会让其中一列常年为空。
+- 三档 `TRIGGER_*`（`MANUAL` / `AUTO` / `CLI`）、两档 `STATUS_*`。
+  `AUTO` 是唯一一种「没人看着也发生了」的备份——它 `operator_id` 为 NULL，界面上显示
+  「· 系统」。
+
+#### 定时住在 `run_server.py` 的 `while True:` **之前**，不在 lifespan
+
+| 放哪 | 会怎样 |
+|---|---|
+| `while True:` **循环体里** | 每次崩溃重启多起一个线程——而那个重试循环是这个项目的常态（库里没起来、进程崩了） |
+| `app/main.py` 的 lifespan | pytest 每一个 `TestClient` 用例都会走一次 lifespan，几百条后端用例各跑一次 `mysqldump` |
+| **`while True:` 之前（现在）** | 起一次。`run_server.py` 是**生产专用**启动器（计划任务跑的就是它），`make backend` 与 pytest 都不经过它 |
+
+守护线程：`SCHEDULER_FIRST_DELAY_SECONDS = 60` 后跑第一轮（开机时 MySQL 往往还没起来），
+之后每小时一次，出错等 `SCHEDULER_RETRY_SECONDS = 300`。**异常一律吞进日志**，绝不让它
+影响主循环。三种跳过**都不是失败**：关了自动 / 另一次正在跑 / 今天已经成功过。
+
+**关掉自动之后线程不退出**，只是每一轮什么都不做——管理员在界面上重新打开时，下一次检查
+就生效，不必重启服务（退出的话，重新打开要等到服务重启，而那看起来像「没保存住」）。
+
+`auto_enabled` 是 `DEFAULTS` 里**第一个 bool**，前端那条链路的成本一起付了
+（`api.ts` 的类型、`useSettings.ts` 的 `FALLBACK`、新页上那个复选框）。
+
+#### API 三个端点，配置的**写**走既有那个通用端点
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/admin/backup` | 配置 + **服务端展开之后的实际落点** + 上次成功 / 上次失败 + 历史（最近 50 条） |
+| POST | `/admin/backup/run` | 立即备份（**同步**：库小，同步才能让错误直接出现在响应里） |
+| GET | `/admin/backup/records/{id}/download` | 取走文件 |
+
+三者都是 `require_capability(ORG_ACCOUNT, allow={MANAGE})`；配置写走
+`PUT /admin/settings/{namespace}`（`settings_service` 只认 `DEFAULTS` 里声明过的键，
+加一个 namespace 就够），**不新开端点**。
+
+两条容易看错的行为：
+
+- **409「正在备份中」= 没跑，不是失败。** 前端因此必须按 `status` 分岔，不能只 `catch`。
+- **这两个路由自己 `db.commit()`。** 它们是「路由写了但没提交」那类洞的现场
+  （§24 阶段 3、§25 各撞过一次）：`conftest.py` 的 `override_get_db` 直接 yield
+  `db_session`，请求结束既不关闭也不回滚，所以**漏了 commit 在测试里是全绿的**。
+
+#### ★ 下载按钮是 §4 的一次**有意例外**（不许顺手关掉，也不许当先例推广）
+
+管理员按 §4 的 `STUDENT_PSYCH_DETAIL` 是 `NONE`——**他看不到一名学生的档案，却能下载
+一份含全部学生心理数据、答卷与账号口令哈希的整库 dump**。这与 §4 那句「受控导出不能成为
+绕过心理详情的旁路」直接冲突。用户已裁决要这个按钮（「备份文件提供下载」），所以处置是
+**把例外写明并给它加护栏**，不是假装它不存在：
+
+- 守卫是 `ORG_ACCOUNT: {MANAGE}`——唯一拿得到它的角色就是管理员本身；
+- **每次下载写审计**，`action="下载数据库备份"`，`detail` 明写
+  **「整库原始数据，不可能遮蔽」**。照 §8「导出审计必须记录遮蔽模式」：一份备份**没有**
+  遮蔽这一档，这句话必须出现在轨迹里，而不是靠读轨迹的人自己去想；
+- `resolve()` 之后必须仍在备份目录内（`file_name` 是我们写的，但它在库里、而库可改）；
+- **重算 sha256 与记录比对，对不上回 409 且不发文件**（照 `download_export_job` §29）。
+
+**改这一块之前先想清楚**：关掉按钮就是抽掉用户要的功能；而它也不是一个可以推广的先例——
+它的理由只有一条，且只在整库 dump 上成立（那份文件没法按人遮蔽）。三条状态码与 §29 对齐：
+记录不存在 / 没成功过 → 404，文件不在 → 410（并指出「备份目录可能已经被改过」），
+摘要对不上 → 409。
+
+#### ★ 审计由**服务层**写——全库唯一一处偏离
+
+别处的形状是「服务层不碰审计，路由写」。这里不行：**自动那一次没有路由**。拆成
+「路由写手动、服务写自动」会让同一次动作有两个写入方，而那正是「同一处只许有一个定义」
+要消掉的东西。`write_audit` 的 `actor` / `request` 本来就都可选（`audit_service.py`），
+未登录的系统事件在 §8 里本来就该有一行、界面显示 `—`。**路由不重复写。**
+
+#### 卸载：备份**不被跟着删掉**
+
+默认备份目录就在 `$InstallDir\backups` 底下，而卸载末尾是
+`Remove-Item -LiteralPath $InstallDir -Recurse -Force`。「系统在帮我备份」与「备份被静默
+删掉」不能同时成立（§18 那句「卸载不删数据」说的是数据库，而**磁盘上这一份离线副本是我们
+放的**）。所以删之前先把 `*.sql` 搬到 `<InstallDir 的父>\<同名>-backups`
+（`C:\xinliceping\backups` → `C:\xinliceping-backups`）并在输出里写明新位置。
+
+- **这一步排在 `Remove-Item` 之前，是它的全部价值所在**（挪到后面等于没做）；
+- **搬不动就不删**：宁可留一个「卸了一半」的目录（操作员看得见、能重来），也不能把他
+  唯一的一份离线副本连带程序文件一起做掉——那是不可逆的那一边；
+- **就地保留不行**：下一次「一键安装」会把新程序装进同一个目录，那些 `.sql` 会混在程序
+  文件里，操作员再也分不清哪个是安装目录、哪个是自己该拷走的备份。
+
+#### `Show-Status` 只认**默认目录**，而且那句指路不能省
+
+「查看状态」加了两行（默认备份目录 + 里面最新的那个 `.sql`）。它**只读文件系统、不问
+数据库**——服务停着、库连不上时这一页照样答得出「有没有东西备份下来了」，而自动备份失败
+是完全静默的（凌晨、没人看着、连窗口都没有），所以这一页正是出事时第一件会跑的东西。
+
+因为不连库，它看不见 `system_setting` 里的配置，所以**下面那句「界面『数据备份』那一页里
+配过别的目录的话，以那一页显示的为准」不能省**——少了它，配过第二路径或改过目录的机器会
+看着一个空目录以为「一次都没备份过」，而东西好好地在别处（§9：口径要写进界面）。措辞是
+对着**这个目录**说的，不是对「有没有备份过」说的。
+
+`@(...)` 不能省：只有一份时 `Get-ChildItem` 回来的是单个对象、没有 `.Count`，而
+`Set-StrictMode -Version Latest` 下读它当场抛异常（§18 那条 `Get-LanAddresses` 的同一课）。
+
+#### `备份数据.bat` 保留，`ops.ps1` 里那条平台判断归零
+
+那枚按钮保住（薄壳，调 `python -m app.db.backup`）：它是**一键安装装不完 / 服务起不来**时
+唯一还能备份的入口。action 名单**恰好仍是八个**（`backup` 不增不减），
+`install.ps1` 里那张「按钮 → action」的表与 `test_windows_assets.py` 那条「恰好八个」的
+断言都不必改。
+
+失败时 Python 那句话**已经自己落在控制台上了**（经 `Invoke-Python` 的
+`-NoNewWindow -Wait -PassThru`，**不作管道** → Python 走自己的 Unicode 控制台 API，中文
+不会被第二次解码），所以 `ops.ps1` 补的不是原因，是**处置**：以管理员身份重试（局域网
+用法下 `.env` 读不到是最常见的那一种），或者去界面的「数据备份」页看「最近一次失败」。
+`$needsAdmin` **不动**——备份仍不该弹 UAC。
+
+连带删掉的是 `[string]$BackupDir`（配置已搬进应用，再留一个命令行覆盖就是第二个定义；
+`install.ps1` 里从来没有传过它）与整个 `Find-Mysqldump`。
+
+#### e2e **有意不写用例**（只加了一条路径），两条独立理由，任一条足够
+
+1. **会改共享库**：手动备份在开发库上落一个真文件 + 一行记录 + 一条审计，跑一次 e2e 就多
+   一份 1MB 的 dump，而且**只增不减**（§18 那条「只增不减的残留会让下一个人去关掉那条
+   用例」）。
+2. **会与审计页抢时间线**：`fullyParallel` 下审计页那条用例只看最新 20 行——与 §24 把
+   `STUDENT` 移出 `UNTRANSLATED_CODES`、§32 不写导出 e2e 是**同一个成因**，处置也照旧：
+   后端钉住，前端那半记成已知取舍。
+
+`vocabulary.spec.ts` 里只加了一条**路径**（`/admin/backup`），并写明那一页在演示库上是
+**空的**（`seed_demo` 不种备份记录），所以它只证明「页面打得开、没有崩」，**不证明任何一格
+被翻译过**——一张空表在变异验证下永远是绿的。
+
+#### 测试：`test_backup.py`（真 MySQL，§20）
+
+三条夹具上的坑，都在这里踩过或差点踩到：
+
+- **`db_session` 带 `autoflush=False`**：「先 `update_namespace` 写配置、再读配置」的
+  夹具**必须自己 `db_session.flush()`**，否则读到的是旧值而不是报错——一次静默的不一致。
+- **`_FOUND_DUMP` / `_FOUND_LOCK` 是模块级缓存**：碰 `find_mysqldump` 的用例必须
+  `monkeypatch.setattr(backup_service, "_FOUND_DUMP", None)`，否则「找不到 mysqldump」
+  的那条会在第二次运行时命中上一次的结果。
+- **`dump_binary=sys.executable` 是跨平台的「必失败」注入**：一个跑得起来、但绝不是
+  mysqldump 的程序。
+
+#### 迁移、快照与「不动」的三处
+
+- `0024_backup_record`，**expand-only、没有 PRECHECKS** → 两份 `upgrade_from_*.sql` 会
+  自动带上它，**改完必须 `make db-upgrade-sql`**（§30），否则
+  `test_incremental_upgrade_sql.py` 变红。
+- `backend/sql/schema_mysql8.sql` **要手改**（§16：它是手写 + 静态守卫的，
+  `test_sql_schema_matches_models.py` 盯着表集 / 列集 / 建表次序 / 外键）。
+- **`purge.py` 与两份 SQL 基线脚本都不动**：备份记录不是「测评数据」，`purge-demo` 的
+  职责是删演示的测评链路。**这是有意的取舍**，不是漏了——顺带也让
+  `reset_to_baseline.sql` 那条「每一条 `DELETE` 都挂在 `@admin_id` 上」的不变量不必为一个
+  `operator_id` 可为 NULL 的表开口子。
+
+#### 版本 2.1.0 → 2.2.0
+
+`backend/app/version.py` 的 `__version__` 与唯一的镜像 `frontend/package.json` 一起改，
+`VERSION_LABEL` 自动变 `V2.2`（§19）。`test_app_version.py` 里那条「标签丢掉修订号」的
+末尾字面量跟着改——**它是有意的镜像，随 `__version__` 一起动**（写死不随它动的期望值，
+`[:2]` 被误写成 `[:3]` 时就抓不住了）。
+
 ## 已知缺口（动手前先看这里）
 
 1. **数据范围已在查询层生效，但有两处刻意的例外和一个口径盲点。**

@@ -21,12 +21,21 @@
      用户自己的目录里，那几个动作全都不需要管理员。用法从 `runtime\build.json` 的
      `usage` 字段读（见 `Get-InstalledUsage`）。
 
-  2. **备份走 `mysqldump` + `--defaults-extra-file`**，口令不写命令行。
-     Windows 上任何账号都能读别的进程的命令行（WMI 的 `Win32_Process`），而这是一所
-     学校的服务器：`mysqldump -p口令` 等于把库的口令贴在一份所有人可读的表上。
-     那个临时配置文件用完立刻删，中途的窗口用 `icacls` 收窄。
-     它由 `python -m app.db.mysql_url --client-file` 生成——**不在 PowerShell 里再写一份
-     URL 解析器**，因为那必然与后端那一份漂移，而含 `@` 的口令会在其中一边悄悄坏掉。
+  2. **备份的逻辑不在这个文件里。** `backup` 这个动作现在是一层薄壳，调
+     `python -m app.db.backup`（V2.2.0 §5.25）。配置、找 mysqldump、跑 dump、
+     清理旧文件、写记录与审计，全部在 `app/services/backup_service.py`，界面上
+     「数据备份」那一页是它的主入口，这里这枚按钮是一键安装装不完时的出路。
+
+     搬走之后**这个文件里一条平台判断都没有** —— 用户明确要求过「配置在应用系统中的
+     备份，不应该依赖 OS，均可以适用」，而那段 Python 按平台枚举 mysqldump 候选、
+     不读注册表、不做 `os.name` 检查、不询问「用法」。原来这里那份自己实现的
+     `Find-Mysqldump` 有两行**串联**的 `-replace`，带引号的服务路径先被正确剥掉引号、
+     紧接着被第二行按空格砍成 `C:\Program`（而 MySQL Installer 装出来的服务
+     `PathName` 默认就带引号），于是它最准的那条定位路径一直是坏的。
+
+     口令仍然**不写命令行**（Windows 上任何账号都能读别的进程的命令行）——那条约定
+     没有变，只是现在由 Python 那一侧执行：它把口令写进一个临时
+     `--defaults-extra-file`、用完立刻删。
 #>
 #Requires -Version 5.1
 [CmdletBinding()]
@@ -34,8 +43,13 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidateSet('start', 'stop', 'restart', 'status', 'log', 'backup', 'reset-admin', 'uninstall')]
     [string]$Action,
-    [switch]$Elevated,          # 内部用：标记「已经提过权了」
-    [string]$BackupDir = ''     # 备份去哪儿，默认 <安装目录>\backups
+    [switch]$Elevated           # 内部用：标记「已经提过权了」
+
+    # **这里原来还有一项 `[string]$BackupDir`，2026-09-27 删掉了**（V2.2.0 §5.25）。
+    # 备份目录从那天起住在应用配置里（`system_setting` 的 `backup.dir`，在「数据备份」
+    # 那一页上改），而这个参数是它的**第二个定义**——一个命令行覆盖能压过界面上的配置，
+    # 而屏幕上不会显示这件事。同一个东西只许有一个定义。
+    # 删它的同时必须删掉 `install.ps1` 里传参的那一处（两处一起，守卫按调用点扫）。
 )
 
 Set-StrictMode -Version Latest
@@ -254,7 +268,6 @@ if ($needsAdmin -and -not (Test-Administrator)) {
         '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'),
         '-Action', $Action, '-Elevated'
     )
-    if ($BackupDir) { $arguments += @('-BackupDir', ('"' + $BackupDir + '"')) }
     Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $arguments `
         -WorkingDirectory $PSScriptRoot -Wait
     exit 0
@@ -496,6 +509,35 @@ function Show-Status {
             Write-Line ("日志占了 {0:N1} MB（在 {1}）" -f ($total / 1MB), $logDirectory)
         }
     }
+
+    # 备份：**只读文件系统、不问数据库**，所以服务停着、数据库连不上时这一页照样答得出
+    # 「有没有东西备份下来了」。这正是这一行存在的理由 —— 自动备份失败是完全静默的
+    # （凌晨、没人看着），而「查看状态」是操作员出事时第一件会跑的东西。
+    #
+    # **这里只认默认目录那一个**：配置住在应用的 `system_setting` 里，而这一页不连数据库
+    # （连了就会在库没起来时整页失效，那是更糟的取舍）。所以下面那一句提示不能省 ——
+    # 少了它，配过第二路径的机器会看着一个空目录以为「一次都没备份过」，而东西好好地在
+    # 别处（§9：口径要写进界面）。措辞是对着**这个目录**说的，不是对「有没有备份过」说的。
+    $backupDir = Join-Path $InstallDir 'backups'
+    Write-Line ''
+    if (Test-Path -LiteralPath $backupDir) {
+        # `@(...)` 不能省：只有一份时 `Get-ChildItem` 回来的是单个对象而没有 `.Count`
+        # （严格模式下读它当场抛异常）—— 见文件里 `Get-LanAddresses` 那一处的同一课。
+        $dumps = @(Get-ChildItem -LiteralPath $backupDir -Filter '*.sql' -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending)
+        if ($dumps.Count -gt 0) {
+            $newest = $dumps[0]
+            $sizeMb = '{0:N1}' -f ($newest.Length / 1MB)
+            $when = $newest.LastWriteTime.ToString('yyyy-MM-dd HH:mm')
+            Write-Line "备份：$backupDir 下有 $($dumps.Count) 份，最新一份 $($newest.Name)（${sizeMb} MB，$when）"
+        } else {
+            Write-Line "备份：$backupDir 下还没有 .sql 文件。" 'WARN'
+        }
+    } else {
+        Write-Line "备份：还没有 $backupDir 这个目录。" 'WARN'
+    }
+    Write-Line '      界面「数据备份」那一页里配过别的目录的话，以那一页显示的为准。'
+
     Write-Line '===================================================='
     Write-Line ''
 }
@@ -517,113 +559,48 @@ function Show-Log {
     Start-Process -FilePath 'explorer.exe' -ArgumentList ('/select,"' + $LogFile + '"')
 }
 
-function Find-Mysqldump {
-    <#
-      找 mysqldump.exe。**不能假定它在 PATH 上**：MySQL Installer 默认不勾
-      「加入 PATH」，而这是最常见的那种安装。所以按可靠程度依次试：
-
-      1. 从 MySQL 服务的可执行文件路径推（最准：它就是这个实例真正在用的那个 bin）
-      2. 常见的安装目录（版本号会变，所以用通配，别写死 8.0）
-      3. PATH（有人手动加过）
-    #>
-    $service = Get-CimInstance Win32_Service -Filter "Name LIKE 'MySQL%'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.PathName } | Select-Object -First 1
-    if ($service) {
-        $exe = ($service.PathName -replace '^"([^"]+)".*$', '$1') -replace '^([^\s]+)\s.*$', '$1'
-        $candidate = Join-Path (Split-Path -Parent $exe) 'mysqldump.exe'
-        if (Test-Path -LiteralPath $candidate) { return $candidate }
-    }
-
-    foreach ($pattern in @(
-        'C:\Program Files\MySQL\MySQL Server*\bin\mysqldump.exe',
-        'C:\Program Files (x86)\MySQL\MySQL Server*\bin\mysqldump.exe'
-    )) {
-        $found = Get-ChildItem -Path $pattern -ErrorAction SilentlyContinue |
-            Sort-Object FullName -Descending | Select-Object -First 1
-        if ($found) { return $found.FullName }
-    }
-
-    $onPath = Get-Command 'mysqldump.exe' -ErrorAction SilentlyContinue
-    if ($onPath) { return $onPath.Source }
-
-    return $null
-}
-
 function Backup-Database {
-    $dump = Find-Mysqldump
-    if (-not $dump) {
+    <#
+      备份的**全部逻辑都在 Python 里**：`python -m app.db.backup`（V2.2.0 §5.25）。
+
+      这里原先自己找 mysqldump、自己读 `.env`、自己清旧文件，那三件事各自出过事：
+
+      - 找 mysqldump 那一段有两行**串联**的 `-replace`，带引号的服务路径先被正确剥掉
+        引号、紧接着被第二行按空格砍成 `C:\Program` —— 而 MySQL Installer 装出来的
+        服务 `PathName` **默认就带引号**，所以最准的那条路一直是坏的（靠通配兜底）；
+      - mysqldump 退出码非 0 时只 `throw "退出码 N"`，**它 stderr 里那句话被扔掉了**，
+        于是操作员唯一能提供的东西从来没有离开过这个一闪就关的窗口；
+      - 整条链路零日志。
+
+      搬进 Python 之后这三条一起消失：候选表按平台枚举、每个候选真跑一次 `--version`、
+      失败时把 mysqldump 自己那句话原样写进 `backup_record.message`，而那一列在界面的
+      「数据备份」页上看得见（还有一条审计、一份可下载的文件）。
+
+      **保留这枚按钮**：它仍是一键安装装不完时的出路（与那两枚「手工启动」同一个先例），
+      也是服务起不来、进不去界面时唯一还能备份的入口。
+
+      **本函数不做任何平台判断**，它调的是一段与操作系统无关的 Python —— 用户明确要求
+      过「配置在应用系统中的备份，不应该依赖 OS，均可以适用」。同理，它**不读
+      `runtime\build.json`、不问「用法」**：那两样只影响服务怎么起，与备份无关。
+    #>
+    Write-Line '正在备份数据库……（备份设置与历史在界面的「数据备份」那一页上）'
+    # 上面那句 Python 的存在性检查在文件更前面已经做过一次（所有 action 共用），
+    # 所以这里不重复。
+    if ((Invoke-Python @('-m', 'app.db.backup')) -ne 0) {
+        # 两句分开说。**Python 自己那句话已经在上面打出来了**（它是一句中文，直接落
+        # 在控制台上、不经管道），所以这里补的是**处置** —— 因为局域网用法下最常见的
+        # 那一种，屏幕上那句话不会自己说出「换个身份再点一次」。
         Stop-WithError @'
-没有找到 mysqldump.exe。
+备份没有完成。上面那条输出里写着 Python 报的原因。两种都常见：
 
-    它是随 MySQL Server 一起装的，只是默认不在 PATH 上。请在这台机器上找一下
-    （一般在 C:\Program Files\MySQL\MySQL Server 8.0\bin\ 里），找到之后
-    把那个目录临时加到 PATH 再运行这个按钮；或者直接用那个目录下的
-    mysqldump.exe 手工导出。
-
-    顺带一提：**MySQL Shell（mysqlsh）自带的那个 mysqldump 是另一个东西**，
-    这里要的是 MySQL Server 的那个。
+    1. 权限。备份这个动作**不在需要管理员权限的名单里**（它不该弹 UAC），但局域网
+       用法下 backend\.env 只允许 SYSTEM 与 Administrators 读，所以普通用户点下去
+       就是这个结果。关掉这个窗口，右键「备份数据.bat」→「以管理员身份运行」再试。
+    2. 别的。照上面那句话办；也可以管理员登录界面，到「数据备份」那一页看
+       「最近一次失败」——同一个原因也记在那里（界面上那次是自动备份）。
 '@
     }
-
-    if (-not (Test-Path -LiteralPath $EnvFile)) { Stop-WithError "找不到 $EnvFile。" }
-
-    if (-not $BackupDir) { $BackupDir = Join-Path $InstallDir 'backups' }
-    New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
-    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-    $target = Join-Path $BackupDir ("xinliceping-$stamp.sql")
-
-    # 口令走 `--defaults-extra-file`（写在 runtime\ 下、权限收窄、用完就删），
-    # 绝不写命令行：见文件开头第 2 条。
-    $clientFile = Join-Path $InstallDir 'runtime\mysql-client.cnf'
-    Write-Line '正在读出数据库连接信息……'
-    if ((Invoke-Python @('-m', 'app.db.mysql_url', '--client-file', $clientFile)) -ne 0) {
-        # 两种原因要分开说，否则这句会把一次权限问题指成「文件坏了」，而操作员会去
-        # 改一个本来好好的文件。局域网用法下 `backend\.env` 只授了 SYSTEM 与
-        # Administrators（`install.ps1` 的 `Tighten-EnvPermissions`），**普通用户读不到
-        # 它**——而备份这个动作本身不在 `$needsAdmin` 名单里。于是那台机器上
-        # 普通用户点这个按钮一定是这条错。
-        Stop-WithError @'
-没能读出数据库连接信息。上面那条输出里写着原因，两种都常见：
-
-    1. 权限：局域网用法下 backend\.env 只允许 SYSTEM 与 Administrators 读。
-       关掉这个窗口，右键「备份数据.bat」→「以管理员身份运行」再试一次。
-    2. 文件：backend\.env 真的被改坏了（少了一个等号、多了个引号之类）。
-'@
-    }
-    try {
-        # `--defaults-extra-file` 必须是**第一个**参数，mysqldump 在解析其它参数之前就要读它。
-        # `--single-transaction` 让导出期间不锁表（InnoDB），老师照常能用系统。
-        # `--routines --events` 一起带上，免得将来加了存储过程才发现备份是不全的。
-        # 这里不能用上面的 `Invoke-Python`：跑的是 mysqldump 而不是 python.exe。
-        # 所以逐个参数自己 `Quote-Argument`（`Start-Process` 不做转义）。
-        $arguments = @(
-            (Quote-Argument "--defaults-extra-file=$clientFile"),
-            '--single-transaction', '--routines', '--events',
-            '--default-character-set=utf8mb4',
-            (Quote-Argument "--result-file=$target")
-        )
-        Write-Line "正在导出到 $target ……"
-        $process = Start-Process -FilePath $dump -ArgumentList $arguments -NoNewWindow -Wait -PassThru
-        if ($process.ExitCode -ne 0) {
-            throw "mysqldump 退出码 $($process.ExitCode)"
-        }
-    } finally {
-        Remove-Item -LiteralPath $clientFile -Force -ErrorAction SilentlyContinue
-    }
-
-    $size = (Get-Item -LiteralPath $target).Length
-    Write-Line ("备份完成：$target（{0:N1} MB）" -f ($size / 1MB)) 'OK'
-    Write-Line ''
-    Write-Line '提醒：这份文件就在这台机器上。真出事（硬盘坏了）的时候它帮不上忙——'
-    Write-Line "请定期把它拷到别的地方（U 盘、另一台电脑、网盘）。目录是：$BackupDir"
-
-    # 顺手清掉 30 天前的，免得这个目录悄悄涨到几十个 GB。
-    $old = Get-ChildItem -LiteralPath $BackupDir -Filter 'xinliceping-*.sql' |
-        Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-30) }
-    if ($old) {
-        $old | Remove-Item -Force
-        Write-Line ("顺手清掉了 $($old.Count) 个 30 天前的旧备份。")
-    }
+    Write-Line '备份完成。文件落在哪、留多久，见界面的「数据备份」那一页。' 'OK'
 }
 
 function Reset-AdminPassword {
@@ -711,8 +688,43 @@ function Uninstall-Platform {
     }
 
     Write-Line ''
-    $purge = Read-Host "要不要把程序文件也删掉？目录是 $InstallDir。删了数据还在数据库里。输入 yes 删除，其它任何键保留"
+    $purge = Read-Host "要不要把程序文件也删掉？目录是 $InstallDir。删了数据还在数据库里，要删的话里面的备份会先搬到旁边。输入 yes 删除，其它任何键保留"
     if ($purge -eq 'yes') {
+        # ---------------------------------------------------------------- 先救备份
+        #
+        # **默认备份目录就在 $InstallDir 底下**（`<安装目录>\backups`），而下面那句
+        # `Remove-Item -Recurse -Force` 会连它一起删掉。「系统在帮我备份」与「备份被卸载
+        # 静默删掉」不能同时成立 —— §18 那句「卸载不删数据」说的是数据库（那确实在 MySQL
+        # 里，与这个目录无关），而**磁盘上这一份离线副本是我们放的**，我们不能假装它与我们
+        # 无关。
+        #
+        # **这一步排在 `Remove-Item` 之前，是它的全部价值所在。** 挪到后面就等于没做。
+        # 搬到旁边（`C:\xinliceping\backups` → `C:\xinliceping-backups`）而不是就地保留：
+        # 就地保留的话，下一次「一键安装」会把新程序装进同一个目录，而那些 .sql 会混在
+        # 新装的程序文件里 —— 操作员再也分不清哪个是安装目录、哪个是自己该拷走的备份。
+        $backupDir = Join-Path $InstallDir 'backups'
+        $dumps = @()
+        if (Test-Path -LiteralPath $backupDir) {
+            $dumps = @(Get-ChildItem -LiteralPath $backupDir -Filter '*.sql' -ErrorAction SilentlyContinue)
+        }
+        if ($dumps.Count -gt 0) {
+            $rescueDir = $InstallDir.TrimEnd('\') + '-backups'
+            try {
+                New-Item -ItemType Directory -Path $rescueDir -Force | Out-Null
+                foreach ($dump in $dumps) {
+                    Move-Item -LiteralPath $dump.FullName -Destination (Join-Path $rescueDir $dump.Name) -Force
+                }
+                Write-Line "先把 $($dumps.Count) 份备份搬到 $rescueDir（它们不跟着程序文件一起删）。" 'OK'
+            } catch {
+                # **搬不动就不删。** 宁可留一个「卸了一半」的目录（操作员看得见、能重来），
+                # 也不能把他唯一的一份离线副本连带程序文件一起做掉 —— 那是不可逆的那一边。
+                Write-Line "没能把备份搬出来：$($_.Exception.Message)" 'ERROR'
+                Write-Line "**没有删除任何东西。** 请先把 $backupDir 里的 .sql 文件手工拷到别的地方，" 'ERROR'
+                Write-Line '再双击一次「卸载.bat」。' 'ERROR'
+                return
+            }
+        }
+
         # 自己删自己所在的目录有时会失败（有句柄开着），所以退到上一级再删。
         # 失败不致命——手工删掉那个文件夹即可。
         Set-Location (Split-Path -Parent $InstallDir)

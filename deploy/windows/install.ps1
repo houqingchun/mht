@@ -825,7 +825,8 @@ function Invoke-Native {
       这个原因，而那时文件其实已经铺完了。
 
       （这段注释曾经写的是 `schtasks / netsh / mysqldump`，三个都没走这条路：计划任务与
-      防火墙都用 cmdlet 建，mysqldump 在 `ops.ps1` 里自己跑。）
+      防火墙都用 cmdlet 建，mysqldump 则走 Python——`python -m app.db.backup`，
+      见 `app/services/backup_service.py`。它是 2026-09-27 从 `ops.ps1` 里搬过去的。）
     #>
     param(
         [string]$Step,

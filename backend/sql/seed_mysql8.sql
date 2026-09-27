@@ -2,7 +2,7 @@
 -- 心晴：数据库**基础数据**脚本（只有管理员账号与量表，不含任何演示数据）
 -- ===========================================================================
 --
--- 版本：V2.1（2.1.0）
+-- 版本：V2.2（2.2.0）
 -- 生成：`make db-seed-sql`（`deploy/build_seed_sql.py`）。**不要手改这个文件**——
 --       改了下次重跑就没了，而且 `backend/app/tests/test_seed_sql.py` 会红。
 --
@@ -36,7 +36,7 @@
 --   scale_rule                  1 行   评分规则：总分 / 维度分段与效度阈值都随这一行走（CLAUDE.md §6）
 --   user_scope                  1 行   admin 的范围行：§9 里没有范围行的账号，每个列表都是空的
 --
--- 其余 30 张业务表一行都不写：名册、员工账号、测评任务、
+-- 其余 31 张业务表一行都不写：名册、员工账号、测评任务、
 -- 一切测评与关怀记录全空。开通之后的第一件事是「组织学生 → 学生信息导入」
 -- （学生账号跟着名册一起生成，不在「账号与权限」里建），不是往这个文件里加行。
 --
@@ -249,6 +249,7 @@ SELECT 'school' AS 表, COUNT(*) AS 行数 FROM school
 UNION ALL SELECT 'user_account' AS 表, COUNT(*) AS 行数 FROM user_account
 UNION ALL SELECT 'assessment_scale' AS 表, COUNT(*) AS 行数 FROM assessment_scale
 UNION ALL SELECT 'auth_session' AS 表, COUNT(*) AS 行数 FROM auth_session
+UNION ALL SELECT 'backup_record' AS 表, COUNT(*) AS 行数 FROM backup_record
 UNION ALL SELECT 'export_job' AS 表, COUNT(*) AS 行数 FROM export_job
 UNION ALL SELECT 'grade' AS 表, COUNT(*) AS 行数 FROM grade
 UNION ALL SELECT 'professional_report' AS 表, COUNT(*) AS 行数 FROM professional_report

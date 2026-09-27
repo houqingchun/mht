@@ -5932,3 +5932,269 @@ SELECT version_num FROM alembic_version;
 **两件东西的次序不重要，但建议先跑 SQL 再换程序文件**：这样中途出问题时报出来的是一句
 SQL 错（离原因近），而不是「页面 500」（离原因远）。
 
+### 5.25 备份搬进应用管理端（V2.2.0）
+
+#### 5.25.1 任务与背景
+
+用户报：安装包里的 `备份数据.bat` **总是报错**。分诊出四条**互相独立**的根因，用户四种
+报错文案都见过，而「窗口一闪就关了、记不得是哪一句」也成立：
+
+| # | 原因 | 性质 |
+|---|---|---|
+| 1 | `ops.ps1` 的 `Find-Mysqldump` 里那两行 `-replace` 是**串联**的：带引号的服务路径先被正确剥掉引号、紧接着被第二行按空格砍成 `C:\Program`。MySQL Installer 装出来的服务 `PathName` 默认带引号，所以**最准的那条定位路径一直是坏的**，全靠 `C:\Program Files\MySQL\*` 通配兜底 | 真缺陷 |
+| 2 | mysqldump 退出码非 0 时只 `throw "退出码 N"`，**它 stderr 里那句话被扔掉了** | 真缺陷，也是「一闪就关、记不得」的直接成因 |
+| 3 | 局域网用法下 `backend\.env` 只授 SYSTEM 与 Administrators，而 `backup` 不在 `$needsAdmin` 名单里 | 已知设计（§18 记着）。结果是那台机器上普通用户点这个按钮**必然失败** |
+| 4 | 整条链路**零日志**，输出只打在控制台窗口上 | 缺口，也是「说不清报什么错」的根因 |
+
+用户问「这个备份如果放在应用管理端是不是更合适呢」——**是**。所以本次**不修那四条，而是
+消掉它们脚下的地**：三条（1 除外）只在应用进程**之外**才成立——服务的每条主路在进程内
+本来就拿得到配置（不必再读那个只授 SYSTEM 的 `.env`），而后端有 `server.log`、审计表与界面。
+
+**五项用户裁决**：①报错内容 = 四种都见过（诊断依据，非需求）②触发方式 = **局域网定时 +
+单机启动时各一次** ③备份位置 = **支持配第二路径** ④备份文件 = **提供下载按钮**
+⑤定时那一次 = **后端内置**（服务启动时 + 之后每小时检查；**完全不需要 Windows 计划任务**）。
+第 5 条把计划任务整条分支删掉了：`install.ps1` 不必多注册一个任务，也就不存在「卸载时清任务」。
+
+**两条架构约束（用户原话，逐字）：**
+
+1. 「要注意一点， 配置在应用系统中的备份， **不应该依赖OS(WINDOWS或linux)， 均可以适用**」
+   —— 已落实：整个备份层**没有一处操作系统判断**。`find_mysqldump` 按平台枚举候选位置
+   （`shutil.which` → Windows 的 `C:\Program Files\MySQL\MySQL Server *\bin` → darwin 的
+   `/usr/local/mysql/bin`），**不读注册表、不做 `os.name` 检查、不询问「用法」**（`single` /
+   `lan` 共用同一套定时），同一套代码 Windows 与 Linux 上都能跑。
+2. 「再提醒下， 所有sqlite的数据库都不存在， **必须基于mysql 8以上版本**」—— 与 §20 一致：
+   `test_backup.py` 的 35 条全部跑在真 MySQL 8 上（`db_session` / `throwaway_database`
+   那套夹具），**没有一条 sqlite 路径**。
+
+#### 5.25.2 五个新文件、一张新表、一个薄壳
+
+| 文件 | 行数 | 职责 |
+|---|---|---|
+| `backend/app/services/backup_service.py` | 964 | **逻辑唯一一处**：找 mysqldump、建目录、跑 dump、算 sha256、拷第二路径、按 `keep_days` 清理、去重、并发锁、写记录 + 审计、`failure_message`、`start_backup_scheduler` |
+| `frontend/src/features/admin/AdminBackupPage.vue` | 416 | 新页「数据备份」：状态卡 / 配置四项 / 「立即备份」/ 历史表（含下载） |
+| `backend/app/api/v1/backup.py` | 140 | 三个端点 |
+| `backend/app/models/backup.py` | 99 | `backup_record` 表 |
+| `backend/app/db/backup.py` | 85 | CLI 入口 `python -m app.db.backup`（`备份数据.bat` 现在调的就是它） |
+| `backend/app/tests/test_backup.py` | 905 | 35 条，真 MySQL |
+| `backend/alembic/versions/0024_backup_record.py` | 83 | expand-only、无 PRECHECKS |
+
+**为什么必须落表**（不是扫目录）：用户的原始痛点是**静默失败**，而只扫目录答不出「自动
+备份失败过几次」——**自动那一次失败恰恰是完全静默的**（凌晨、没人看着、连窗口都没有）。
+那正是这次要修的那个 bug 原样搬到新地方。所以 `backup_record` 照 `export_job`（§29）的形状：
+
+```
+trigger String(16)  AUTO / MANUAL / CLI
+status  String(16)  SUCCEEDED / FAILED
+file_name / file_size / file_sha256 / message(Text, 截断 1000)
+operator_id FK user_account.id nullable   ← 自动那一次没有操作人
++ TimestampMixin
+```
+
+**不写 `started_at` / `finished_at`**：行在结束时写一次，`created_at` 就是「备份时间」，
+与导出中心那一列同源；多两个时间戳只是同一件事的三个说法。**`message` 一个列担两种话**
+（失败原因 / 成功但第二副本没拷成），由 `status` 分辨——拆成两列会让其中一列常年为空。
+
+**「今天该不该再跑一次」是现算的**（`succeeded_today`）：库里只写「跑过没有、成没成、
+文件叫什么」，判据是**今天已有一条 `SUCCEEDED` 且那个文件还在盘上**。读表而不是读目录，
+所以**手动点过一次也会抑制当天自动的那一次**。与 §12 / §19 / §29 的「存事实、推结论」同口径。
+
+**手动与定时有一处刻意的不对称**：`run_backup`（手动/CLI）**不查重**——用户按了按钮就是要
+一份新的；查重只住在 `run_scheduled_backup` 那一路。并发靠模块级 `threading.Lock`，手动那
+一路拿不到锁回 **409「正在备份中」**（不排队：让用户看着转圈的按钮等一次不属于他的备份更糟）。
+
+**口令绝不进命令行**（Windows 上任何账号都能通过 WMI `Win32_Process` 读到别的进程的命令行，
+§18 已为提权写过同一条），也绝不进日志：连接参数复用 `db/mysql_url.py` 的
+`parse_database_url` + `client_options_file`，写成 `tempfile` 里的 `--defaults-extra-file`，
+`try/finally` 删掉。`test_the_password_never_reaches_the_command_line_or_a_leftover_file` 钉住它。
+
+**★ 借这次多修了一个只有备份这条链路才会踩到的坑**：`client_options_file` 里每个值从
+`user=root` 改成 `user="root"`（`db/mysql_url.py` 新增 `_option_value`）。选项文件里 `#` 与
+`;` 是注释开始符，而且**在值中间也生效**——一个含 `#` 的口令会被静默截断，而 `mysqldump`
+报出来的是 **`Access denied`**，与「密码打错了」长得一模一样，人会去重打密码（与那一段
+docstring 里「URL 没解码时也是这句话」是同一个坑的另一半）。引号里只有 `\` 与 `"` 是转义符，
+那两个自己转义，其余（`@`、`:`、空格、中文）引号原样收着。`test_deploy_bootstrap.py`
+另加一条 `test_the_option_values_escape_the_two_characters_quoting_cannot_hold` 钉住这两个字符。
+
+**原因 2 的正面处置**：`_DumpFailed(returncode, output)` 把那句 stderr **挂进异常自己的
+文本里**（`super().__init__(text)`），`failure_message` 原样返回、**不加类型名前缀**——
+`test_failure_message_keeps_the_dump_tools_own_words` 钉住它。另有一条
+`test_a_dump_that_hangs_is_aborted_with_a_readable_reason`：卡住的 dump 也要有一句人话。
+
+#### 5.25.3 ★ 下载按钮是 §4 的一次**有意例外**，理由与护栏都写进 §34
+
+管理员按 §4 的 `STUDENT_PSYCH_DETAIL` 是 **`NONE`**——他看不到一名学生的档案，却能下载一份
+**含全部学生心理数据、答卷与账号口令哈希的整库 dump**。这与 §4 那条「受控导出不能成为绕过
+心理详情的旁路」**直接冲突**。用户已裁决要下载按钮，所以处置是**把例外写明并给它加护栏**，
+不是假装它不存在：
+
+- 限定 `ORG_ACCOUNT: {MANAGE}` —— 唯一拿得到它的角色就是管理员本身；
+- **每次下载写审计**，`action="下载数据库备份"`，`detail` 里明写**「整库原始数据，不可能
+  遮蔽」**——照 §8「导出审计必须记录遮蔽模式」：一份备份**没有**遮蔽这一档，这句话必须出现
+  在轨迹里，而不是靠读者自己去想（`test_the_download_is_audited_with_the_no_masking_sentence`）；
+- 文件名从记录里取、`resolve()` 后必须仍在备份目录内（防穿越）；
+- **下载时重算 sha256 与记录比对，对不上回 409 不发文件**（照 `download_export_job`）。
+
+**不许顺手关掉它、也不许当先例推广**——关掉就没了用户要的那个功能。
+`test_only_the_admin_reaches_the_backup_endpoints` 钉住护栏那一半。
+
+**审计由服务层写，这是全库唯一的一处偏离**（其余每一处都是路由写）：理由是**自动那一次
+没有路由**。`write_audit` 的 `actor` / `request` 本来就可选（§8 里未登录的系统事件本就该有
+一行、界面显示 `—`），拆成「路由写手动、服务写自动」会让同一次动作有两个写入方。
+
+#### 5.25.4 定时住在 `run_server.py` 的 `while True` 之前
+
+```python
+from app.services.backup_service import start_backup_scheduler
+
+start_backup_scheduler()      # 只起一次；daemon 线程
+                              # ★ 无参：它要读的配置住在 system_setting 里，与 .env 无关
+while True:
+    wait_for_database(...)
+    ...
+```
+
+**★ 它刻意不收 `settings` / `logger` 参数**：要读的四项配置（目录 / 第二路径 / 保留天数 /
+自动开关）全在 `system_setting` 的 `backup` namespace 里，由线程自己按请求-响应那一套从
+库里取；而日志走 `logging.getLogger(...)`，与 `run_server.py` 的 `configure_logging()` 同一个
+根。传一份 `settings` 进来不但没用，还会让人以为备份目录来自 `.env`——**那正是这次要消掉的
+东西**（原因 3：`.env` 在局域网下普通用户读不到）。
+
+写进循环体里的话，**每次崩溃重启都会多起一个**。线程体自己先 `wait_for_database`（开机时
+MySQL 往往还没起来）→ 跑一次（按去重规则）→ `time.sleep(3600)` 循环；**任何异常都吞进
+日志**，绝不影响主循环。三条刻意的取舍：
+
+- **不放 `app/main.py` 的 lifespan**：pytest 每一个 `TestClient` 用例都会走一次 lifespan，
+  那会让几百条后端用例各跑一次 `mysqldump`。`run_server.py` 是**生产专用**启动器（计划任务
+  跑的就是它），`pytest` 与 `make backend` 都不经过——「启动时备份一次」只有放在这里才落在
+  空位置上。全仓只有 `run_server.py` 一个调用点（`app/main.py` 里没有 backup 的 import）。
+- **daemon 线程**：让服务启动不被一次 dump（或一个断掉的网盘）拖住。
+- **`auto_enabled` 关掉时那一路「每轮什么都不做」而不是退出**——退出的话，管理员在界面上
+  重新打开要**等到服务重启**才生效，而那看起来像「没保存住」。它是 `DEFAULTS` 里第一个 bool。
+
+#### 5.25.5 Windows 侧：`ops.ps1` 缩成薄壳，卸载保住备份
+
+| 位置 | 处置 |
+|---|---|
+| `Find-Mysqldump` | **整个删掉**（连同那个 `-replace` bug）——不是修它，是消掉它（「同一处只许有一个定义」） |
+| `Backup-Database` | 缩成薄壳：`Invoke-Python @('-m','app.db.backup')`，退出码非 0 时把 Python 打的那句中文原样留给操作员 |
+| `[string]$BackupDir` 与 `install.ps1` 传参那一处 | **删掉**——配置已搬进应用，再留一个命令行覆盖就是第二个定义 |
+| `$needsAdmin` | **不动**。备份仍不该弹 UAC |
+| `Remove-Item $InstallDir -Recurse` | **卸载要保住备份**（见下） |
+
+**卸载会连默认备份目录一起删**（`ops.ps1` 是 `Remove-Item -LiteralPath $InstallDir -Recurse`，
+而默认备份目录就在 `<安装目录>\backups` 底下）。§18 说「卸载不删数据」，所以数据库里的东西
+不会丢——但**「系统在帮我备份」与「备份被静默删掉」不能同时成立**。处置：删除之前，先把
+里面的 `*.sql` 搬到 `<安装目录>-backups`（`C:\xinliceping\backups` → `C:\xinliceping-backups`）
+并在输出里写明新位置；**移动失败就不删**，打印路径让操作员自己搬——宁可留一个半卸干净的
+目录，也不能把用户唯一的一份离线副本悄悄带走。
+
+`备份数据.bat` **保留**（薄壳，与 §18 那两枚手工启动按钮同一个先例：一键安装装不完时的出路）。
+**action 名单一个都不动**（仍是八个），所以 `ValidateSet` / `ops\备份数据.bat` /
+`test_windows_assets.py` 那条「恰好八个」的断言三处都不必改。
+
+#### 5.25.6 版本、配置与文档
+
+- `backend/app/version.py` → **`2.2.0`**（`VERSION_LABEL` 自动变 `V2.2`）+ 唯一的镜像
+  `frontend/package.json`（`npm run build` 输出里印着 `xinliceping-frontend@2.2.0`）。
+- `settings_service.DEFAULTS` 新增 **`backup`** namespace：`dir`（空 = `<安装目录>\backups`，
+  与 `ops.ps1` 的既有默认值同址，所以没配过的实例行为一字不变）、`secondary_dir`（空 = 不
+  复制第二份；拷失败不算备份失败，只写一句警告）、`keep_days`（30，与既有值一致）、
+  `auto_enabled`（true）。放 `system_setting` 而不是 `.env`——后者在局域网下普通用户读不到
+  （原因 3），而备份路径正是运维该在界面上改的东西。**目录的实际落点由服务端展开后发给界面**
+  （§9：一个写着「留空即默认」的输入框答不出「那我这台机器上到底落在哪」）。
+- `frontend`：`api.ts` 的 `SettingsNamespace` 联合类型 + `SystemSettings`、`useSettings.ts`
+  的 `FALLBACK`、`routes.ts` 一条路由（`meta: { role: 'admin', title: '数据备份' }`）、
+  `AppLayout.vue` 导航项、`labels.ts` 的 `BACKUP_TRIGGER_LABELS`（自动 / 手动 / 命令行）与
+  `BACKUP_STATUS_LABELS`（成功 / 失败）+ `backupStatusTone`。**两张表都没有 `*_ORDER`**：
+  历史表按时间排、不按枚举排（§3 第四面要求把这个「为什么没有」写进那张表的 docstring）。
+- `CLAUDE.md` 新增 **§34**（4909 行）：表与「存事实、推结论」的关系、定时为什么住
+  `run_server.py` 的 `while True` 之前、**下载按钮是 §4 的有意例外**（理由 + 护栏 + 不许顺手
+  关掉）、审计由服务层写这唯一一处偏离、卸载保住备份。
+- `deploy/windows/部署说明.txt`：「关于备份」整节重写（`528` 行起）——它此前说的是那个会报错
+  的按钮；卸载那一节补一句「备份会被搬到哪」；按钮清单同步。
+- `deploy/README.md` / `README.md`：`python -m app.db.backup` 这条 CLI 与它的配置来源。
+
+#### 5.25.7 跑数与 DoD 回填
+
+- Backend Tests：**914 passed / 0 failed / 549.60s**（`make test`，独占跑，日志
+  `/tmp/xlp-test-v220.log`，`EXIT=0`）。上一版基线 **874 passed / 528.32s**（§5.24.7），
+  差 **+40 条**，主要来自 `test_backup.py`（新文件，日志口径 36 条 = 35 个 `def` + 1 条参数化
+  展开）、`test_windows_assets.py` +3、`test_deploy_bootstrap.py` +1（另有 8 条参数化展开）。
+  **warning 仍是 5 条**，与上一版逐条相同（§23 那条 SQLAlchemy 笛卡尔积误报的两处）。
+- 全量 E2E：**首轮 208 passed / 2 failed**（`workers: 1` 权威口径），**用例总数仍是 210 条**
+  ——`/admin/backup` 加进了 `e2e/vocabulary.spec.ts` 的 `ROLE_PAGES`（管理员那一组），所以这一页
+  的**静态像素**进了词汇扫描网（页头那句不可遮蔽的说明、目录落点那一行、四个配置字段的中文标签）；
+  但**不为它造数据**，所以条数不变。**两条红在哪、以及它们不是用例的问题，见下面单独一段。**
+- 定向守卫：`test_backup.py`（35 条）+ `test_windows_assets.py`（+3 条：备份薄壳两条、
+  卸载搬备份一条）+ `test_deploy_bootstrap.py`（+1 条：`_option_value` 的转义）
+  + `test_migrations_build_the_models.py` + `test_sql_schema_matches_models.py` → 全绿。
+  `test_ensure_schema.py` 与 `test_app_version.py` 只改字面量（`HEAD` 常量 `0023` → `0024`、
+  `V1.1` → `V2.2`），不增用例。
+
+**★ 那两条 e2e 红，如实记（不许写成「已修」）：**
+
+| 用例 | 报的什么 | 现场 |
+|---|---|---|
+| `app.spec.ts:747:7 › Counselor Workbench › counselor sees student list`（耗时 **9.9m**） | `Test timeout of 30000ms exceeded` + `page.waitForURL: … waiting for navigation to "/counselor/workbench" until "load"` | 快照是登录页，角色页签「心理老师」处于按下态 |
+| `vocabulary.spec.ts:1063:7 › … › 导入明细的筛选项按匹配结论过滤`（耗时 **11.0m**） | 只有光秃秃一句 `Test timeout of 30000ms exceeded`（**没有** `Error: expect(…)` 第二段） | 快照显示**弹层开着、两行都在**、分页写「共 2 条 · 第 1 / 1 页」 |
+
+**决定性实验**：把这两条**单独重跑** → `2 passed (4.3s)`（659ms / 3.1s）。**用例本身没问题。**
+
+已经**证伪**的假设：①与 pytest 并发（全量 test 22:39 结束、`make seed-demo` 23:10 结束、
+e2e 23:10:5x 才开始，隔了 31 分钟）；②请求失败（#206 的 6 个请求**全部发出且全部 200**，
+含 `&keyword=` 与 `&match_group=error|ready`）；③超时被某处放大（`rg 'setTimeout|test\.slow|
+timeout' e2e/` 找到的几处都是局部小值，**没有全局放大**）；④vite 在 e2e 期间重编译
+（dev server 日志尾部只有 `9:48 PM page reload` / `10:09 PM hmr update`，都在 e2e 之前）。
+
+**剩下的机制假设（未坐实）**：`vite.config.ts` 的 `proxy: { '/api': 'http://127.0.0.1:8000' }`
+是**字符串简写**、没配 `timeout` / `proxyTimeout` / agent → http-proxy 复用 keep-alive
+socket，而 uvicorn 空闲 5 秒关连接 → 半开 socket 上的请求挂住。四条证据都吻合（后端日志里
+看不到、前端一直转圈、单独跑绿、跑久了才出现）。**另一个没有解释的量**是 `(9.9m)` / `(11.0m)`
+与 30 秒 test timeout 不相称——一个可能的方向是 **browser context 的创建算在 fixture setup
+里、不计入 test timeout**，而 `make test` 的 `25.7 − 9.9 − 11.0 ≈ 4.8 分钟`与上一版
+`4.3m` 基线吻合，所以**整体并未变慢，慢的全部来自那两次挂起**。
+
+**DoD：**
+
+- [x] 备份逻辑全部在 Python 里，`ops.ps1` 只剩薄壳，`Find-Mysqldump` 整个删掉；
+- [x] `backup_record` 表 + 迁移 `0024`（expand-only / 无 PRECHECKS），两份
+      `upgrade_from_*.sql` 与 `schema_mysql8.sql` 同步刷新；
+- [x] 定时住在 `run_server.py` 的 `while True` **之前**，不注 Windows 计划任务、不问用法；
+- [x] 三个端点（`GET /admin/backup` / `POST /admin/backup/run` /
+      `GET /admin/backup/records/{id}/download`），下载是 §4 的有意例外 + 四条护栏；
+- [x] `backup` namespace 四项配置进 `system_setting`，目录实际落点由服务端展开；
+- [x] 前端新页 `/admin/backup`（不含在「账号与权限」的页签里——§4 那条教训）；
+- [x] 卸载把备份搬到 `<安装目录>-backups`，搬不动就不删；
+- [x] `__version__` → `2.2.0`，镜像同步，`CLAUDE.md §34` + 两份 README + `部署说明.txt`；
+- [x] `npm run build` 通过（§5.20：模板未闭合只有 build 会报）；
+- [x] 回填实际修改文件、测试结果、Commit SHA。
+
+**Commit SHA：`__COMMIT__`**
+
+#### 5.25.8 已知项与有意取舍
+
+1. **这一页的词汇守卫只覆盖「不依赖数据的那一半」**：`/admin/backup` 已在
+   `ROLE_PAGES` 里（页头、落点那一行、四个配置字段的中文标签都在扫），但三张新词表渲染的
+   **药丸扫不到**——历史表为空时 `DataTable` 渲染的是空态那一行，一个格子都没有
+   （与 §29 那条「清单加成功了、覆盖仍然是零」同形）。**不给它造一条记录**，两条独立理由
+   任何一条足够：①**会改共享库**——手动备份在开发库上落一个真文件 + 一行记录 + 一条审计，
+   跑一次就往备份目录里加一份 dump，而且**只增不减**（`keep_days` 的清理排在每次备份之后，
+   而 e2e 跑不到下一次）；②**会与审计页抢时间线**——`playwright.config.ts` 是 `fullyParallel`，
+   而审计页那条用例只看最新 20 行（与 §24 把 `STUDENT` 移出 `UNTRANSLATED_CODES`、§32 不写
+   导出 e2e 是同一个成因）。处置照旧：**后端钉住（`test_backup.py` 35 条 +
+   `test_windows_assets.py` 3 条），前端那半记成已知取舍**——`AdminBackupPage.vue` 顶部与
+   `vocabulary.spec.ts` 那一处注释里写着同一段话。
+2. **两条 e2e 红的根因未定**（见 5.25.7 那一表）。**它是本轮唯一没有收口的一项**，写在这里
+   而不是写成「环境问题、忽略」——下一个人再撞上时应当先读那四条已证伪的假设。
+3. **`e2e作废批次-<时间戳>` 在累积**：批发批次表里那一族现在是 **49 行**，产地是
+   `e2e/app.spec.ts` 里**既有**的那条用例（不是本轮引入）。与 §29 的 `auth_session`
+   （每跑一次 e2e 多一百多行）同族：**已知且接受**，它不影响任何断言，但共享库上只增不减。
+   `PROGRESS.md` 早先记的是 17 行 —— 它在涨。
+4. **`ops.ps1` 薄壳的真机行为开发机证明不了**（§18 那条：Windows 侧那几个文件在开发机上一行
+   都不会执行）。`python -m app.db.backup` 走 `venv` 的那条路、以及安装目录里的实际落点，
+   只有重出包、用户拷过去跑一次才算验过。**本次没有重出包**（用户没要求，且 §5.24 刚出过
+   V2.1.0；要交付时 `make deploy-package`）。
+5. **`purge.py` 与两份 SQL 基线脚本都不动**：备份记录不是「测评数据」，`purge-demo` 的职责
+   是删演示的测评链路。这是**有意的取舍**，不是漏了——顺带也让 `reset_to_baseline.sql` 那条
+   「每一条 DELETE 都挂在 `@admin_id` 上」的不变量不必为一个 `operator_id` 可为 NULL 的表开口子。
+

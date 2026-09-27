@@ -111,6 +111,24 @@ def parse_database_url(url: str) -> DatabaseTarget:
     )
 
 
+def _option_value(value: str) -> str:
+    """把值写成 MySQL 选项文件里**加了引号**的形态。
+
+    **为什么每个值都加引号，而不是只在需要时加。** 选项文件里 `#` 与 `;` 是注释开始
+    符，而且**在值中间也生效**——`password=XinLi#2026` 里的后半截会被当成注释丢掉，
+    于是 `mysqldump` 报的是一句 `Access denied`。那与「密码打错了」**长得一模一样**，
+    而人会去重打密码（`test_the_client_options_file_carries_the_decoded_password` 的
+    docstring 记着同一个坑的另一半：URL 没解码时也是这句话）。
+
+    引号内 `\\` 与 `"` 是转义符，所以这两个字符要自己先转义；其余的（`@`、`:`、`/`、
+    `#`、空格、中文口令）引号原样收着，客户端读回来就是原值。**这条规则由写入方保证**，
+    与 §18 那条「写入方与读取方对『空』的理解必须由写入方保证」是同一条：读它的是
+    mysqldump，我们管不了它怎么解析，只能保证写出去的形状不需要它做任何猜测。
+    """
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def client_options_file(target: DatabaseTarget) -> str:
     """`mysqldump` / `mysql` 认的 `--defaults-extra-file` 的内容。
 
@@ -122,15 +140,18 @@ def client_options_file(target: DatabaseTarget) -> str:
        再抄一份的话，密码里带 `@` 的那种情况会在其中一边悄悄坏掉。
 
     `--defaults-extra-file` 要求调用方自己保证这个文件的权限；`ops.ps1` 把它写在
-    `runtime\\` 下并立刻用 `icacls` 收窄，用完就删。
+    `runtime\\` 下并立刻用 `icacls` 收窄，用完就删。V2.2 起 `backup_service` 也在
+    Python 里用它（写到 `tempfile` 的 0600 文件里，`try/finally` 删掉）。
+
+    值一律加引号，理由见 `_option_value`。
     """
     lines = [
         "[client]",
-        f"user={target.user}",
-        f"password={target.password}",
-        f"host={target.host}",
+        f"user={_option_value(target.user)}",
+        f"password={_option_value(target.password)}",
+        f"host={_option_value(target.host)}",
         f"port={target.port}",
-        f"default-character-set={target.charset}",
+        f"default-character-set={_option_value(target.charset)}",
     ]
     return "\n".join(lines) + "\n"
 

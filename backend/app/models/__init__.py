@@ -18,6 +18,7 @@ from app.models.assessment import (
 )
 from app.models.account import AuthSession, UserAccount, UserScope
 from app.models.audit import AuditLog
+from app.models.backup import BackupRecord
 from app.models.care import (
     CareCaseEvent,
     FamilyContactRecord,
@@ -54,6 +55,7 @@ __all__ = [
     "AssessmentTaskScope",
     "AuditLog",
     "AuthSession",
+    "BackupRecord",
     "CareCaseEvent",
     "ClassGroup",
     "DimensionResult",

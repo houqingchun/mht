@@ -1651,6 +1651,39 @@ CREATE TABLE `professional_report_version` (
   CONSTRAINT `professional_report_version_fk_published_by` FOREIGN KEY (`published_by`) REFERENCES `user_account` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+-- 数据库备份的**每一次尝试**（成功与失败都写一行）。
+--
+-- 为什么必须落表而不是「扫一眼备份目录里有什么」：`备份数据.bat` 的失败方式是
+-- **静默**的（窗口一闪就关），而自动备份比它更安静——凌晨、没人看着、连窗口都没有。
+-- 只扫目录答得出「有哪几份备份」，答不出「失败过几次、为什么」。
+--
+-- 没有 `started_at` / `finished_at`：行是在那次备份**结束时**写一次的，
+-- `created_at`（数据库墙钟）就是备份时间。`status` 只有 SUCCEEDED / FAILED，
+-- **没有「进行中」**——中间态从来不落库。
+--
+-- `file_name` 存的是**相对备份目录的文件名**，不是绝对路径：备份目录是可以被
+-- 管理员改的（`system_setting` 的 `backup` 组），存绝对路径会让换目录这件事变成
+-- 一批指着不存在路径的历史行。
+--
+-- `operator_id` 可空：自动那一次没有操作人（定时线程、无请求、无 actor），
+-- 与 `audit_log.actor_user_id` 可空同一条。
+CREATE TABLE `backup_record` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `trigger` varchar(16) NOT NULL,
+  `status` varchar(16) NOT NULL,
+  `file_name` varchar(255) DEFAULT NULL,
+  `file_size` bigint DEFAULT NULL,
+  `file_sha256` char(64) DEFAULT NULL,
+  `message` text,
+  `operator_id` int DEFAULT NULL,
+  `created_at` datetime NOT NULL DEFAULT (now()),
+  `updated_at` datetime NOT NULL DEFAULT (now()),
+  PRIMARY KEY (`id`),
+  KEY `ix_backup_record_created_at` (`created_at`),
+  KEY `ix_backup_record_status_created` (`status`,`created_at`),
+  CONSTRAINT `backup_record_ibfk_1` FOREIGN KEY (`operator_id`) REFERENCES `user_account` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 -- =============================================================================
 -- 环上的外键，以及老表指向新表的那些
 -- =============================================================================
@@ -1693,7 +1726,7 @@ ALTER TABLE `assessment_import_row`
   ADD CONSTRAINT `assessment_import_row_fk_external_record` FOREIGN KEY (`external_result_record_id`) REFERENCES `assessment_external_result` (`id`);
 
 
--- 36 张业务表到此为止（另有一张 Alembic 自己的 alembic_version，不由这里建）。
+-- 37 张业务表到此为止（另有一张 Alembic 自己的 alembic_version，不由这里建）。
 --
 -- 建完之后必须再跑一次：
 --   python -m app.db.ensure_schema      # 校对 + 补 alembic_version

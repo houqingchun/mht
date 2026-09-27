@@ -24,6 +24,12 @@ backend/.env
 # `/var/` 只匹配仓库根那一层——裸 `var/` 会吞掉任何一层叫 var 的目录。
 /var/
 
+# 数据库备份的落点（`backup_service.default_backup_dir()` = 仓库根 /backups）。
+# 与上面那条同族：整库 dump，属于这台机器、不属于历史。开发机上它是
+# `<仓库根>/backups`，装出来的实例上是 `<安装目录>\backups`（`backend/` 整个拷进去，
+# 所以 `parents[3]` 在两边各指一处，见 §34）。
+/backups/
+
 # 部署包产物（`make deploy-package`）。`/dist/` 只匹配仓库根那一层，
 # 不用裸 `dist/`——那会把任何一层叫 dist 的目录都吞掉，包括
 # frontend/dist（它上面已经单独列过，但依赖「恰好也叫 dist」是脆的）。

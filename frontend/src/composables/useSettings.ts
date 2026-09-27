@@ -61,6 +61,16 @@ const FALLBACK: SystemSettings = {
     dimension_high_threshold: 30,
     seconds_per_question: 12,
     page_size_default: 20
+  },
+  backup: {
+    // 四个键都照后端 DEFAULTS 抄。**`dir` 留空是有意义的**：它表示「<安装目录>/backups」，
+    // 而那个目录只有服务端算得出来——所以「数据备份」那一页显示的是**接口发回来的实际
+    // 路径**，不是这里的空串。这四条只在 `/admin/settings` 拉不到时用得上（§5 的
+    // fail-safe），而那一页本身就要连后端才打得开。
+    dir: '',
+    secondary_dir: '',
+    keep_days: 30,
+    auto_enabled: true
   }
 }
 

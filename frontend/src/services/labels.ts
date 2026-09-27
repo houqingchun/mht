@@ -1404,3 +1404,55 @@ export const SIGNAL_TYPE_LABELS: Record<string, string> = {
 export function signalTypeLabel(code: string | null | undefined) {
   return labelOf(SIGNAL_TYPE_LABELS, code)
 }
+
+/**
+ * 备份是怎么触发的 —— 后端 `models/backup.py` 的 `TRIGGER_*`（V2.2.0 §5.25）。
+ *
+ * 三个码回答的是「这一次是谁让它跑的」，而这三者在文件列表里长得一模一样：
+ *   - `MANUAL` 手动：有人在这一页上点了「立即备份」；
+ *   - `AUTO` 自动：`run_server.py` 那条定时线程（服务启动时一次 + 之后每小时），
+ *     **没有操作人**——它是唯一一种「没人看着也发生了」的备份；
+ *   - `CLI` 命令行：安装目录里双击了 `备份数据.bat`（`python -m app.db.backup`）。
+ *
+ * **没有 `*_ORDER`**：历史表按时间排，不按触发方式排（§3 第四面要求把这个「为什么
+ * 没有」写下来，否则下一个人读成是漏了）。一张按触发方式排的表答不出用户的问题——
+ * 「最近这几天的备份成没成」只有时间那一列能回答。
+ */
+export const BACKUP_TRIGGER_LABELS: Record<string, string> = {
+  MANUAL: '手动',
+  AUTO: '自动',
+  CLI: '命令行'
+}
+
+/**
+ * 备份的结果 —— 后端 `models/backup.py` 的 `STATUS_*`。
+ *
+ * 只有两档，而**失败那一档必须看得见**：这个功能存在的全部理由就是原
+ * `备份数据.bat` 的静默失败（窗口一闪就关、记不得哪一句）。一行 `FAILED` 留在
+ * 这里、`message` 里带着 mysqldump 自己那句话，就是那件事的正面处置——
+ * 备份失败必须留下痕迹，而不是不留痕迹地什么都没发生。
+ *
+ * **没有 `*_ORDER`**，同上。
+ */
+export const BACKUP_STATUS_LABELS: Record<string, string> = {
+  SUCCEEDED: '成功',
+  FAILED: '失败'
+}
+
+export function backupTriggerLabel(code: string | null | undefined) {
+  return labelOf(BACKUP_TRIGGER_LABELS, code)
+}
+
+export function backupStatusLabel(code: string | null | undefined) {
+  return labelOf(BACKUP_STATUS_LABELS, code)
+}
+
+/**
+ * 失败给红色、成功给绿色。认不出的码走 `gray`（`labelOf` 会原样回退那个码，
+ * 漏码要看得见——§3 那条既有约定）。
+ */
+export function backupStatusTone(code: string | null | undefined): Tone {
+  if (code === 'SUCCEEDED') return 'green'
+  if (code === 'FAILED') return 'red'
+  return 'gray'
+}

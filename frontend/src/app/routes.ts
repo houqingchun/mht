@@ -17,6 +17,7 @@ import DataCenterPage from '../features/admin/DataCenterPage.vue'
 import SettingsPage from '../features/admin/SettingsPage.vue'
 import TasksPage from '../features/admin/TasksPage.vue'
 import ExportCenterPage from '../features/admin/ExportCenterPage.vue'
+import AdminBackupPage from '../features/admin/AdminBackupPage.vue'
 import AuditPage from '../features/admin/AuditPage.vue'
 import ReportOverviewPage from '../features/analytics/views/OverviewPage.vue'
 import ReportDimensionsPage from '../features/analytics/views/DimensionsPage.vue'
@@ -90,6 +91,11 @@ export const routes: RouteRecordRaw[] = [
       // 德育领导没有这一页——他的受控导出是 `PROGRESS_SUMMARY`，那是**聚合**，
       // 而他手上没有一处会建导出作业的入口。
       { path: 'admin/exports', component: ExportCenterPage, meta: { role: 'admin', title: '导出中心' } },
+      // 数据备份（V2.2.0 §5.25）：**新开一页，不塞进「系统配置」或「账号与权限」的页签**。
+      // 依据是 §4 那条教训——2026-09-17 把「系统管理」改名「账号与权限」，正因为它把
+      // 「和系统有关的」都吸了过去，同一个功能于是有了两个入口。备份是运维动作，
+      // 与「这一页上的其他人能不能登录」不是同一件事。
+      { path: 'admin/backup', component: AdminBackupPage, meta: { role: 'admin', title: '数据备份' } },
       { path: 'admin/audit', component: AuditPage, meta: { role: 'admin', title: '审计日志' } },
     ]
   }
