@@ -4072,7 +4072,7 @@ git diff
 - Backend Tests：无回归 —— `make test` → **869 passed, 5 warnings in 554.61s (0:09:14)**，
   退出码 0。零后端改动，按发布前口径执行；5 条 warning 是既有的 cartesian product SAWarning
   （已知误报，见 CLAUDE.md §23 末段），本轮未新增。
-- Commit SHA：（本节回填提交，见下一条提交）
+- Commit SHA：`1d0a8c7`（feat: V2.0.1 §5.16 报告列表读取竞态守卫）
 - 遗留问题：无（本轮未新增）。本轮实测到的两处**均已在 §5.16.3 登记为本轮禁止实施的技术债**，
   未动手：TD-01 —— `professional_report` 列表无服务端分页/限量（本次跑 e2e 时「我的报告」
   表头实录 **459 份**，且该表无删除接口、每轮全量 e2e 净增若干条、从不清理）；
