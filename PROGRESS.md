@@ -3827,7 +3827,10 @@ return canNewVersion.value ? 'newVersion' : null
 
 ##### 八、提交
 
-见本节下方的 SHA 回填。
+`e4d240e feat: V2.0.1 §5.15.4 UX-FINAL-03 专业报告工作台精修（心理老师端三个文件）`，
+已 push 到 `origin/V2.0.1`（`78cfdca..e4d240e`）。
+
+**至此 §5.15 UX-FINAL 三项（01 / 02 / 03）全部完成并推送，§5.15.6 第 12 项收口。**
 
 **下一次提交要带上的**：`StudentRecordsPage.vue:297` 的作废 notice 仍有 whitespace 折叠
 空格（与 §5.15.9 同源，两轮都刻意未改）。
