@@ -1259,13 +1259,18 @@ input {
 /* Purely decorative (see the `aria-hidden` on the aside itself): the product
    name, subtitle, role tabs, form and privacy note all live in the panel, so
    §5.22.5's "the SVG is never the sole carrier of business information" holds
-   by construction rather than by review. */
+   by construction rather than by review.
+
+   The illustration fills the whole column and the caption is laid over it
+   (§5.22 追加调整). `flex-end` puts the caption at the bottom — the standard
+   hero arrangement, and the one that keeps it off the busiest part of the
+   artwork. The gradient below is still here as the pre-load / no-image colour,
+   so the column never flashes as an empty white box. */
 .login-brand {
   position: relative;
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  gap: 26px;
+  justify-content: flex-end;
   padding: 44px 40px;
   background: linear-gradient(160deg, #eef5fa 0%, #e8f1ef 100%);
   border-right: 1px solid #e2eaf1;
@@ -1274,12 +1279,38 @@ input {
 
 /* Frozen asset (§5.22.2): referenced only. The SVG's own viewBox / paths /
    gradients are untouched and it is never rasterised — everything below is
-   outer-container sizing, which is the one thing that section allows. */
+   outer-container sizing (inset / object-fit), which is the one thing that
+   section allows. `cover` is what makes it fill the column; the artwork is
+   portrait (960×1080) and this column is landscape, so the crop lands on the
+   top and bottom edges and the subject stays centred. */
 .login-brand-art {
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
-  max-height: 340px;
-  object-fit: contain;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+}
+
+/* Contrast scrim for the caption. It is a separate layer rather than a
+   background on `.login-brand-copy` on purpose: a box with its own background
+   would read as a card sitting on the artwork, while this fades out into it.
+   `pointer-events: none` because it covers the illustration and must never
+   intercept anything. */
+.login-brand::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0) 38%, rgba(255, 255, 255, 0.86) 100%);
+  pointer-events: none;
+}
+
+/* Above both the artwork and the scrim. The two absolutely-positioned layers
+   are `z-index: auto`, so this only has to beat them by one. */
+.login-brand-copy {
+  position: relative;
+  z-index: 1;
 }
 
 .login-brand-slogan {
@@ -1399,11 +1430,27 @@ h1 {
   color: #647386;
 }
 
+/* One row that never wraps. It was `repeat(4, 1fr)` — four equal ~91px columns
+   holding a five-character label, so the margin was a few pixels and any font
+   wider than the one it was tuned on pushed 「系统管理员」onto a second line
+   (reported by the user). `1fr` distributed the *total*, which is what left no
+   slack; `flex: 1 1 auto` distributes the *surplus* instead, so every tab keeps
+   its own text width first and they grow together with whatever is left over.
+   `min-width` is deliberately **not** reset to 0: a flex item defaults to
+   `min-width: auto` (= min-content), and with `nowrap` that is exactly the
+   text's full width — that default is what makes "never wraps" structural
+   rather than a tuned coincidence. Too narrow a column now overflows visibly,
+   which is the failure mode we want: a wrapped label just looks like a taller
+   button and hides itself. */
 .role-tabs {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  display: flex;
   gap: 8px;
   margin: 24px 0;
+}
+
+.role-tabs button {
+  flex: 1 1 auto;
+  white-space: nowrap;
 }
 
 .role-tabs button,
@@ -3659,7 +3706,14 @@ tbody tr:hover td {
 }
 
 @media (max-width: 680px) {
-  .role-tabs,
+  /* `.role-tabs` is a flex row now (see the rule above), so "one per line" has
+     to be said in flex terms. Keeping it in the grid group below would have left
+     `grid-template-columns` as a no-op on a flex container — four tabs squeezed
+     into one row, which at 375px overflows. */
+  .role-tabs {
+    flex-direction: column;
+  }
+
   dl,
   .answer-grid {
     grid-template-columns: 1fr;
