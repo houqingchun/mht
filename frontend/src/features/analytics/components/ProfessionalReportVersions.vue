@@ -11,6 +11,10 @@
  * 当前版本是草稿（能改）、当前版本是已发布（锁死、要改先建新版本），两种都成立；
  * 历史版本则一律只读。
  *
+ * 而「历史」这一档在**正被打开**时要多三个字（`versionScopeLabel`，2026-09-27）：
+ * 那时它是「历史版本 · 只读」。选中态的那一圈蓝边说的是「选中了」，不是「打开它之后
+ * 改不了」——两者在屏幕上长得一样，而这一版恰恰是用户马上要往里填字的那一版。
+ *
  * 点一行 = 打开这一版看看当时写了什么（只读，统计快照也是那一版冻结的，
  * 服务端一处都不重算）。选中的判据是**实际显示的那一版**，所以「没选」等价于
  * 「跟着当前版本走」——两者在屏幕上必须长得一样，否则会出现「当前 V2」与「V1」同时高亮。
@@ -29,6 +33,19 @@ const emit = defineEmits<{ select: [versionNo: number] }>()
 
 function activeVersion(item: ProfessionalReportVersion) {
   return (props.selectedVersion ?? props.currentVersion) === item.version_no
+}
+
+/**
+ * 第二枚药丸的文案：这一版与我此刻改的是不是同一版（文件头那个维度）。
+ *
+ * **正被查看的那一版历史必须自己说出「只读」**（§5.15.4 验收③：历史版本不能出现可造成
+ * 「正在编辑历史版本」误解的主操作）。此前三档没有名字上的区别，`.row.active` 那一圈
+ * 蓝边是唯一的提示——而蓝边说的是「选中了」，不是「打开它之后改不了」，两者在屏幕上
+ * 长得一样。用词与 `ReportExportPage` 里那句 `历史版本 · Vn` 同源。
+ */
+function versionScopeLabel(item: ProfessionalReportVersion) {
+  if (item.version_no === props.currentVersion) return '当前版本'
+  return activeVersion(item) ? '历史版本 · 只读' : '历史版本'
 }
 </script>
 
@@ -58,7 +75,7 @@ function activeVersion(item: ProfessionalReportVersion) {
           <span class="row-side">
             <span class="pill" :class="reportStatusTone(item.status)">{{ reportStatusLabel(item.status) }}</span>
             <span class="pill" :class="item.version_no === currentVersion ? 'blue' : 'gray'">
-              {{ item.version_no === currentVersion ? '当前版本' : '历史版本' }}
+              {{ versionScopeLabel(item) }}
             </span>
           </span>
         </button>

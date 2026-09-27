@@ -11,6 +11,11 @@
  *   1. **显示的统计数字是哪一版的**——`displayedReport` 三态，界面上用一句话写明（§9）；
  *   2. **哪些字还没存进库**——`draft` 与 `savedDraft` 逐段比出来的 `dirty`；
  *   3. **离开这一页会不会丢掉它们**——三条边界分开实现（`beforeChange` / 路由 / 刷新）。
+ *
+ * 2026-09-27（§5.15.4）：打开报告之后那条操作条上，「这是**哪一份**报告」不再要靠正文去猜
+ * ——名称 / 编号 / 任务范围 / 最近发布版本四项事实与版本药丸摆在同一行；四枚动作的**主次
+ * 随状态变**（`primaryAction`），蓝色只给此刻真正能往前走的那一枚。两条的理由都写在
+ * 各自那一段注释里。
  */
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink, onBeforeRouteLeave } from 'vue-router'
@@ -164,6 +169,28 @@ const canNewVersion = computed(() => {
 })
 const canExport = computed(() => (opened.value?.versions?.length ?? 0) > 0)
 
+/**
+ * 四枚动作的主次**随状态变**（§5.15.4 第 4 条）：蓝色只给「此刻真正能往前走的那一枚」。
+ *
+ * 改之前 `保存草稿` 恒定是蓝色的，于是**已发布 / 历史只读**时它是一枚被置灰的蓝色按钮，
+ * 而唯一有意义的那一枚（`基于当前版本继续编辑`）是白的——主按钮指着一个按不动的东西，
+ * 是主次关系里最糟的一种。
+ *
+ * 三档：
+ *  · 当前可编辑（未打开但能新建 / 已打开的草稿）→ `save`；
+ *  · 只读时还有出路（当前版本已发布 → 能新建版本）→ `newVersion`；
+ *  · 都不是（正看着历史版本，而当前版本是草稿；或还没报告也没选任务）→ `null`，
+ *    此时**没有**主按钮：前者的出路在顶上那条「回到 Vn（可编辑）」，后者在下面那句
+ *    提示里，两处都由界面自己写明了，不靠一枚点不动的蓝按钮冒充指引。
+ *
+ * **发布刻意不做主按钮**：它生成的是一个永久保留、不可覆盖的版本（§5.13），
+ * 把一个不可逆的动作画成最显眼的那一枚，等于催着人按它。
+ */
+const primaryAction = computed<'save' | 'newVersion' | null>(() => {
+  if (!readOnly.value) return opened.value || canCreate.value ? 'save' : null
+  return canNewVersion.value ? 'newVersion' : null
+})
+
 const publishDisabledReason = computed(() => {
   if (!opened.value) return '先保存草稿，才能发布'
   if (viewingVersion.value !== null) return '正在看历史版本，回到当前版本后才能发布'
@@ -177,6 +204,24 @@ const scopeSummary = computed(() => {
   const names = ids.map(id => taskNames.value[id]).filter(Boolean)
   if (!names.length) return `共 ${ids.length} 个测评任务`
   return names.length === 1 ? names[0] : `${names[0]} 等 ${ids.length} 个任务`
+})
+
+/**
+ * 最近发布版本那一格（§5.15.4 第 1 条：现有数据可得时就要展示）。
+ *
+ * 这一列此前在界面上**一个渲染点都没有**——`latest_published_version` 有类型、只有
+ * `canNewVersion` 一个读者（它判「能不能新建版本」），于是「这份报告上一次发布是哪一版、
+ * 什么时候」在打开报告之后答不出来：`openStateLabel` 说的是**当前**版本。
+ *
+ * 拿不到版本行时只回 `Vn`（不编一个时间）：`versions` 是随详情一起下来的，
+ * 真缺了说明服务端没给，而一个猜的时间戳比没有更糟（§11）。
+ */
+const latestPublishedLabel = computed(() => {
+  const report = opened.value
+  const no = report?.latest_published_version ?? 0
+  if (!report || !no) return '尚未发布'
+  const publishedAt = report.latest_published_at
+  return publishedAt ? `V${no} · ${formatDateTime(publishedAt)}` : `V${no}`
 })
 
 /** 有效期取已有的系统配置（服务端 `settings_service.DEFAULTS` 下发），不硬编码第二个 24。 */
@@ -765,13 +810,24 @@ onUnmounted(() => {
   />
 
   <!--
-    打开报告之后的操作条。它把三件事摆在同一处：这是哪一版、下面那些数字是哪一版冻结的、
-    以及怎么回到实时分析。**口径要写进界面**（§9）——「这一页显示的是什么」不写出来，
-    读者会以为改动上面的筛选会影响下面那张表。
+    打开报告之后的操作条。它把四件事摆在同一处：**这是哪一份报告**（名称 / 编号 /
+    任务范围 / 最近发布）、**这是哪一版**（状态药丸）、**下面那些数字是哪一版冻结的**
+    （口径句），以及怎么回到实时分析。**口径要写进界面**（§9）——「这一页显示的是什么」
+    不写出来，读者会以为改动上面的筛选会影响下面那张表。
   -->
   <section v-if="opened" class="card open-bar">
     <div class="open-bar-main">
-      <span class="pill" :class="reportStatusTone(currentVersionStatus)">{{ openStateLabel }}</span>
+      <div class="open-bar-head">
+        <!-- 这枚药丸就是「当前版本号 + 当前版本状态」（`草稿 · V1` / `已发布 · V2` /
+             `历史版本 · V1`），所以下面那张事实表里不再重复一遍。 -->
+        <span class="pill" :class="reportStatusTone(currentVersionStatus)">{{ openStateLabel }}</span>
+        <dl class="open-bar-facts">
+          <div><dt>报告名称</dt><dd>{{ opened.title }}</dd></div>
+          <div><dt>报告编号</dt><dd>{{ opened.report_no }}</dd></div>
+          <div><dt>任务范围</dt><dd>{{ scopeSummary }}</dd></div>
+          <div><dt>最近发布</dt><dd>{{ latestPublishedLabel }}</dd></div>
+        </dl>
+      </div>
       <span class="open-bar-text">{{ modeNote }}</span>
     </div>
     <div class="open-bar-side">
@@ -823,7 +879,7 @@ onUnmounted(() => {
           </label>
           <div class="action-row">
             <button
-              class="btn primary"
+              :class="['btn', { primary: primaryAction === 'save' }]"
               :disabled="(!opened && !canCreate) || readOnly || saving"
               :title="readOnly ? '当前版本只读；要继续修改请先新建版本' : (opened ? '' : '按当前筛选保存一份新报告')"
               @click="save"
@@ -834,7 +890,12 @@ onUnmounted(() => {
               :title="publishDisabledReason"
               @click="publishReport"
             >{{ canPublish ? `发布 V${opened?.current_version}` : '发布' }}</button>
-            <button v-if="canNewVersion" class="btn" :disabled="newVersioning" @click="startNewVersion">基于当前版本继续编辑</button>
+            <button
+              v-if="canNewVersion"
+              :class="['btn', { primary: primaryAction === 'newVersion' }]"
+              :disabled="newVersioning"
+              @click="startNewVersion"
+            >基于当前版本继续编辑</button>
             <button class="btn" :disabled="!opened" title="先保存报告，才有可导出的版本" @click="sub='export'">进入导出设置</button>
           </div>
           <p class="hint" :class="noticeTone" role="status">{{ saving ? '保存中…' : notice }}</p>
@@ -966,7 +1027,14 @@ onUnmounted(() => {
 .empty { text-align: center; padding: 40px 0; color: #708198; font-size: 14px }
 .loading { padding: 40px 0; text-align: center; color: var(--muted) }
 .open-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; padding: 12px 16px }
-.open-bar-main { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0 }
+/* 主区改成两行：上面一行是「这是哪一份报告」（药丸 + 四项事实），下面一行是口径句。
+   原来的单行 flex 放不下四项事实——它们会被挤成一条读不出结构的横排。 */
+.open-bar-main { display: grid; gap: 6px; min-width: 0; flex: 1 1 420px }
+.open-bar-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0 }
+.open-bar-facts { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin: 0; font-size: 12.5px }
+.open-bar-facts > div { display: flex; align-items: baseline; gap: 5px; min-width: 0 }
+.open-bar-facts dt { color: #708198; white-space: nowrap }
+.open-bar-facts dd { margin: 0; color: #2c4257; font-weight: 650; overflow-wrap: anywhere }
 .open-bar-text { color: #4d6580; font-size: 12.5px; line-height: 1.7 }
 .open-bar-side { display: flex; gap: 8px; flex-wrap: wrap }
 .card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap }

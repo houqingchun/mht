@@ -1363,8 +1363,17 @@ async function tabIntoReportList(page: Page): Promise<string> {
  * 并列时 MySQL 不保证按更新时刻排。2026-09-26 实测过：列表头两行是 0224 / 0225，
  * 而这一条要的是编号更大的那一份——修之前每行都是停靠点，一路 Tab 扫得到；
  * 换成 roving tabindex 之后就永远停在第 0 行上了。
+ *
+ * **列表 2026-09-27 起分页了（每页 20 行）**，而 ↓ 在末行会翻到下一页（`ProfessionalReportList`
+ * 的 `onRowKeydownPaged`），焦点跟到新页的首行——所以这一路走下去仍然到得了任何一行，
+ * 只是第 20 行之后每按一次要先翻页。上面那个「典型情况只按几次」的结论一个字没变：
+ * 目标那一份是**刚建的**，服务端按 `updated_at` 降序，它必然排在**第 1 页**里。
+ *
+ * 上限因此不是「列表有多长」，而是一道**防死循环的闸**：走到就停，正常情况下永远碰不到它。
+ * 给到 600 是因为演示库此刻已有四百多份（跑一次 e2e 就多几份），而真要够到第 300 行，
+ * 说明目标不再排在首页了——那时该改的是这条用例的选取方式，不是把这个数继续调大。
  */
-async function arrowToReportRow(page: Page, reportNo: string, limit = 300): Promise<void> {
+async function arrowToReportRow(page: Page, reportNo: string, limit = 600): Promise<void> {
   for (let i = 0; i < limit; i++) {
     const text = await readFocusedReportRow(page)
     if (text.includes(reportNo)) return
