@@ -1,46 +1,46 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 1080" role="img" aria-labelledby="title desc">
-  <title id="title">心晴登录页成长连接插画</title>
-  <desc id="desc">由柔和的蓝绿波浪、成长叶片与连接节点构成的抽象装饰图形</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 1080">
   <defs>
-    <linearGradient id="sky" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#f7fbff"/><stop offset=".55" stop-color="#eef8fb"/><stop offset="1" stop-color="#f8fbf6"/>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#F4FBFC"/><stop offset=".55" stop-color="#F8FCFF"/><stop offset="1" stop-color="#F7FBF8"/>
     </linearGradient>
-    <linearGradient id="waveA" x1="0" y1="0" x2="1" y2=".4">
-      <stop stop-color="#8fc9e8"/><stop offset="1" stop-color="#cfe9f5"/>
+    <linearGradient id="leafA" x1="0" y1="1" x2="1" y2="0">
+      <stop stop-color="#42AFA8"/><stop offset=".55" stop-color="#72C7A6"/><stop offset="1" stop-color="#B9DD82"/>
     </linearGradient>
-    <linearGradient id="waveB" x1="0" y1="0" x2="1" y2=".3">
-      <stop stop-color="#58b9b0"/><stop offset="1" stop-color="#b8dfc9"/>
+    <linearGradient id="leafB" x1="0" y1="1" x2="1" y2="0">
+      <stop stop-color="#239EB5"/><stop offset="1" stop-color="#83CFB0"/>
     </linearGradient>
-    <linearGradient id="leaf" x1="0" y1="1" x2="1" y2="0">
-      <stop stop-color="#4eaaa8"/><stop offset="1" stop-color="#b9df9f"/>
+    <linearGradient id="waveBlue" x1="0" y1="0" x2="1" y2=".2">
+      <stop stop-color="#8CCEF0"/><stop offset="1" stop-color="#DCEFF8"/>
     </linearGradient>
-    <radialGradient id="sun"><stop stop-color="#ffe3a3" stop-opacity=".72"/><stop offset="1" stop-color="#fff2ca" stop-opacity="0"/></radialGradient>
+    <linearGradient id="waveMint" x1="0" y1="0" x2="1" y2=".3">
+      <stop stop-color="#BCE7D0"/><stop offset=".55" stop-color="#DDF2D5"/><stop offset="1" stop-color="#A6D8D2"/>
+    </linearGradient>
+    <filter id="soft"><feGaussianBlur stdDeviation="18"/></filter>
   </defs>
-  <rect width="960" height="1080" fill="url(#sky)"/>
-  <circle cx="110" cy="92" r="245" fill="url(#sun)"/>
-  <path d="M-40 760C165 670 260 760 408 820s310 42 592-85v345H-40Z" fill="url(#waveA)" opacity=".58"/>
-  <path d="M-50 825c180-92 302-46 438 28s310 112 622-16v243H-50Z" fill="url(#waveB)" opacity=".82"/>
-  <path d="M-40 885c212-72 354-16 486 50s286 77 554-9" fill="none" stroke="#fff" stroke-width="5" opacity=".8"/>
-  <path d="M-30 930c205-58 339-13 474 42s303 64 555-21" fill="none" stroke="#d9f0ec" stroke-width="3"/>
-  <g opacity=".78" fill="none" stroke="#7ec6dc" stroke-width="2">
-    <path d="M145 300c132-110 343-94 438 36 91 125 55 293-83 371"/>
+  <rect width="960" height="1080" fill="url(#bg)"/>
+  <g opacity=".12" filter="url(#soft)" fill="#62BEB0">
+    <ellipse cx="155" cy="70" rx="115" ry="48" transform="rotate(18 155 70)"/>
+    <ellipse cx="330" cy="55" rx="92" ry="38" transform="rotate(30 330 55)"/>
+    <ellipse cx="70" cy="315" rx="96" ry="42" transform="rotate(68 70 315)"/>
+  </g>
+  <g fill="none" stroke="#4AAEA8" stroke-linecap="round">
+    <path d="M-20 92C92 112 184 145 288 230" stroke-width="7"/>
+    <path d="M54 111C92 164 107 220 109 288" stroke-width="4" opacity=".75"/>
+    <path d="M137 137C190 185 228 243 246 315" stroke-width="4" opacity=".65"/>
   </g>
   <g>
-    <circle cx="145" cy="300" r="18" fill="#9dd7ad"/>
-    <circle cx="350" cy="245" r="20" fill="#7fbaf0"/>
-    <circle cx="574" cy="346" r="18" fill="#f5cf7b"/>
-    <circle cx="501" cy="707" r="17" fill="#9ed3ee"/>
+    <path d="M42 118C99 99 153 109 200 145c-58 28-111 18-158-27Z" fill="url(#leafA)"/>
+    <path d="M86 164c-20 58-13 112 22 160 31-55 23-108-22-160Z" fill="url(#leafB)"/>
+    <path d="M155 142c58 7 104 35 139 82-61 12-107-15-139-82Z" fill="url(#leafA)"/>
+    <path d="M211 201c-8 66 10 118 55 157 20-65 2-117-55-157Z" fill="url(#leafB)"/>
+    <path d="M273 226c48-7 87 6 118 40-45 22-84 8-118-40Z" fill="url(#leafA)" opacity=".86"/>
+    <path d="M105 284c37 17 61 46 72 86-44 3-68-26-72-86Z" fill="url(#leafA)" opacity=".78"/>
   </g>
-  <g transform="translate(120 425)">
-    <path d="M130 350c4-145 30-238 96-302" fill="none" stroke="#4ca9a4" stroke-width="9" stroke-linecap="round"/>
-    <path d="M133 275c-35-71-77-102-124-106 8 61 46 103 124 106Z" fill="url(#leaf)"/>
-    <path d="M144 217c48-91 116-140 207-153-17 105-86 166-207 153Z" fill="url(#leaf)"/>
-    <path d="M132 317c46-48 96-62 151-43-36 54-87 68-151 43Z" fill="url(#leaf)" opacity=".88"/>
-    <path d="M92 222C68 172 39 151 5 147" fill="none" stroke="#77c1b1" stroke-width="4" stroke-linecap="round" opacity=".7"/>
-  </g>
-  <g fill="url(#leaf)" opacity=".5">
-    <path d="M690 440c29-41 62-55 99-43-19 43-52 58-99 43Z"/>
-    <path d="M635 572c22-33 48-45 79-36-15 34-41 47-79 36Z"/>
-    <path d="M748 630c25-36 54-48 86-37-17 37-45 50-86 37Z"/>
-  </g>
+  <path d="M-40 690C165 638 287 697 415 753c145 63 288 62 585-75v402H-40Z" fill="url(#waveBlue)" opacity=".34"/>
+  <path d="M-40 764c180-76 313-48 449 12 170 75 331 93 591-20v324H-40Z" fill="url(#waveMint)" opacity=".58"/>
+  <path d="M-40 835c205-66 349-26 485 34 174 77 335 82 555-11v222H-40Z" fill="url(#waveBlue)" opacity=".72"/>
+  <path d="M-35 795c183-62 320-32 460 27 176 74 343 88 575-18" fill="none" stroke="#FFFFFF" stroke-width="5" opacity=".88"/>
+  <path d="M-20 875c185-54 326-20 463 34 176 69 339 74 557-13" fill="none" stroke="#F8FEFF" stroke-width="3" opacity=".9"/>
+  <path d="M275 342C375 390 410 516 512 592c95 71 204 65 314-2" fill="none" stroke="#8CD4D2" stroke-width="2" opacity=".38"/>
+  <path d="M278 342C390 397 423 505 512 572" fill="none" stroke="#FFFFFF" stroke-width="3" opacity=".72"/>
 </svg>
