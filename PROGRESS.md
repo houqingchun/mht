@@ -4228,7 +4228,7 @@ git diff
 > `facts()` 都写在第二次 `goto` 之后，于是「概览那一份」读到的是班级页的 DOM（6 行 vs 3 行），而两页
 > 看起来都对。修法是把读数**留在各自那一页上完成**，并把这段推理写进用例 docstring。
 
-### 5.18 V2.0.1 心理老师连续工作体验 Patch（待 AI Coding，先审计后最小修复）
+### 5.18 V2.0.1 心理老师连续工作体验 Patch（已完成，2026-09-27）
 
 > **范围裁决（2026-09-27）**：本节针对心理老师角色的日常连续工作体验，不是 UX-FINAL-04，
 > 不新增业务能力，也不重构心理老师工作台。必须在 §5.17 完成后执行。
@@ -4376,45 +4376,122 @@ git diff
 
 **审计证据**
 
-- [ ] 列出实际检查过的心理老师入口、路由和关键文件；
-- [ ] PATCH-01～03 分别给出“已满足 / 存在断点”的源码证据；
-- [ ] 已满足项不得无理由修改；
-- [ ] 存在断点项说明最小修复方案及为什么不能仅靠现有机制解决。
+- [x] 列出实际检查过的心理老师入口、路由和关键文件；
+- [x] PATCH-01～03 分别给出“已满足 / 存在断点”的源码证据；
+- [x] 已满足项不得无理由修改；
+- [x] 存在断点项说明最小修复方案及为什么不能仅靠现有机制解决。
 
 **功能与回归**
 
-- [ ] 工作台 / 名单进入个案并返回时，已有筛选上下文无无故丢失；
-- [ ] 直接 URL 进入个案有安全默认返回路径；
-- [ ] 业务动作成功后重新读取的工作台 / 队列 / 个案状态与权威业务事实一致；
-- [ ] 已有统计钻取满足“展示数字 = 同源名单”；
-- [ ] 0 与无数据语义无回归；
-- [ ] 不新增心理专业结论或 AI 能力；
-- [ ] 375 / 768 / 1024 / 1440 无新增横向溢出；
-- [ ] Keyboard Focus / Reduced Motion 无回归；
-- [ ] `vue-tsc -b` 通过；
-- [ ] `npm run build` 通过；
-- [ ] 心理老师连续工作路径定向 E2E 通过；
-- [ ] 全量 E2E 按当前权威 `workers: 1` 口径通过；
-- [ ] Backend Tests 无回归；
-- [ ] 完成后回填实际修改文件、测试数字和 commit SHA。
+- [x] 工作台 / 名单进入个案并返回时，已有筛选上下文无无故丢失；
+- [x] 直接 URL 进入个案有安全默认返回路径；
+- [x] 业务动作成功后重新读取的工作台 / 队列 / 个案状态与权威业务事实一致；
+- [x] 已有统计钻取满足“展示数字 = 同源名单”；
+- [x] 0 与无数据语义无回归；
+- [x] 不新增心理专业结论或 AI 能力；
+- [x] 375 / 768 / 1024 / 1440 无新增横向溢出；
+- [x] Keyboard Focus / Reduced Motion 无回归；
+- [x] `vue-tsc -b` 通过；
+- [x] `npm run build` 通过；
+- [x] 心理老师连续工作路径定向 E2E 通过；
+- [x] 全量 E2E 按当前权威 `workers: 1` 口径通过；
+- [x] Backend Tests 无回归；
+- [x] 完成后回填实际修改文件、测试数字和 commit SHA。
 
 #### 5.18.8 AI Coding 完成回填模板
 
-- 审计入口 / 路由：
-- PATCH-01 来源上下文：已满足 / 修复；证据：
-- PATCH-02 动作闭环反馈：已满足 / 修复；证据：
-- PATCH-03 统计钻取同源：已满足 / 修复；证据：
-- 个案详情首屏：已满足 / 修复；证据：
+- 审计入口 / 路由：`/counselor/workbench`（工作台：五张指标卡 + 三档负责人筛选 + 优先队列）、
+  `/counselor/cases`（关怀档案列表：七个状态档 + 搜索 + 批量选择）、
+  `/counselor/cases/:studentId`（`CareCaseDetailPage.vue`）、
+  `/counselor/students/:studentId/records`（`StudentRecordsPage.vue`）。
+  关键文件：`features/care/CasesPage.vue`、`CareCaseDetailPage.vue`、
+  `CounselorWorkbenchPage.vue`、`StudentRecordsPage.vue`、`composables/useSafeBack.ts`、
+  `e2e/app.spec.ts` 的 describe `心理老师工作台的行动优先`。
+  另外核过 `features/analytics/views/OverviewPage.vue` 与 `features/leader/LeaderOverviewPage.vue`
+  的全部 `router.push`：它们是「去看另一页」（维度分析 / 统计 / 重点进展），**不是**
+  「展示数字 → 学生名单」，按 §5.18.4 第一句不纳入本项。
+- PATCH-01 来源上下文：**修复**（两处真实断点，均为「仅靠现有机制解决不了」）。证据：
+  ① `CasesPage.vue` 的 `setQueueFilter` 此前是一次裸赋值（只改内存里那个 `ref`），
+  于是「切到某个状态档 → 进档案 → 返回」时那一档没了，刷新与分享链接同样回不到它
+  ——现状里列表的筛选**本来就住在 `route.query`**（`filter` / `q`），只有这一处没写回去，
+  是漏了一处而不是缺一套机制，所以最小修复就是让它写 URL（`router.replace({ query })`，
+  默认档 `all` 时 `delete` 掉 `filter` 这个键，与既有约定一致）。
+  ② 两个详情页的「返回列表」写的是裸 `router.back()`：从站内点进来是对的，但
+  **直接打开那个地址**（收藏夹 / 分享链接 / 刷新）时 `history.state.back === null`，
+  「返回」把用户带出整个应用（实测退到 `about:blank` 白屏）。修法是
+  `composables/useSafeBack.ts`：`back != null` 才 `router.back()`，否则
+  `router.push(兜底路径)`——**判据失效时退化成「永远回列表」，不会退化成「离开应用」**，
+  这是刻意选的失败方向；两个详情页共用一份实现（同一处只许有一个定义）。
+  未改且**确认已满足**的：owner 档、搜索 `q`、状态档三者都由 URL 承载；全站仍无
+  Pinia / Vuex / 新的导航上下文框架（`grep -c "pinia\|vuex" frontend/src` 为 0）。
+- PATCH-02 动作闭环反馈：**已满足，无需代码修改**。证据：
+  ① `grep -n "\.value -= \|\.value += \|-= 1\|+= 1" frontend/src/features/care/*.vue`
+  **零命中**——全站没有任何「点击按钮 → 本地把 KPI 减 1」的伪闭环；
+  ② 三页的所有业务动作（记录跟进 / 人工复核 / 家庭联系 / 安排复测 / 关闭 / 重新打开 /
+  批量转派）在成功后一律 `await load()` 重新取权威数据（`CasesPage.vue` 2 处、
+  `CareCaseDetailPage.vue` 9 处、`CounselorWorkbenchPage.vue` 7 处）；
+  ③ 工作台卡片的数**从 `cases` 数组现算**（`overdueCount` 等），与它指向的列表同一个来源，
+  构造上不可能漂（CLAUDE.md §11 记着这条的来历）；
+  ④ 既有 e2e `档案详情的下一步操作区吸附在顶栏下，且不含关闭档案`（`:5133`）与
+  `已关闭的档案把四项登记置灰，并指出重新打开的出路`（`:5173`）钉住「动作之后页面状态
+  跟得上事实」。
+  本节未改 Care Case 状态机、跟进规则、逾期规则或优先级算法（`git diff` 可证：改动只在
+  路由 query 与返回行为上）。
+- PATCH-03 统计钻取同源：**修复**（一处真实断点）。证据：全站唯一的「展示数字 → 学生名单」
+  入口是工作台的指标卡 → `/counselor/cases?filter=…`。它此前把当前负责人档一并带进深链
+  （`?filter=overdue&owner=mine`），而**卡片上的数不随负责人档变**（那一档只筛下面的
+  优先队列）——于是同一屏上「卡说 N 人」与「点进去 M 人」可以不等，正是 CLAUDE.md §11
+  那条「指标卡上的数必须与它点进去的那个列表同源」。修法：`goCases()` 不带 `owner`
+  （目的地不比出发点的数字更窄）。
+  判据的挑选是**实测出来的**：先试过「关注档案总数」卡，实测卡 20 / 落点 `?filter=all`
+  工具栏「20 人」——同源，但 `owner=all` 与不带它同义（`normalizeOwnerFilter('all')`），
+  **改前改后都绿，是一条空转判据**；所以改用对负责人档最敏感的「逾期跟进」
+  （实测卡 2 / 修复前落点 1 人 / 修复后落点 2 人）。
+  「0 人时不得钻取出非 0 名单」由构造保证：卡片数与落点列表读的是同一个 `cases` 数组
+  与同一个谓词（`filter=overdue` ↔ `c.overdue === true`），本期未单独为 0 取数。
+  §5.18.4 最后一句要求「没有钻取能力的统计图不新增」——本期**一处都没加**。
+- 个案详情首屏：**已满足，无需代码修改**（逐问落点，`CareCaseDetailPage.vue`）：
+  ① **这是谁** = 页头 `h1`（姓名 · 年级 班级）+ `.page-desc`（性别 · 年龄）+ 摘要格「学号」；
+  ② **为什么关注** = 摘要格「当前关注等级」（药丸）/「关注来源」/「主要关注维度」；
+  ③ **最近发生了什么** = 摘要格「当前阶段」/「最近测评」/「最近跟进」/「下次跟进」；
+  ④ **现有且权限允许的动作** = `.case-next-actions`（sticky）四枚——人工复核 / 记录跟进 /
+  家庭回访 / 安排复测（`role="group" aria-label="下一步操作"`，`caseClosed` 时整体置灰并
+  用 `aria-describedby` 指向 `#case-next-closed-note` 说明出路）+ 页头的「测评记录」
+  「受控导出摘要」「关闭 / 重新打开关注档案」。
+  这十格摘要**不条件渲染**，缺值出 `—`（`未分配` 是负责人那一格专用的措辞），
+  所以「有没有数据」与「数据是空的」在界面上分得开（§14）。
+  未新增任何「系统建议下一步」「智能建议」「综合心理健康指数」类字段；页面布局一个字未动。
 - 实际修改文件（没有则写“无”）：
-- 新增 / 调整测试：
-- 四档响应式：
-- `vue-tsc -b`：
-- `npm run build`：
-- 定向 E2E：
-- 全量 E2E：
-- Backend Tests：
-- Commit SHA：
-- 遗留问题：无 / （只记录，不得扩项）
+  `frontend/src/features/care/CasesPage.vue`（`setQueueFilter` 写 URL）、
+  `frontend/src/features/care/CareCaseDetailPage.vue`（「返回列表」改用 `useSafeBack`）、
+  `frontend/src/features/care/StudentRecordsPage.vue`（同上）、
+  `frontend/src/features/care/CounselorWorkbenchPage.vue`（`goCases` 不再带 `owner`）、
+  `frontend/src/composables/useSafeBack.ts`（**新增**，两处详情共用的安全返回）。
+  未改任何后端文件、任何样式文件、任何 API 客户端。
+- 新增 / 调整测试：`e2e/app.spec.ts` 的 describe `心理老师工作台的行动优先` 新增三条
+  （均在 PATCH-01 / PATCH-03 的断点处，**先证明有东西可扫再断言**）：
+  `从队列切档进档案再返回，切过的状态档与地址栏都还在`（`:5232`）、
+  `直接打开档案详情或测评记录的地址，点「返回列表」不会离开应用`（`:5279`）、
+  `工作台的指标卡点进去，名单人数与卡上那个数一致（切了负责人档也一样）`（`:5305`）。
+  未新增后端用例（本期未改后端）。
+  **变异验证 3/3 全红、逐字节还原**（`cp -p` 落盘备份 + `cmp` 逐字节比对）：
+  M1 `setQueueFilter` 退回「只改 ref、不写 URL」→ `:5269` 红；
+  M2 `useSafeBack` 退回裸 `router.back()` → `:5299` 红（`pathname` 停在 `blank`）；
+  M3 `goCases` 加回 `owner` → `:5325` 红（`toHaveURL(/…filter=overdue$/)` 不匹配）。
+  M1 第一发是**绿的**，而那是**变异写错了**（挑档的循环从 `i = 1` 起，恰好落在起点档
+  「今日待办」上，点它等于没切）——修的是用例（跳过起点档，并把断言从
+  `not.toBeNull()` 收紧成 `not.toBe(startFilter)`），不是判据。
+- 四档响应式：本期未改任何布局 / 样式（改动只在路由 query 与返回行为上），
+  由既有全站守卫 `e2e/vocabulary.spec.ts:1345`「四角色 × 四档视口：全部页面都不横向溢出，
+  窄档底部导航仍在视口里」覆盖，全量 e2e 实测通过。
+- `vue-tsc -b`：`EXIT=0`（`npx vue-tsc -b --force`）。
+- `npm run build`：通过（`✓ built in 1.11s`；产物 `index-C7LwCinW.js` / `index-7tTcegNF.css`）。
+- 定向 E2E：`11 passed (10.5s)`（`npx playwright test e2e/app.spec.ts -g "心理老师工作台的行动优先"`）。
+- 全量 E2E：**200 passed (4.0m)**（权威口径 `workers: 1`；§5.17 的基线是 197，+3 即本期新增的三条）。
+- Backend Tests：**869 passed, 5 warnings in 524.81s**（`make test`，真 MySQL；5 条 warning 是
+  CLAUDE.md §23 / §24 记过的那两条 `cartesian product` 误报，不是回归）。
+- Commit SHA：`1a00492`（`feat:` 那一条；紧随其后的 `docs:` 提交把这批实测数与 SHA 回填进本节）
+- 遗留问题：无
 
 ### 5.19 V2.0.1 心理统计报表专业性与口径一致性终审（待 AI Coding，最后一个报表审计项）
 
