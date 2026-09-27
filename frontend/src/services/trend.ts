@@ -9,9 +9,10 @@
  * 与摘要说的最近一次会在「有会话但没有结果行」的场次上分岔，而两个数就印在同一张卡上
  * （CLAUDE.md §11 那一族：卡片上的数必须与它点进去的那个列表同源）。
  *
- * 放在 `services/` 而不是扔进某个组件：`TrendChart` 与 `CareCaseDetailPage` 是**平级**
- * 的两个使用者，谁 import 谁都不对——组件之间横着引用之后，下一个要用这条判据的人
- * 不知道该从哪一边拿。这里与 `dates.ts` 同一档：无状态、无依赖的纯函数。
+ * 放在 `services/` 而不是扔进某个组件：`TrendChart`、`CareCaseDetailPage` 与
+ * `StudentRecordsPage` 是**平级**的三个使用者（2026-09-27 §5.19 起是三个），
+ * 谁 import 谁都不对——组件之间横着引用之后，下一个要用这条判据的人不知道该从哪一边拿。
+ * 这里与 `dates.ts` 同一档：无状态、无依赖的纯函数。
  */
 
 /**
@@ -52,4 +53,22 @@ export function latestScoreDelta(scored: ReadonlyArray<{ total_score: number }>)
 export function deltaTone(delta: number | null): 'red' | 'green' | 'gray' {
   if (delta === null || delta === 0) return 'gray'
   return delta > 0 ? 'red' : 'green'
+}
+
+/**
+ * 历次分数里的最高与最低（2026-09-27 §5.19，测评记录页的「总分变化」卡）。
+ *
+ * **一场都没有时返回 `null`**，不是 `{ max: 0, min: 0 }`——与 `latestScoreDelta` 同一条：
+ * 编一个 0 出来会让「还没测过」看起来像「每次都考 0 分」，而那是两件事（§11）。
+ *
+ * 它只描述这名学生**自己**考过的那几个数，不含任何跨人比较，也不对那个数下判断：
+ * 「44 分」是一个事实，「他属于哪一档」归 `total_level`（同一张卡上面的药丸与
+ * 下面表里的「关注等级」列）。所以这里既不返回等级，也不返回一句评价。
+ */
+export function scoreRange(
+  scored: ReadonlyArray<{ total_score: number }>
+): { max: number; min: number } | null {
+  if (scored.length === 0) return null
+  const values = scored.map(point => point.total_score)
+  return { max: Math.max(...values), min: Math.min(...values) }
 }

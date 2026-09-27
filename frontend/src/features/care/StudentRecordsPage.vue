@@ -49,6 +49,7 @@ import {
   type StudentAssessmentRecords,
   type FullAnswerItem
 } from '../../services/api'
+import { deltaTone, latestScoreDelta, scoreRange, scoredPoints } from '../../services/trend'
 
 const route = useRoute()
 const router = useRouter()
@@ -126,6 +127,18 @@ const recentDate = computed(() => {
   if (!assessment) return '—'
   return (assessment.tested_at || assessment.submitted_at || '').slice(0, 10) || '—'
 })
+
+/**
+ * 「总分变化」卡右边那四格摘要的取数（2026-09-27 §5.19）。
+ *
+ * 三个判据全部来自 `services/trend.ts`——与档案页「历次趋势」页签**同一处定义**，
+ * 所以两页的「较上次」不可能分岔，同一张卡上的图、摘要与下面那张表也不可能各说各话
+ * （§11 那一族）。`scoredHistory` 只留有分的场：没有结果行的会话画成 0 分是在撒谎，
+ * 缺值直接不出数、让「—」自己说明那一场没有结果——理由写在那个文件的头部。
+ */
+const scoredHistory = computed(() => scoredPoints(records.value?.history || []))
+const latestDelta = computed(() => latestScoreDelta(scoredHistory.value))
+const scoreRangeValue = computed(() => scoreRange(scoredHistory.value))
 
 /**
  * 历次测评的行：在每一场上补一个**按时间顺序**的场次号。
@@ -279,11 +292,57 @@ async function loadAnswers() {
       <div v-if="activeTab === 'history'" style="margin-top:17px">
         <div class="card pad">
           <h2>总分变化</h2>
-          <div style="margin-top:15px">
-            <TrendChart :history="records.history" />
+          <!-- 折线与摘要并排（2026-09-27 §5.19）。布局本体（`.trend-split` /
+               `.trend-facts` / `.trend-latest`）住在 `assets/styles.css`，与档案页的
+               「历次趋势」页签**共用同一条规则**——两页的图宽与摘要列因此逐像素同宽，
+               也不会各写一份（§3 那条「同一处只许有一个定义」）。 -->
+          <div class="trend-split" style="margin-top:15px">
+            <div class="trend-chart">
+              <TrendChart :history="records.history" />
+            </div>
+            <!-- 四格摘要。判据是「有没有历次记录」：一场都没有时整块不出现——左边折线
+                 此刻正写着「暂无历次测评数据」，右边再列四行「— / 0 次 / — / —」是同一句
+                 话的第二遍（§14：空态是一句关于数据的话，不是一块占位）。
+
+                 **这一格与档案页那一格逐条同源**（同一份 `history`、同一组
+                 `services/trend.ts` 判据）。「最近一次」四格**刻意不搬过来**：上面那张
+                 `tier-primary` 卡就是「最近一次测评」（日期 / 等级 / 总分 / 来源 / 评分
+                 状态），同一屏上再写一遍是同一句话说两次；这里换上的「最高分 / 最低分」
+                 回答的是那一格答不了的问题——他历次的分落在什么区间里。 -->
+            <div v-if="records.history.length" class="trend-facts">
+              <!-- 「较上次」与档案页同一格、同一判据（`latestScoreDelta`）：只有一场时是
+                   `null` → `—`，**不是 `0`**——写成 `?? 0` 会让一个只测过一次的学生显示
+                   「与上次持平」，那是一句关于数据的错话（§11）。 -->
+              <div class="detail-row">
+                <span>较上次</span>
+                <b v-if="latestDelta === null" class="muted">—</b>
+                <b v-else :class="`delta-${deltaTone(latestDelta)}`">
+                  {{ latestDelta > 0 ? '+' : '' }}{{ latestDelta }} 分
+                </b>
+              </div>
+              <!-- 「测评次数」数的是**历次记录**（含被 §18.8 降级过的那一场，折线也照旧
+                   画着它的点），与下面那张表的行数同源；不是 `scoredHistory`——
+                   后者要的是「有几场算得出分」。 -->
+              <div class="detail-row"><span>测评次数</span><b>{{ records.history.length }} 次</b></div>
+              <!-- 最高 / 最低只描述他自己考过的那几个数（`scoreRange`），**不含任何跨人
+                   比较**——所以它不显示年级均值，也不给一句评价：那是「班级对照」页签与
+                   上面那枚药丸各自要回答的事。两格相同时（只测过一次、或每次都一样）
+                   照实显示，不合并——合并会让「他考了几次」在这张卡上少一个说法。 -->
+              <div class="detail-row">
+                <span>最高分</span>
+                <b>{{ scoreRangeValue === null ? '—' : `${scoreRangeValue.max} 分` }}</b>
+              </div>
+              <div class="detail-row">
+                <span>最低分</span>
+                <b>{{ scoreRangeValue === null ? '—' : `${scoreRangeValue.min} 分` }}</b>
+              </div>
+            </div>
           </div>
-          <!-- 只有一场时图上是孤零零一个点。明说它画不出趋势，并把读者送去此刻真正
-               答得上问题的那个页签——学生刚入学的第一学期就落在这个分支里。 -->
+          <!-- **恰好一场**时图上是孤零零一个点。明说它画不出趋势，并把读者送去此刻真正
+               答得上问题的那个页签——学生刚入学的第一学期就落在这个分支里。
+               判据是 `=== 1`，不是 `< 2`：一场都没有时这句话是假话（同屏的折线与上面那块
+               摘要都在说「还没有数据」），那种情况归空态回答——「还没测过」与「测了一次、
+               看不出变化」不是一件事（§11 那条 `None` vs `0` 的同一条）。 -->
           <div v-if="records.history.length === 1" class="notice" style="margin-top:12px">
             这名学生只有一次测评记录，还看不出变化。要看他当前相对于同龄人的位置，
             请打开<b>班级对照</b>页签——那一页不需要历史数据。

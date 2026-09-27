@@ -487,9 +487,13 @@ def _roster_school(db_session) -> School:
     return school
 
 
-def _make_grade(db_session, school: School, name: str) -> Grade:
-    """在同一所学校里加一个年级（`class_group_ibfk_3` 要求班级与年级同校）。"""
-    grade = Grade(school_id=school.id, name=name, sort_order=9)
+def _make_grade(db_session, school: School, name: str, *, sort_order: int = 9) -> Grade:
+    """在同一所学校里加一个年级（`class_group_ibfk_3` 要求班级与年级同校）。
+
+    `sort_order` 默认 9（一个明显的「排在最后」的值），只有验报表分组次序的那两条
+    用例才显式传它——它们是这个字段**唯一的读者**，其余用例给什么都不影响断言。
+    """
+    grade = Grade(school_id=school.id, name=name, sort_order=sort_order)
     db_session.add(grade)
     db_session.flush()
     return grade
@@ -644,6 +648,114 @@ def test_each_class_reports_its_own_level_distribution(client, db_session):
             + by_class[("初二", "3班")]["level_distribution"][index]["student_count"]
         )
     assert _report_counts(by_grade["初二"]["level_distribution"]) == [3, 3, 2]
+
+
+def test_report_groupings_follow_the_schools_own_order_not_the_unicode_one(client, db_session):
+    """年级与班级按**学校自己定的次序**（`Grade.sort_order`）排，不按名字的码点序。
+
+    这一条钉的是一次真实的误排（2026-09-27 用户报的）：分组键是快照列上的**中文字符串**
+    （§22），而 `sorted()` 排字符串排的是 Unicode 码点——初 = U+521D，一 U+4E00 <
+    三 U+4E09 < 二 U+4E8C，于是三个年级排出来是**初一、初三、初二**。它长得像一个正常的
+    升序，所以屏幕上没有任何东西看得出它错了；而学校看这一页正是为了横向比这几个年级，
+    相邻两格换了位置，比出来的结论就是反的。
+
+    **两个年级倒着造**（先 初三 再 初二）不是随手写的：这样「按 id 排」与「按码点排」
+    都会给出 初一、初三、初二，正确次序只有按 `sort_order` 才拿得到——一条用例同时钉住
+    两种实现方式。`sorted(names) != names` 那条断言是它自己的**非空转自证**：这组数据的
+    码点序恰好等于正确次序时（比如哪天有人把年级改了名），它当场变红，而不是悄悄变成
+    一条什么都验不到的用例。
+
+    班级那一半同理：年级内按 `ClassGroup.id`（建班次序），年级间跟着年级的序走——
+    `analytics_by_class` 的 `.order_by(Grade.sort_order, ClassGroup.id)` 说的就是这条。
+    """
+    task, rule_version, _ = _baseline(client, db_session)
+    school = _roster_school(db_session)
+    third = _make_grade(db_session, school, "初三", sort_order=3)
+    second = _make_grade(db_session, school, "初二", sort_order=2)
+    _make_class(
+        db_session, task, third, class_name="1班", levels=[NORMAL],
+        rule_version=rule_version, prefix="C3",
+    )
+    _make_class(
+        db_session, task, third, class_name="2班", levels=[NORMAL],
+        rule_version=rule_version, prefix="D3",
+    )
+    _make_class(
+        db_session, task, second, class_name="2班", levels=[NORMAL],
+        rule_version=rule_version, prefix="C2",
+    )
+    db_session.commit()
+
+    data = _report(client)
+    names = [g["grade_name"] for g in data["grades"]]
+    assert sorted(names) == ["初一", "初三", "初二"], (
+        "这组数据的码点序与正确次序相同，这条用例会变成一句空话"
+    )
+    assert names == ["初一", "初二", "初三"]
+
+    assert [(c["grade_name"], c["class_name"]) for c in data["classes"]] == [
+        ("初一", "1班"),
+        ("初二", "2班"),
+        ("初三", "1班"),
+        ("初三", "2班"),
+    ]
+
+
+def test_grade_groups_that_cannot_be_placed_sort_to_the_end(client, db_session):
+    """快照上认不出的年级排在**最后**——它们不属于这个序的任何一端（§3）。
+
+    两类「认不出」：`未分年级`（快照为空）与**快照上那个年级后来被改名 / 删掉**
+    （快照记的是发放那一刻，名册是今天的，§22）。让它们混进中间，会让「初一」看起来
+    排在初三后面——那正是上一条要消掉的错觉。
+
+    **仍然倒着造**（先 初三 再 初二）：少了它，一个「按 id 排」的实现也能让三个认得出
+    的年级排对，这条用例就只剩下面那两类兜底键可验了。
+    """
+    task, rule_version, _ = _baseline(client, db_session)
+    school = _roster_school(db_session)
+    third = _make_grade(db_session, school, "初三", sort_order=3)
+    second = _make_grade(db_session, school, "初二", sort_order=2)
+    _make_class(
+        db_session, task, third, class_name="1班", levels=[NORMAL],
+        rule_version=rule_version, prefix="C3",
+    )
+    # 初二自己也要有条正常的目标行，否则这一组**根本不存在**（分组键是快照上的名字，
+    # 光建一行 `Grade` 不产生任何一组）——少了它，下面的 `names[:3]` 会缺一个而看起来
+    # 像「次序错了」。
+    _make_class(
+        db_session, task, second, class_name="3班", levels=[NORMAL],
+        rule_version=rule_version, prefix="C2",
+    )
+    # 这两名学生的**名册**落在初二 / 2班，而**快照**故意写成名册上认不出的样子——
+    # 一个没有年级快照，一个指向一个不存在的年级名。
+    odd_class = ClassGroup(school_id=school.id, grade_id=second.id, name="2班")
+    db_session.add(odd_class)
+    db_session.flush()
+    for index, snapshot in enumerate([None, "衔接班"]):
+        student = Student(
+            student_no=f"X{index:02d}",
+            name=f"无年级第{index}人",
+            masked_name="无**",
+            school_id=school.id,
+            grade_id=second.id,
+            class_id=odd_class.id,
+        )
+        db_session.add(student)
+        db_session.flush()
+        make_target(
+            db_session, student, task,
+            status="NOT_STARTED",
+            grade_name_snapshot=snapshot,
+            class_name_snapshot="2班",
+        )
+    db_session.commit()
+
+    data = _report(client)
+    names = [g["grade_name"] for g in data["grades"]]
+    assert names[:3] == ["初一", "初二", "初三"]
+    assert set(names[3:]) == {"未分年级", "衔接班"}
+    # 后面那两项之间**不钉次序**：它们并列在同一个「认不出」的秩上，谁先谁后由名字的
+    # 码点序决定，与「排在最后」这条判据无关（钉它就是把一个偶然当成了约定）。
 
 
 def test_a_cohort_is_measured_against_its_own_denominator(client, db_session):

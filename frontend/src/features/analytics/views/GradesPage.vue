@@ -140,10 +140,20 @@ function reset() { report.value = null; error.value = ''; selectedDimCode.value 
            §9 那条「范围数字必须在 UI 上写明口径，否则它冒充全校数字，比不给更糟」。
            所以改成范围中性的说法，并顺手把口径指给读者——页头那枚徽标就写着它。 -->
       <p class="muted tiny">按总分区间分档，每名可评价学生只落一档，三档互不叠加；区间取自本次结果所用的量表评分规则版本。与总览那张图**同一个算法**，所以各年级三档之和恒等于总览那一份。两份数的范围都是你的数据范围（见页头「当前数据范围」）。</p>
+      <!-- `layout="bars"`（2026-09-27 §5.19）：与班级维度画像、筛查关注概览那一处
+           **同一个版式、同一套等级顺序、同一套状态色**。此前这里走默认的纵向柱
+           ——它是这一页最早的做法，`ScoreBandBars` 当初就是为它写的。换成横向条
+           动了两件事，而两件都是为了「几格并排时能横着比」：
+           ① 档序改按 `LEVEL_ORDER`（从重到轻，§3 那张表的规范序）；
+           ② 条长改按「占本年级可评价样本」而不是「相对本格最大的那一档」——
+              后者每格的 100% 是不同的人数，眼睛一定会横着比过去，比出来是反的。
+           统计范围写在每一格的 `h3` 里，所以**不传 `scope-label`**（§5.17.4：
+           范围名不写第二遍）；「可评价 N 人」由组件自己拼，各年级的样本量因此
+           都落在自己那一格里。 -->
       <div v-if="gradesWithSamples.length" class="band-grid">
         <div v-for="g in gradesWithSamples" :key="g.grade_name" class="band-cell">
           <h3 class="band-cell-title">{{ g.grade_name }}</h3>
-          <ScoreBandBars :items="g.level_distribution" :totals="totalBands" :total="g.sample_count"/>
+          <ScoreBandBars layout="bars" :items="g.level_distribution" :totals="totalBands" :total="g.sample_count"/>
         </div>
       </div>
       <div v-else class="data-empty">当前范围内没有可评价的年级样本。没有已计算结果的学生不进这三档，全员未测评与全员一般观察不是一回事。</div>

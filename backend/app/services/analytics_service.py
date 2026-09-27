@@ -412,6 +412,57 @@ def _report_scope(
     return tasks, targets, calculated
 
 
+def _group_ordering(
+    db: Session, tasks: list[AssessmentTask]
+) -> tuple[
+    dict[tuple[int, str], tuple[int, int]],
+    dict[tuple[int, str, str], int],
+]:
+    """报表分组**固定次序**的依据：学校自己定的年级次序与班级建立次序。
+
+    **为什么需要它。** `analytics_report` 的分组键是快照列上的**名字**
+    （`grade_name_snapshot` / `class_name_snapshot`，§22）——那是「发放那一刻学校看到的是谁」
+    的忠实记录，代价是它只剩一个字符串，而字符串的默认次序是 Unicode 码点：三个年级排出来
+    是**初一、初三、初二**（初 = U+521D；一 U+4E00 < 三 U+4E09 < 二 U+4E8C）。**它长得像一个
+    正常的升序，所以没有人会怀疑它错了**（2026-09-27 用户报的），而学校看年级对比页正是为了
+    横向比这几个年级——相邻两格换了位置，比出来的结论就是反的。
+
+    判据只能来自学校自己：`Grade.sort_order`。`auth_service.scope_options` 与
+    `analytics_by_grade` / `analytics_by_class` 早就按它排（`.order_by(Grade.sort_order, …)`），
+    报表这一处此前是**漏了**，不是另有一套口径。**这里不写一张「初一 < 初二 < 初三」的
+    中文表**：完中有六个年级（`GradesPage` 的注释写着这一页要容纳它），而次序是每所学校
+    自己定的。班级那一侧同理用 `ClassGroup.id`（建班次序）——`analytics_by_class` 的
+    `.order_by(Grade.sort_order, ClassGroup.id)` 说的就是这一条。
+
+    键上带 `school_id` 不是多余的：快照列里就有 `school_id_snapshot`（§21 那条复合外键要求
+    它非空），而两所学校各有「初一」时，只按名字查会把 B 校的次序套到 A 校上。今天部署是
+    单校（缺口 2），但这一层不额外花钱。
+
+    查不到的键（快照上那个年级后来被改名 / 删除、`未分年级`）**不在这里兜底**——由调用方把
+    它们排到最后，那是 §3 已经定死的约定（见 `group_payload` 里的 `grade_rank`）。
+    """
+    school_ids = {task.school_id for task in tasks}
+    grade_rows = db.execute(
+        select(Grade.school_id, Grade.name, Grade.sort_order, Grade.id).where(
+            Grade.school_id.in_(school_ids)
+        )
+    ).all()
+    class_rows = db.execute(
+        select(ClassGroup.school_id, Grade.name, ClassGroup.name, ClassGroup.id)
+        .join(Grade, Grade.id == ClassGroup.grade_id)
+        .where(ClassGroup.school_id.in_(school_ids))
+    ).all()
+    grade_order = {
+        (school_id, name): (sort_order, grade_id)
+        for school_id, name, sort_order, grade_id in grade_rows
+    }
+    class_order = {
+        (school_id, grade_name, class_name): class_id
+        for school_id, grade_name, class_name, class_id in class_rows
+    }
+    return grade_order, class_order
+
+
 def analytics_report(
     db: Session,
     user: UserAccount,
@@ -426,6 +477,7 @@ def analytics_report(
 
     tasks, targets, calculated = _report_scope(db, user, task_id, task_ids)
     primary_task = tasks[0]
+    grade_order, class_order = _group_ordering(db, tasks)
     included = [
         (result, session)
         for result, session in calculated
@@ -483,8 +535,34 @@ def analytics_report(
                 )
             grouped_targets[key].append(target)
 
+        def grade_rank(school_id: int, name: str) -> tuple[int, int, int]:
+            """年级的序：**认得出的**按学校自己的 `sort_order`，认不出的排最后。
+
+            「空值与认不出的码排在最后，**两个方向都是**」是 §3 已经定死的约定——它们不属于
+            这个序的任何一端，混进中间会让「最轻的那一档」看起来像有值。这里的两类「认不出」
+            是 `未分年级`（快照为空）与**快照上那个年级后来被改名或删掉**（快照是历史的，
+            名册是今天的，§22）：它们不该挤在初一和初二中间。
+            """
+            known = grade_order.get((school_id, name))
+            return (0, known[0], known[1]) if known else (1, 0, 0)
+
+        def group_rank(key: tuple, group_targets: list) -> tuple:
+            """这一组排在哪。学校取组内第一行的快照列——同一组的两行不会来自两所学校
+            （§21 那条复合外键要求目标行是「这场任务自己那所学校」的学生）。"""
+            school_id = group_targets[0].school_id_snapshot
+            if kind == "grade":
+                return (grade_rank(school_id, key[0]), key[0])
+            class_id = class_order.get((school_id, key[0], key[1]))
+            return (
+                grade_rank(school_id, key[0]),
+                (0, class_id) if class_id is not None else (1, 0),
+                key[1],
+            )
+
         output = []
-        for key, group_targets in sorted(grouped_targets.items()):
+        for key, group_targets in sorted(
+            grouped_targets.items(), key=lambda item: group_rank(item[0], item[1])
+        ):
             group_student_ids = {target.student_id for target in group_targets}
             group_session_ids = {
                 session.id for _, session in included if session.student_id in group_student_ids

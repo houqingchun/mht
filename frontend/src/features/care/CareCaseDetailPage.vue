@@ -1036,10 +1036,14 @@ onMounted(loadComparison)
               </div>
             </div>
           </div>
-          <!-- 只有一场时这一页本来是一排孤零零的点。明说它画不出一张趋势图，
+          <!-- **恰好一场**时这一页本来是一排孤零零的点。明说它画不出一张趋势图，
                并把读者送去此刻真正答得上问题的那个页签——MHT 每学期约一次，
-               学生在校第一年就落在这个分支里。 -->
-          <div v-if="detail.history.length < 2" class="notice" style="margin-top:12px">
+               学生在校第一年就落在这个分支里。
+               判据是 `=== 1`，**不是 `< 2`**（2026-09-27 §5.19 修）：一场都没有时
+               这句话是假话，而同屏的折线此刻正写着「暂无历次测评数据」——两句话
+               在同一屏上各说各的。那种情况归折线的空态回答：「还没测过」与
+               「测了一次、看不出变化」不是一件事（§11 那条 `None` vs `0` 的同一条）。 -->
+          <div v-if="detail.history.length === 1" class="notice" style="margin-top:12px">
             这名学生只有一次测评记录，还看不出变化。要看他当前相对于同龄人的位置，
             请打开<b>班级对照</b>页签——那一页不需要历史数据。
           </div>
@@ -1341,50 +1345,13 @@ onMounted(loadComparison)
   }
 }
 
-/* 「历次趋势」页签：折线与摘要并排（2026-09-27，§5.15.9 UX-FINAL-02）。
- *
- * 折线的 `viewBox` 是 560×224，而全局 `.chart` 是 `width:100%; height:auto`——
- * 在个案详情这张最宽 1560px 的卡里它会撑到 300px 以上，比下面那八个维度 sparkline
- * （每个 34px 高）加起来还高。第一列给它一个上限，右侧空出来的地方放摘要。
- *
- * **是给图设上限，不是让图缩水**：`minmax(0, 660px)` 在宽屏上就是 660px（比原来的
- * 560 viewBox 略宽，点不会挤），窄屏则跟着容器收窄，图本身一个像素都没动。
- *
- * 第二列的下限 190px 是「最近一次」那一格要的：它是「54 分 ＋ 一个药丸」，
- * 药丸是 `white-space: nowrap`（全局 `.pill`），再窄就会把那一行挤出去。 */
-.trend-split {
-  display: grid;
-  grid-template-columns: minmax(0, 660px) minmax(190px, 1fr);
-  gap: 20px;
-  align-items: start;
-}
+/* 「历次趋势」页签的折线与摘要并排（2026-09-27，§5.15.9 UX-FINAL-02）：
+   `.trend-split` / `.trend-facts` / `.trend-latest` 三条**住在 `assets/styles.css`**
+   （`.delta-*` 那一节后面）——2026-09-27 §5.19 测评记录页的「总分变化」卡要用同一套
+   排布，而 scoped 样式出不了这个组件，各写一份就是两个定义。那里同时写着「为什么第一列
+   要设上限」「第二列的下限 190px 是给谁要的」「断点为什么取 860px」。 */
 
-/* 四行之间靠 `.detail-row` 自带的下边框分隔（全局那一条已经是
-   `flex + space-between + padding: 12px 0 + border-bottom`），这里不再另加线——
-   两层线会在第一行上方多出一条孤零零的短横。 */
-.trend-facts {
-  display: grid;
-  gap: 0;
-  align-content: start;
-}
-
-/* 「54 分」与它那一档的药丸同一行。`<b>` 默认是 inline，改成 inline-flex 之后
-   `.detail-row` 的 `space-between` 仍然把它整体推到右侧，而里面那两段之间走 gap。 */
-.trend-latest {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-}
-
-/* 窄屏叠成一列。断点取 860px：再宽一点两列都还站得住（660 + 190 + 20 = 870），
-   而 860 以下图会被压到 600px 以内、摘要那 190px 也开始挤药丸。 */
-@media(max-width:860px) {
-  .trend-split {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-/* `.delta-red` / `.delta-green` / `.delta-gray` 不在这里定义：`DimensionTrends`
-   同一天也要用同一套颜色，而 scoped 样式出不了这个组件——各写一份就是两个定义。
-   它们住在 `styles.css` 里 `.pill` 色调那一节后面（全局那一处）。这里只管排布。 */
+/* `.delta-red` / `.delta-green` / `.delta-gray` 同样不在这个文件里：`DimensionTrends`
+   也要用同一套颜色，而 scoped 样式出不了这个组件——各写一份就是两个定义。
+   它们住在 `styles.css` 里 `.pill` 色调那一节后面（与上面那三条同一处）。 */
 </style>
