@@ -106,6 +106,46 @@ test.describe('Authentication', () => {
     await page.getByRole('button', { name: '退出' }).click();
     await expect(page).toHaveURL('/login');
   });
+
+  /**
+   * 产品版本号显示在品牌区（V2.0.1 用户要求：让使用者在系统内看得到当前版本）。
+   *
+   * 期望值**从 `/public/branding` 现取**，不写死——与「断言品牌文案一律现取」是同一条
+   * 规矩。两条各守一半：
+   * ① 拿得到时，品牌区那一枚必须**等于服务端下发的串**（唯一出处是
+   *    `backend/app/version.py`，CLAUDE.md §19），并且形如 `V2.0`；
+   * ② 拿不到时**整枚不出现**——不是空串、也不猜一个（§19）。
+   * **② 才是有判别力的那一条**：摘掉模板里那个 `v-if` 会让它红（实测过），
+   * 而 ① 在「前端写死一个恰好相同的字面量」下**仍然是绿的**——演示环境里服务端就是
+   * `V2.0`，两者恰好一致。所以「不写死」这件事**没有自动守卫**，如实记着。
+   */
+  test('品牌区显示服务端下发的版本号，375 上跟随品牌名隐藏且不溢出', async ({ page }) => {
+    await loginAs(page, 'counselor');
+    const branding = await page.evaluate(async () => {
+      const response = await fetch('/api/v1/public/branding');
+      return (await response.json()).data as { version: string };
+    });
+    expect(branding.version).toMatch(/^V\d+\.\d+$/);
+    const pill = page.locator('.brand-version');
+    await expect(pill).toBeVisible();
+    await expect(pill).toHaveText(branding.version);
+    // 375 那一档品牌区只剩 `.brand-mark` 一个方块，版本号跟随品牌名一起隐藏
+    // （底栏只有 68px 高，且它不承载导航信息）——同时确认没有因此产生横向溢出。
+    await page.setViewportSize({ width: 375, height: 667 });
+    await expect(pill).toBeHidden();
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    expect(overflow).toBeLessThanOrEqual(0);
+  });
+
+  test('品牌版本号拉不到时整枚不出现，不是空串', async ({ page }) => {
+    await loginAs(page, 'counselor');
+    // 「服务端答了话」（500）与「一个字都没收到」走的是 §2 的两条分支，
+    // 而版本号这两条都要吞掉并保持不出现——这里桩前一条。
+    await page.route('**/api/v1/public/branding', (r) => r.fulfill({ status: 500, body: '{}' }));
+    await page.reload();
+    await expect(page.locator('.brand-name')).toBeVisible();
+    await expect(page.locator('.brand-version')).toHaveCount(0);
+  });
 });
 
 // ========== 账号管理 ==========

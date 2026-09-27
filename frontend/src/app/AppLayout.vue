@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { getMe, logout, type CurrentUser } from '../services/api'
+import { getBranding, getMe, logout, type CurrentUser } from '../services/api'
 import { useSettings } from '../composables/useSettings'
 import AppIcon from '../components/AppIcon.vue'
 import Modal from '../components/Modal.vue'
@@ -196,6 +196,29 @@ function navItemActive(item: NavItem) {
 // Branding lives in settings so a school rename doesn't need a redeploy.
 const { settings, loadSettings } = useSettings()
 
+/**
+ * 产品版本号，显示在品牌名旁边（CLAUDE.md §19）。
+ *
+ * 唯一出处是服务端免认证的 `GET /api/v1/public/branding`（`settings.py` 的
+ * `read_branding` 把 `VERSION_LABEL` 拼在三个品牌键之后），**前端绝不写死**——
+ * 部署包里 `frontend/dist` 是预构建的，写死会造出「后端升了、界面还说旧版本」的分岔，
+ * 而那正是这一行要回答的问题。取不到就**整句不出现**（模板里那个 `v-if`），
+ * 不显示空串、也不猜一个：一个说不清的版本号比没有更糟，因为操作员会照着它报故障。
+ *
+ * **不复用 `useSettings` 那份单例**：它走 `GET /admin/settings`，而那个响应里没有
+ * version——版本号不是 `system_setting` 里的一项。所以这里另调一次，与「账号与权限」
+ * 页脚那一行（`AdminSystemPage.vue`）取的是同一个端点、同一个字段。
+ */
+const versionLabel = ref('')
+
+async function loadVersionLabel() {
+  try {
+    versionLabel.value = (await getBranding()).version || ''
+  } catch {
+    versionLabel.value = ''
+  }
+}
+
 const showChangePassword = ref(false)
 const showSessions = ref(false)
 const mustRotate = ref(false)
@@ -244,6 +267,10 @@ async function load() {
     // Authenticated callers can read the full settings; the login screen uses
     // the public branding endpoint instead.
     await loadSettings()
+    // 版本号是装饰性的一行字，**不 await**：它拉不到也不该影响这一页的加载，
+    // 而下面那个 `catch` 会把这里的任何失败读成「请先登录」。`loadVersionLabel`
+    // 自己吞掉异常，所以这里没有第二个 catch。
+    void loadVersionLabel()
   } catch {
     error.value = '请先登录'
     await router.push('/login')
@@ -272,7 +299,13 @@ load()
       <div class="brand">
         <div class="brand-mark">{{ settings.org.brand_name.slice(0, 1) }}</div>
         <div>
-          <div class="brand-name">{{ settings.org.brand_name }}</div>
+          <!-- 版本号紧挨品牌名（V2.0.1 用户要求：让使用者在系统内能看到当前版本）。
+               它是**一行字**而不是一枚按钮、不带任何交互；取不到时整枚不渲染
+               （`v-if` 判的是那个空串，所以拉失败与还没拉到长得一样——都是不出现）。 -->
+          <div class="brand-name">
+            <span>{{ settings.org.brand_name }}</span>
+            <span v-if="versionLabel" class="brand-version">{{ versionLabel }}</span>
+          </div>
           <div class="brand-sub">{{ settings.org.brand_subtitle }}</div>
         </div>
       </div>

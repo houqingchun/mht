@@ -664,8 +664,30 @@ body {
 }
 
 .brand-name {
+  /* 品牌名与版本号同排（V2.0.1）。只有一个子节点时（版本号还没拉到 / 拉不到）
+     渲染结果与从前的纯文本 div 逐像素相同——`gap` 与 `align-items` 对单个匿名
+     文本项都没有影响，所以这一条不是一次版式改动。 */
+  display: flex;
+  align-items: center;
+  gap: 7px;
   font-size: 1.13rem;
   font-weight: 800;
+}
+
+/* 产品版本号（CLAUDE.md §19），与品牌名同行的一枚小字。
+   非交互、无 hover 态（它不是按钮，也不指向任何页面）；底色用半透明白，
+   与 `.brand` 那条分隔线（`rgba(255,255,255,.12)`）是同一族表达，不新增色值 token。
+   窄屏跟随 `.brand-name` 一起 `display:none`——底栏那一档的判据是「不承载导航信息
+   的让位给按钮」，版本号同理（见文件末尾那一档的注释）。 */
+.brand-version {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.14);
+  color: #bfd4e8;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
 }
 
 .brand-sub {
@@ -3375,7 +3397,11 @@ tbody tr:hover td {
   .nav-mobile .nav-btn.active {
     box-shadow: inset 0 3px #75dce2;
   }
-  /* 窄屏的底栏里，品牌副标题与分区标签不承载导航信息，让位给按钮本身。 */
+  /* 窄屏的底栏里，品牌副标题与分区标签不承载导航信息，让位给按钮本身。
+     **产品版本号（`.brand-version`）跟着 `.brand-name` 一起隐藏**，是有意的：
+     它同样不承载导航信息，而底栏只有 68px 高、375px 上每一格都是挤出来的
+     （§5.20 的 DoD 要求这一档无新增横向溢出）。品牌区在窄屏就只剩 `.brand-mark`
+     那一个方块——要看版本号，「账号与权限」页脚那一行一直在。 */
   .brand-sub,
   .nav-label,
   .nav-spacer {
