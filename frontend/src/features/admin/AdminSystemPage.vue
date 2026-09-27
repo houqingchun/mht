@@ -142,8 +142,21 @@ const accountsEmptyText = computed(() => {
 /** 筛选是否偏离「全部」——用于决定要不要显示「清除筛选」。 */
 const accountFilterActive = computed(() => accountFilter.value !== 'all')
 
-function clearAccountFilter() {
+/**
+ * 清除筛选：本地状态与 **URL** 一起清（V2.0.0 §5.14.7 发现 ①）。
+ *
+ * 此前只重置本地那一个 ref，地址栏里那串 `?account=unconfigured` 留在原地——而
+ * `initialAccountFilter()` 进门读的正是它（概览那张卡片下钻时带过来的）。于是
+ * 「清除筛选 → 刷新」会把刚清掉的那一档原样装回来，而屏幕上刚刚显示的是「全部
+ * 账号」：URL 与页面的口径各说各话，且刷新是用户验证「我清干净了没有」最自然的
+ * 一个动作。
+ *
+ * `replace` 而不是 `push`，与 `ProgressPage.clearFilter` 逐字同一条：清除筛选不是
+ * 一次「前进」，按返回键应当回到进来之前那一页，而不是在「筛过 / 没筛」之间来回弹。
+ */
+async function clearAccountFilter() {
   accountFilter.value = 'all'
+  await router.replace({ path: '/admin/system' })
 }
 
 const showForm = ref(false)

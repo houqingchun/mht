@@ -672,6 +672,136 @@ test.describe('Leader Overview', () => {
       expect(cell.trim(), '学生列应当只有「姓 + 同学」，不夹带别的字段').toMatch(/^\S+同学$/);
     }
   });
+
+  /**
+   * 四角色各跑一次键盘主流程（V2.0.0 §5.14.7）——这一条是**德育领导**那一份。
+   *
+   * 为什么单独写一条：那一行 DoD 要求四个角色各自「只用键盘走完首屏主任务」，而
+   * 在此之前只有**心理老师**（`键盘可以走完选报告、续写、保存、发布与导出`）与
+   * **学生**（`只靠键盘能选答案、上一题、下一题、定位未答并确认提交`）有。领导与
+   * 管理员的首屏此前**没有任何一条用例按过 Tab**：两页上那些 `role="button"
+   * tabindex="0"` 是「无障碍契约」组按**计算值**断的（`指标卡键盘到得了…` 只证明
+   * `.metric` 拿得到焦点），而「拿到焦点之后按回车真的会发生那件事」没有东西看得见
+   * ——§29 那条：声明与实现之间那一段，只有真的按一次才知道。
+   *
+   * 走的是这一页真正的主任务：**从总览下钻到被筛过的那份名单，再把筛清除掉**。
+   * 三段各有各的判据，且都不断行数：这一档在演示库里可能是 0 条（档案都有负责人），
+   * 而 0 条不影响「键盘到不到得了」这件事——行数归
+   * `领导总览的每一处可点击都真的到达它指向的那一页`。同理**不写死 Tab 次数**：
+   * 判据是「按到的那个元素的文本」，那正是 `tabUntil` 存在的理由。
+   */
+  test('键盘可以从领导总览下钻到名单，再清除筛选', async ({ page }) => {
+    await loginAs(page, 'leader');
+    // 骨架屏那一帧的卡片是 `div.metric`（`SkeletonBlock`），真正的卡片是 `article`
+    // ——不等它落地就开始按 Tab，那 160 次会全部空转在骨架那一帧上，于是红的原因
+    // 与键盘可达性毫无关系（`tabUntil` 的 docstring 写着同一条）。
+    await expect(page.locator('article.metric').first()).toBeVisible();
+
+    // ① 下钻。「计划复测」那一张（`drillToProgress('retest')`）。
+    await tabUntil(
+      page,
+      (el) => el.tag === 'ARTICLE' && el.text.includes('计划复测'),
+      '计划复测指标卡'
+    );
+    // 先证明焦点真的落在那张卡上，再按回车——否则一个「Tab 停在别处、回车碰巧
+    // 触发了别的东西而 URL 也变了」的实现会蒙混过去。
+    await expect(page.locator('article.metric', { hasText: '计划复测' })).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(page).toHaveURL(/\/leader\/progress\?filter=retest$/);
+
+    // ② 落地页等自己的数据。那条筛选说明与「清除筛选」同在一个 `v-if="!loading"`
+    //    的分支里，所以它出现即代表这一页已经加载完。
+    await expect(page.locator('.toolbar')).toBeVisible();
+    await expect(page.locator('.toolbar')).toContainText('有未完成的复测计划');
+
+    // ③ 把筛清除掉：这一枚也必须键盘够得着——只断 URL 的话，一个「下钻可以、
+    //    但筛完就出不来」的页面照样过，而那正是读者会照着安排工作的那一句话
+    //    （§9：口径要写进界面，退路也一样）。
+    await tabUntil(page, (el) => el.text === '清除筛选', '清除筛选按钮');
+    await page.keyboard.press('Enter');
+    await expect(page).toHaveURL(/\/leader\/progress$/);
+    await expect(page.locator('.toolbar')).toHaveCount(0);
+    // 反方向：清完之后名单还在（不是把整页清空了）。
+    await expect(page.locator('.page-head h1')).toBeVisible();
+  });
+
+  /**
+   * 领导的**隐私边界**（V2.0.0 §5.14.7）——与管理员那条同形，但拦下来的东西不一样。
+   *
+   * 服务端那一道已经钉在
+   * `test_sensitive_reads.py::test_a_leader_cannot_reach_the_two_endpoints_that_hold_the_sheet`
+   * 上（它同时证明心理老师走得通）。这一条补的是**真实服务 + 界面**那一侧：同一条
+   * 边界在这两个面上有没有接线。与 `管理员到不了心理详情页…` 逐字同源，只是角色换了
+   * ——**两处不能合并**：管理员被拒是因为「没有心理详情」而**读得到名册**
+   * （他的组织与账号是 `MANAGE`），领导被拒是因为心理详情只有 `SUMMARY`，
+   * 而他在名册那一档是 `READ_SUMMARY`——`CAPABILITY_LEVELS` 对这一档的解释自己写着
+   * 「只看得到人数一类的汇总，看不到名单（当前没有端点在用这一档）」，所以 `/students`
+   * 对他也是一道 403。**同一个 403 名单，两个不同的成因**，合成一条就答不上「为什么」。
+   *
+   * ★ 判据落在**服务端**而不是界面上：前端隐藏不是安全措施（§4），所以第 ① 条什么
+   *   都不能证明，真正的门在下面那六条直连请求上。
+   *
+   * 反方向同样要断（否则「403 全绿」与「整条链子死了」分不开）：领导**该**够得着的
+   * 那一面必须真的通。而心理老师那半条正例与后端用例逐字同源——**先证明这条路本身
+   * 是通的**，否则一个把六个端点全拆掉的实现也让下面六条通过（而这正是这个文件里
+   * 反复出现的那条：「先证明有东西可扫，再断言它干净」）。
+   */
+  test('领导到不了心理详情与原始答卷，同一个 token 直接请求也是 403', async ({ page }) => {
+    await loginAs(page, 'leader')
+    const token = await page.evaluate(() => localStorage.getItem('xlp_access_token'))
+    expect(token, '登录之后应当拿得到 token').toBeTruthy()
+    const headers = { Authorization: `Bearer ${token}` }
+
+    // ① 界面：直接敲 URL 也到不了那一页。
+    await page.goto('/counselor/cases')
+    await expect(page).toHaveURL('/login')
+
+    // ② 先证明路是通的，顺带取一个真实的学生 id。**不借用领导的接口去找人**：
+    //    他读不到名册（见 ④），而 `GET /care-cases` 的每一行里都带着 `student_id`
+    //    ——所以这里用心理老师的 token，与后端那条用例的写法一致。
+    const login = await page.request.post('/api/v1/auth/login', {
+      data: { account: '13800000001', password: '123456', role: 'counselor' }
+    })
+    const counselor = { Authorization: `Bearer ${(await login.json()).data.access_token}` }
+    const caseList = await page.request.get('/api/v1/care-cases', { headers: counselor })
+    expect(caseList.status(), '心理老师读得到在办档案').toBe(200)
+    const cases = (await caseList.json()).data.items as Array<{ student_id: number }>
+    expect(cases.length, '演示数据里应当有在办档案，否则下面那六条是空转').toBeGreaterThan(0)
+    const studentId = cases[0].student_id
+    expect(
+      (await page.request.get(`/api/v1/care-cases/${studentId}`, { headers: counselor })).status(),
+      '心理老师读得到这名学生的个案详情（原始答卷与回访正文就在里面）'
+    ).toBe(200)
+
+    // ③ 服务端：领导那六条全拒。名单与管理员那条、以及后端用例三处同一份。
+    const denied = [
+      '/api/v1/care-cases',
+      `/api/v1/care-cases/${studentId}`,
+      `/api/v1/care-cases/${studentId}/comparison`,
+      '/api/v1/students/results',
+      `/api/v1/students/${studentId}/key-questions?purpose=排查`,
+      `/api/v1/students/${studentId}/assessment-records`
+    ]
+    for (const path of denied) {
+      const response = await page.request.get(path, { headers })
+      expect(response.status(), `${path} 应当 403`).toBe(403)
+      expect((await response.json()).error.code, path).toBe('ROLE_FORBIDDEN')
+    }
+
+    // ④ 名册那一档：**这一条与管理员那条正相反**。管理员读得到名册（他走的是组织与
+    //    账号的 `MANAGE`），而领导那一格是 `READ_SUMMARY`——按 `CAPABILITY_LEVELS`
+    //    自己的解释，它是「汇总，不是名单」，所以 `GET /students` 是 403。
+    //    两条成对才说明白「这两个角色被拒的理由不同」。
+    expect(
+      (await page.request.get('/api/v1/students', { headers })).status(),
+      '领导读的是汇总，不是名册'
+    ).toBe(403)
+
+    // ⑤ 反方向：领导自己的那一面照旧（首屏数据 + 报表）。少了这两条，一个把领导
+    //    所有请求都拒掉的实现也能让上面全绿，而那不是权限收紧，是这一页瘫了。
+    expect((await page.request.get('/api/v1/leader/progress', { headers })).status()).toBe(200)
+    expect((await page.request.get('/api/v1/analytics/report', { headers })).status()).toBe(200)
+  });
 });
 
 /**
@@ -2569,6 +2699,130 @@ test.describe('管理员系统概览', () => {
     // 审计的 `detail` 里有没有它，在这一层**验不了**：`GET /audit-logs` 不发
     // `detail`（§8）。那一半由后端用例守（`test_account_admin_api.py` 的断言）。
   });
+
+  /**
+   * 四角色各跑一次键盘主流程（V2.0.0 §5.14.7）——这一条是**系统管理员**那一份。
+   *
+   * 与领导那一条同源，但走的是管理员首屏的三段：**概览卡片下钻 → 账号页清除筛选
+   * → 用键盘打开行内的「账号操作」菜单**。第三段是 §5.14.5 那次改动的自己那一半：
+   * 三枚动词（编辑 / 重置密码 / 停用）此前平铺在「操作」列里，收进弹层之后
+   * 「键盘还打得开它吗」正是那次改动新引入的风险，而此前只有鼠标路径有用例
+   * （`账号管理` 那一条用 `getByRole('button', { name: '操作' }).click()`）。
+   *
+   * 第二段（清除筛选）刻意留着：`?account=unconfigured` 在演示库里可能是 0 条，
+   * 而「从卡片点进来的那个人处理完之后怎么出去」正是筛掉之后才会被问到的问题。
+   * 判据里不断行数——行数归 `卡片上的数与它点进去那个列表说的是同一个数`。
+   */
+  test('键盘可以从系统概览下钻，并在账号页打开操作菜单', async ({ page }) => {
+    await loginAs(page, 'admin');
+    await overviewReady(page);
+
+    // ① 下钻：Tab 停在「未配置数据范围的账号」那一张卡上，回车。
+    await tabUntil(
+      page,
+      (el) => el.text.includes('未配置数据范围的账号'),
+      '未配置数据范围的指标卡'
+    );
+    await expect(page.locator('.kpi-link', { hasText: '未配置数据范围的账号' })).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(page).toHaveURL(/\/admin\/system\?account=unconfigured$/);
+    // **URL 与控件的值都要断**：那一档的值是 `initialAccountFilter()` 从 query
+    // 读一次的结果，与 URL 是两个东西——只断 URL 的话，一个「跳过去了、筛选没生效」
+    // 的实现照样绿（「每张卡片都点得进去…」那一条的理由逐字相同）。
+    await expect(page.getByLabel('按账号状态筛选')).toHaveValue('unconfigured');
+
+    // ② 清除筛选：等这一页自己加载完（检索栏与「清除筛选」同在那一个
+    //    `v-if="!loading && !error"` 的分支里）。
+    await expect(page.locator('.toolbar')).toBeVisible();
+    await tabUntil(page, (el) => el.text === '清除筛选', '清除筛选按钮');
+    await page.keyboard.press('Enter');
+    await expect(page).toHaveURL(/\/admin\/system$/);
+    await expect(page.getByLabel('按账号状态筛选')).toHaveValue('all');
+    // 刷新一次仍然清着——`initialAccountFilter()` 进门读的正是 URL 上那一串，
+    // 所以「清掉筛选、刷新，筛选又回来了」是这条链路上真实的坏法（发现 ①）。
+    // 隔一拍的证据：刷新之后这一页是重新挂载的，那个 ref 只能从 URL 重建。
+    await page.reload();
+    await expect(page.getByLabel('按账号状态筛选')).toHaveValue('all');
+
+    // ③ 账号操作菜单。清除筛选之后焦点落回 body（那一枚按钮被 `v-if` 摘掉了），
+    //    所以接下来按到的第一枚「操作」就是表格**第一行**那一枚——不指定行号，
+    //    因为行序由服务端定（排序默认值变了这条就会红在一个与键盘无关的地方）。
+    await tabUntil(page, (el) => el.text === '操作', '第一行的操作按钮');
+    await page.keyboard.press('Enter');
+    const menu = page.getByRole('dialog', { name: /账号操作/ });
+    await expect(menu).toBeVisible();
+    // 三枚动词都在，且**键盘进得去**：一个渲染出来、Tab 走不进去的弹层，对键盘用户
+    // 与一个坏掉的弹层是一回事（`Modal.vue` 的焦点陷阱见「无障碍契约」组）。
+    await expect(menu.getByRole('button', { name: '编辑' })).toBeVisible();
+    await expect(menu.getByRole('button', { name: '重置密码' })).toBeVisible();
+    await tabUntil(page, (el) => el.text === '编辑', '菜单里的编辑按钮');
+
+    // ④ 关掉之后焦点**还回来**——它落在那一枚「操作」上，用户原地还能再开一次。
+    await page.keyboard.press('Escape');
+    await expect(menu).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '操作', exact: true }).first()).toBeFocused();
+  });
+
+  /**
+   * 管理员拿不到心理详情（V2.0.0 §5.14.7「心理详情 403」）。
+   *
+   * 这一条此前**只有后端那一半**（`test_permissions.py::test_admin_is_denied_every_
+   * psych_detail_endpoint_under_defaults`）。e2e 这一半补的是另外两件它答不了的事：
+   *
+   * ① 界面上**到不了**——`/counselor/cases` 的 `meta.role` 是 `counselor`，
+   *    `AppLayout.vue` 拿到 `/auth/me` 之后比对角色、不匹配就弹回登录页（缺口 4：
+   *    前端没有路由守卫，越权访问表现为「被弹回登录页」）。
+   *    **这条断言有两道门在保它，而且这是量出来的**：变异验证时把 `AppLayout.vue`
+   *    那一判改成恒假（`if (false && …)`），这一条**照旧绿**——因为 `CasesPage.vue`
+   *    的 `load()` 进门自己又比了一次角色码（`role_code !== 'counselor'` 就跳登录页）。
+   *    所以它断的是**用户看到的结果**（他进不去那一页），不是「哪一处代码在拦」；
+   *    要让它对某一道门敏感，得两道一起摘。写在这里，免得下一个人做完变异之后
+   *    把「摘一道不红」读成守卫失灵（§4 那条「别把『拆了一处仍然全绿』读成守卫失效」
+   *    是同一个形状，只不过那次说的是后端两处各查一次）。
+   * ② **前端隐藏不是安全措施**（§4）。所以第 ① 条**什么都不能证明**——它证明的是
+   *    「按钮没画出来」。真正的那道门在服务端，所以下面拿同一个 token 直接发请求，
+   *    逐个点名那六条路径（与后端用例同一份名单：判据来源不同，只试一个的话另外
+   *    几条上通着的旁路没有任何东西看得见）。
+   *
+   * 反面同样要断：管理员的**管理面**必须真的够得着。少了它，一个把管理员所有请求
+   * 都拒掉的实现也能让上面六条通过——而那不是权限收紧，是整个管理面瘫了。
+   */
+  test('管理员到不了心理详情页，同一个 token 直接请求也是 403', async ({ page }) => {
+    await loginAs(page, 'admin');
+    const token = await page.evaluate(() => localStorage.getItem('xlp_access_token'));
+    expect(token, '登录之后应当拿得到 token').toBeTruthy();
+    const headers = { Authorization: `Bearer ${token}` };
+
+    // ① 界面：直接敲 URL 也到不了那一页。
+    await page.goto('/counselor/cases');
+    await expect(page).toHaveURL('/login');
+
+    // ② 服务端：真正的门。先拿一个真实存在的学生 id——管理员**读得到名册**
+    //    （`GET /students` 走的是组织与账号那一档），而下面六条读的是心理详情。
+    //    「先证明有东西可扫」：名册是空的时不跑这一条，否则 403 可能来自别处。
+    const roster = await page.request.get('/api/v1/students', { headers });
+    expect(roster.status(), `管理员读名册应当 200：${await roster.text()}`).toBe(200);
+    const students = (await roster.json()).data.items as Array<{ id: number }>;
+    expect(students.length, '演示名册上应当有学生').toBeGreaterThan(0);
+    const studentId = students[0].id;
+
+    const denied = [
+      '/api/v1/care-cases',
+      `/api/v1/care-cases/${studentId}`,
+      `/api/v1/care-cases/${studentId}/comparison`,
+      '/api/v1/students/results',
+      `/api/v1/students/${studentId}/key-questions?purpose=排查`,
+      `/api/v1/students/${studentId}/assessment-records`
+    ];
+    for (const path of denied) {
+      const response = await page.request.get(path, { headers });
+      expect(response.status(), `${path} 应当 403`).toBe(403);
+      expect((await response.json()).error.code, path).toBe('ROLE_FORBIDDEN');
+    }
+
+    // ③ 反方向：管理面照旧。少了这一半，「403 全绿」与「管理面瘫了」分不开。
+    expect((await page.request.get('/api/v1/admin/accounts', { headers })).status()).toBe(200);
+  });
 });
 
 // ========== Mobile Responsiveness ==========
@@ -3504,7 +3758,7 @@ async function expectNarrowGeometry(page: Page, label: string) {
 }
 
 test.describe('学生端安心作答（P1）', () => {
-  test('四种任务卡状态各自说清「能不能答、为什么」', async ({ page }) => {
+  test('任务卡的每一档状态都说清「能不能答、为什么」', async ({ page }) => {
     await installAssessmentStubs(page, {
       questionCount: 10,
       cards: [
@@ -3513,6 +3767,12 @@ test.describe('学生端安心作答（P1）', () => {
         { id: 9103, name: 'E2E 已完成', status: 'ACTIVE', target_status: 'COMPLETED', answered_count: 10 },
         { id: 9104, name: 'E2E 未开始', status: 'NOT_STARTED', target_status: 'NOT_STARTED' },
         { id: 9105, name: 'E2E 已结束', status: 'CLOSED', target_status: 'NOT_STARTED', end_at: '2026-08-31T23:59:00' },
+        // 「已暂停」是**学校按下暂停键**，与「还没开始 / 已经结束」不是一回事：那两档
+        // 由时钟推出来（§12），这一档只能由人写进那一列。它今天**没有写入方**
+        // （`task_service.effective_task_status` 自己写着这句话），所以只能靠桩数据
+        // 铺出来——而 `StudentHomePage.vue` 的 `blockedReason` 为它留着一句真话，
+        // 那不覆盖就等于让一条已经写好的界面分支永远没人验过。
+        { id: 9107, name: 'E2E 已暂停', status: 'PAUSED', target_status: 'NOT_STARTED' },
         // 「题数还不知道」是一种真实状态（`question_count` 按契约可空），
         // 而它与「题数为 0」在界面上必须长得不一样：分母不出现，预计时长也不出现。
         { id: 9106, name: 'E2E 题数未知', status: 'ACTIVE', target_status: 'IN_PROGRESS', answered_count: 3, question_count: null },
@@ -3521,11 +3781,11 @@ test.describe('学生端安心作答（P1）', () => {
     await loginAs(page, 'student')
 
     const card = (name: string) => page.locator('.task-card', { hasText: name })
-    await expect(page.locator('.task-card')).toHaveCount(6)
+    await expect(page.locator('.task-card')).toHaveCount(7)
 
-    // 能答的两张（外加题数未知那张）才有主按钮；其余三张是灰的。
+    // 能答的两张（外加题数未知那张）才有主按钮；其余四张是灰的。
     await expect(page.locator('.task-card button.primary')).toHaveCount(3)
-    await expect(page.locator('.task-card button[disabled]')).toHaveCount(3)
+    await expect(page.locator('.task-card button[disabled]')).toHaveCount(4)
 
     // ① 新任务：还没开始，说得出还剩多少、要多少时间
     await expect(card('E2E 新任务')).toContainText('共 10 题，尚未开始')
@@ -3560,6 +3820,16 @@ test.describe('学生端安心作答（P1）', () => {
     await expect(card('E2E 题数未知')).not.toContainText('共 10 题')
     await expect(card('E2E 题数未知')).not.toContainText('预计约')
     await expect(card('E2E 题数未知').getByRole('button', { name: '继续作答' })).toBeEnabled()
+
+    // ⑦ 已暂停：与「还没开始 / 已经结束」同为灰按钮，但**说法不同**——那两档由时钟
+    //    推出来（§12），这一档是学校按下的暂停键，所以它不承诺一个日期，只说等通知。
+    //    这一档今天没有后端写入方（`task_service.effective_task_status` 写着这句话），
+    //    于是它只在桩数据里可见——而 `blockedReason` 的这一支是真写在界面上的，
+    //    没有这一块就等于让一条已写好的分支永远没人验过。
+    await expect(card('E2E 已暂停').getByRole('button', { name: '已暂停' })).toBeDisabled()
+    await expect(card('E2E 已暂停')).toContainText('这一场已由学校暂停，请等老师通知。')
+    await expect(card('E2E 已暂停')).not.toContainText('预计约')
+    await expect(card('E2E 已暂停')).not.toContainText('这一场还没有开始')
   })
 
   test('答一部分后保存退出，重新登录仍从原题继续，进度与答案都不丢', async ({ page }) => {
