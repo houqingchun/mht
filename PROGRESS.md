@@ -5910,6 +5910,15 @@ SELECT version_num FROM alembic_version;
   - [x] Backend Tests / 全量 E2E 无回归；
   - [x] 回填实际修改文件、测试结果、Commit SHA。
 
+**Commit SHA：`301d616`**（`feat(release): §5.24 V2.1.0 升版本 + 第二份交付基线 upgrade_from_v1_1_6.sql`，
+18 files changed / 932 insertions / 232 deletions，已 push 到 `origin/V2.0.1`）。
+
+**收尾时自查出并改正的一处**：第二份基线的日期一度写成 `2026-09-22`（6 处：`CLAUDE.md`
+三处标题、`build_package.py` 的 `REQUIRED_PATHS` 注释、`test_incremental_upgrade_sql.py`
+两处 docstring）——那个日期是 `V1.1.4` 时代的（`build_package.py` 里既有那三处保持不动），
+而第二个起点是**今天**加的，已全部改成 `2026-09-27`。改完重跑
+`test_incremental_upgrade_sql.py` + `test_seed_sql.py` + `test_app_version.py` → **19 passed**。
+
 #### 5.24.8 交付给用户的三件东西
 
 1. **`dist/心晴部署包_V2.1.0.zip`**（12,147,673 B）—— 拷到客户机解压、双击「一键安装.bat」；
