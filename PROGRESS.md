@@ -6193,9 +6193,43 @@ socket，而 uvicorn 空闲 5 秒关连接 → 半开 socket 上的请求挂住�
    `PROGRESS.md` 早先记的是 17 行 —— 它在涨。
 4. **`ops.ps1` 薄壳的真机行为开发机证明不了**（§18 那条：Windows 侧那几个文件在开发机上一行
    都不会执行）。`python -m app.db.backup` 走 `venv` 的那条路、以及安装目录里的实际落点，
-   只有重出包、用户拷过去跑一次才算验过。**本次没有重出包**（用户没要求，且 §5.24 刚出过
-   V2.1.0；要交付时 `make deploy-package`）。
+   只有重出包、用户拷过去跑一次才算验过。**2026-09-28 已重出包**（见 5.25.9），
+   而**用户拷过去真装那一次仍然没有发生**——这一步没变，仍然悬着。
 5. **`purge.py` 与两份 SQL 基线脚本都不动**：备份记录不是「测评数据」，`purge-demo` 的职责
    是删演示的测评链路。这是**有意的取舍**，不是漏了——顺带也让 `reset_to_baseline.sql` 那条
    「每一条 DELETE 都挂在 `@admin_id` 上」的不变量不必为一个 `operator_id` 可为 NULL 的表开口子。
+
+#### 5.25.9 交付包重出：`dist/心晴部署包_V2.2.0.zip`（2026-09-28）
+
+5.25.8 第 4 条当时记的是「本次没有重出包」，用户 2026-09-28 要求重出一次。
+**代码一个字节没改**（`git status --porcelain --untracked-files=all` 输出为空，
+连未跟踪文件都没有），所以这一跑的唯一产出就是那两个交付物，而 5.25.7 那张跑数表
+**仍然有效**——它描述的就是当前这棵树。
+
+- `make deploy-package` → **`dist/心晴部署包_V2.2.0.zip`（12,186,002 B / 11.6 MB）**，
+  `deploy/package-info.txt` 写 `version=2.2.0+20260928` / `built_at=2026-09-28 00:05`。
+  sha256 = `cd1ba2ea204604f4dfebd0650868160c8df2676329231249f4b25ed056bfd34d`。
+- 六步自检全过：必需文件齐全（`task.xml` 与 `python/` 都没有混进来）/ 依赖闭环（31 个 wheel）/
+  没有 `.env`·`.venv`·`tests`·`pyc` 混进来 / 题库在 `seed.py` 算出来的位置上 /
+  `.ps1` 与 `.txt` 恰好一个 BOM、`.bat` 与 `requirements.lock.txt` 纯 ASCII /
+  zip 里的中文文件名都带 UTF-8 标志位。
+- **不传 `--keep`**，所以 `build_package.py:747` 那句 `shutil.rmtree(pkg_dir)` 照常执行；
+  何况上一版 `V2.1.0` 的 staging 目录名不同（`package_dir` 带版本号），本来也不会互相复用。
+  **那条「`--keep` 会留孤儿前端产物」的坑这次碰不到。**
+- 包内外**两处都核过**（照 5.24.6 那条：只有 staging 对着不等于交出去的那一份也对）：
+  `frontend/dist/assets/index-CGjxgTzx.js`（529,830 B）与 `index-D7JrlKhP.css`（74,101 B）
+  在 staging 与 `unzip -l` 里同名同大小。
+- **包内四份 SQL 的时间戳恰好证明了那一处分工**：两份 `upgrade_from_*.sql`
+  （69,434 / 10,709 B）是**本次** 00:05 生成的（第 3/6 步当场重渲染），
+  而 `schema_mysql8.sql`（09-27 21:27）与 `seed_mysql8.sql`（09-27 22:54）**是旧的**
+  —— 那两份刻意不在出包时重新生成（§30 / §31）。
+- 版本号**没有动**：`2.2.0` 是 5.25.6 升的（`VERSION_LABEL` = `V2.2`），本次出包只是把它放进
+  包里。唯一的版本字面量仍在 `backend/app/version.py` 与它的镜像 `frontend/package.json`。
+- **这一跑也让 §5.25 的功能第一次进交付物**：在此之前，包里的 `ops.ps1` 还是 V2.1.0 那一份
+  （没有 `python -m app.db.backup` 这条薄壳、卸载也不搬 `backups/`）。
+
+**没有重跑 `make test` / `make e2e`**，理由写在这里而不是省略掉：代码零改动，
+而它们各要十几分钟（5.25.7 记的是 914 test / 208+2 e2e）。**出包本身跑了一次
+`npm run build`（`vue-tsc -b && vite build`），那是一次真实的类型检查**；
+而交付前那一次真机安装**仍然没有人做过**（见 5.25.8 第 4 条）。
 
