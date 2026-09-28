@@ -1137,7 +1137,11 @@ def test_column_problems_become_global_errors(client, db_session):
 
 
 def test_the_question_header_accepts_the_common_spellings():
-    """题号列的写法（2026-09-28 放宽）：**数字锚在开头**，前面的「第 / Q」与后面的分隔符都认。
+    """题号列的写法（2026-09-28 放宽）：**数字锚在开头**，分两支，后缀要求不同。
+
+    带标记（`第` / `Q`）的：后面接什么随你（`第1题你晚上要睡觉时` 也认）。
+    只写数字的：后面要跟分隔符、空白或行尾（`1.题干` / `1 题干` / `1`）。
+    两支的边界由下面那两张表钉住——**「松到哪儿为止」是这张用例的一半内容**。
 
     判据落在纯函数 `parse_assessment_import` 上（不走接口、不建批次）：要证明的是
     「这一种写法被认成第 N 题」，而某一所学校文件里到底用的是哪一种，事先不知道。
@@ -1159,6 +1163,15 @@ def test_the_question_header_accepts_the_common_spellings():
         "第{n}题：题干",
         "Q{n}",  # ← 2026-09-28 起认
         "q{n}",
+        # **题号紧贴题干**，中间没有任何分隔符。这几条是 2026-09-28 第二次修那条判据时补的：
+        # 改之前只有「裸的 `第1题`」能过，而注释与那句报错文案读起来像「紧贴的也认」——
+        # 照着文案改文件的客户改完仍然进不去。**紧贴的形状必须有一条用例**，否则下一次
+        # 再改尾部时它们又会静默失守（`第{n}题` 走的是 `$` 那一支，证明不了紧贴能过）。
+        "第{n}题题干",
+        "第 {n} 题题干",
+        "第{n}题你晚上要睡觉时",
+        "Q{n}题干",
+        "q{n}你晚上要睡觉时",
         "Q{n}.题干",
         "{n}",
     ]
@@ -1174,9 +1187,14 @@ def test_the_question_header_accepts_the_common_spellings():
         assert answers[36] == "1", template
         assert answers.count("1") == 1, template
 
-    # **放宽之后仍然不认的形状**：数字必须在开头。列一份在这里，是因为判据变松之后
-    # 最该记下来的就是「松到哪儿为止」——下一次再想放宽的人从这里接着往下看。
-    rejected = ["题{n}", "{n}题号", "第{n}题的答案", "{n}班人数", "第{n}题号"]
+    # **放宽之后仍然不认的形状**。列一份在这里，是因为判据变松之后最该记下来的就是
+    # 「松到哪儿为止」——下一次再想放宽的人从这里接着往下看。两条：
+    #   ① 数字不在开头（`题1`）；
+    #   ② **只写数字、后面紧贴非题号文字**（`1题号` / `1班人数`）——没有「第 / Q」这个标记
+    #      时就必须跟分隔符。这一条是 2026-09-28 第二次修时**刻意留着不放宽**的：把它一起
+    #      放开成「后面不是数字即可」，`1组` 这类非题号列就会被吃成第 1 题、撞上真第 1 题，
+    #      于是一份本来完好的文件拿到一句「重复的题号列：1」。
+    rejected = ["题{n}", "{n}题号", "{n}班人数"]
     for template in rejected:
         header = FIELDS + [template.format(n=number) for number in range(1, 101)]
         parsed = parse_assessment_import(
@@ -1184,6 +1202,18 @@ def test_the_question_header_accepts_the_common_spellings():
             _csv([_row("赵同学", 1, 12, 1, 4)], header=header).encode("utf-8"),
         )
         assert parsed["header_errors"], template
+
+    # 带标记的那一支**没有**这条后缀要求：`第{n}题的答案` / `第{n}题号` 现在认。它们是不是
+    # 题号由 100 题的完整性检查兜底（认错了就缺一个真题号），而不是由逗号、顿号那一组
+    # 分隔符兜底。留一条断言在这里，免得下一个人把它当成「上面那张 rejected 漏了两条」。
+    for template in ["第{n}题的答案", "第{n}题号"]:
+        header = FIELDS + [template.format(n=number) for number in range(1, 101)]
+        parsed = parse_assessment_import(
+            "题号写法.csv",
+            _csv([_row("赵同学", 1, 12, 1, 4, yes=(37,))], header=header).encode("utf-8"),
+        )
+        assert parsed["header_errors"] == [], template
+        assert parsed["rows"][0]["answers"][36] == "1", template
 
 
 def test_the_summary_total_column_ignores_brackets_and_spaces(client):
