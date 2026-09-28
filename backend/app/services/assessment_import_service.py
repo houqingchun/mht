@@ -59,6 +59,7 @@ import csv
 import hashlib
 import io
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
@@ -600,6 +601,31 @@ FIELD_ALIASES = {
 SUMMARY_TOTAL_FIELD = "total_score"
 SUMMARY_TOTAL_LABELS = ("总分", "总得分", "总分（标准分）", "总得分（标准分）")
 
+
+def _normalize_header_label(label: str) -> str:
+    """表头比对前的归一化：全半角统一，去掉空白与括号。
+
+    `总分（标准分）` 这一列**是学校文件里真实存在的写法**，而括号与空格在中文 Excel /
+    WPS 里几乎总是随手敲的——半角括号、括号两边各夹一个空格，都是同一列的变体。
+    只按字面比会把它们判成「认不出的列」，用户看到的是一句「表头里既没有认出任何题号列
+    ……也没有「总分」列」，而那一列明明就在表上。
+
+    **只去掉括号字符本身，不去掉括号里的内容**（这一点是有意的）：`总分（原始分）`
+    归一化之后是 `总分原始分`，不在表里，照样被拒——那是**另一个含义**的列，把它当成
+    标准分收下会是静默的错。同理，NFKC 只做全半角折叠，不做任何同义词替换。
+    """
+    folded = unicodedata.normalize("NFKC", label)
+    return "".join(
+        char for char in folded if not char.isspace() and char not in "()（）[]【】"
+    )
+
+
+# **由 `SUMMARY_TOTAL_LABELS` 派生，不另抄一张表**：两处各写一份字面量就会漂，
+# 而漂了不会有任何东西看得见——「表里加了新写法，比对时却不认」正是这次要修的那个形状。
+SUMMARY_TOTAL_LABELS_NORMALIZED = frozenset(
+    _normalize_header_label(label) for label in SUMMARY_TOTAL_LABELS
+)
+
 # MHT 标准分的取值范围。**没有从规则版本里读**（阈值归规则版本，§6），因为这不是阈值：
 # 它是「这个数在物理上可能是多少」，与那一版的判级分段无关——改分段不会让一个 120 分的
 # 输入变成合法的。本地引擎算出来的分同样落在这个区间里。
@@ -622,8 +648,23 @@ DIMENSION_BY_LABEL = {
     "冲动倾向": "IMPULSIVE_TENDENCY",
 }
 
-# `1.你晚上要睡觉时…` 与 `1、…` 都见过；纯数字表头也认。
-_QUESTION_HEADER = re.compile(r"^\s*(\d{1,3})\s*(?:[.、．)。:：]|$)")
+# 题号列的写法（2026-09-28 放宽）。认得出来的形状：
+#
+#     `1.你晚上要睡觉时…`   `1、…`   `1）…`   `1 题干`   `第1题`   `第 1 题：…`
+#     `Q1`   `Q1.…`   `q1 …`   以及纯数字表头 `1`
+#
+# 判据仍然是**数字锚在开头**（`^\s*(?:第\s*|[Qq]\s*)?(\d{1,3})`）：组 1 永远是那个题号，
+# 调用方 `int(match.group(1))` 一个字都不用改。
+#
+# **放宽的代价写在这里，别把它当成免费的**：判据松了之后，一个叫「100 分」这样的列名
+# 会被读成第 100 题（数字 + 空格即满足）。这**不会**变成一份静默错位的答卷，因为题号识别
+# 排在 `FIELD_ALIASES` / 汇总列 / 维度列**之后**，而 100 题的完整性检查（`missing_questions`
+# 与 `duplicated`）是兜底：真文件里 100 个题号列一个不少，误认出来的那一个要么让某个真题号
+# 缺失、要么与真列重复，两条都会大声报错（`缺少题号列：…` / `重复的题号列：…`）。
+# **答案错位映射到题号是这条链路上最坏的失败**，所以那两条检查不许被绕过。
+_QUESTION_HEADER = re.compile(
+    r"^\s*(?:第\s*|[Qq]\s*)?(\d{1,3})\s*(?:题\s*)?(?:[.、．)。:：）]|\s|$)"
+)
 _DURATION = re.compile(r"^\s*(\d+)\s*(?:秒|s|S)?\s*$")
 
 # 两者共用一句话，见 `_visible_candidates`
@@ -699,8 +740,10 @@ def _columns_from_header(header: list[str]) -> tuple[dict[str, Any], list[str]]:
             columns[field] = index
             continue
         # 汇总列（§18.9）。放在题号之前判：维度那一列的名字是「学习焦虑」这种中文，
-        # 认不出题号，但总要先问过它是不是那九个汇总列之一
-        if label in SUMMARY_TOTAL_LABELS:
+        # 认不出题号，但总要先问过它是不是那九个汇总列之一。
+        # **按归一化之后的形状比**：`总分（标准分）` / `总分(标准分)` / `总分 ( 标准分 )`
+        # 是同一列，见 `_normalize_header_label`。
+        if _normalize_header_label(label) in SUMMARY_TOTAL_LABELS_NORMALIZED:
             columns.setdefault(SUMMARY_TOTAL_FIELD, index)
             continue
         dimension = DIMENSION_BY_LABEL.get(label)
@@ -732,8 +775,12 @@ def _columns_from_header(header: list[str]) -> tuple[dict[str, Any], list[str]]:
         # 两种列**都在**时按完整答案走（本地有原始答案，就没有理由去信平台算的分；
         # 这也让一份两边都带的文件不会因为多了一列而变成另一条路）。
         if SUMMARY_TOTAL_FIELD not in columns:
+            # 提示语里点名**几种写法**：这句话是操作员唯一能看到的东西，而「1.题干」
+            # 只列了一种，手里那份文件写着 `第1题` 的人会以为自己的文件不对。
             errors.append(
-                "表头里既没有认出任何题号列（题号列应写成 1.题干），也没有「总分」列。"
+                "表头里既没有认出任何题号列（题号列应写成 1.题干，"
+                "1 题干、第1题、Q1 这类写法也认），也没有「总分」列"
+                "（总分（标准分）这类写法也认，括号与空格不影响）。"
                 "包含 100 道原始答案的文件与只包含汇总分数的文件都能导入，"
                 "但至少要认得出其中一种"
             )

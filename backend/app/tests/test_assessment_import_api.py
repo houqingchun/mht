@@ -61,6 +61,7 @@ from app.services.assessment_import_service import (
     SOURCE_TYPE_SUMMARY,
     _task_for_month,
     month_bounds,
+    parse_assessment_import,
 )
 from app.services.scale_import_service import DIMENSION_CODES
 from app.services.assessment_service import now_utc_naive
@@ -1110,23 +1111,121 @@ def test_column_problems_become_global_errors(client, db_session):
         == "缺少题号列：85；重复的题号列：12"
     )
 
-    # 题号写成 Q1 这种做法：一条有用的全局错误，而不是 100 行「未作答」。
+    # 题号写在数字后面（`题1`）：一条有用的全局错误，而不是 100 行「未作答」。
     #
     # 措辞 2026-09-19（第 5 期）变了，因为它现在要同时回答**两种**形态：§18.9 起
     # 「只有总分与维度分、没有 100 道答案」的文件也是合法的输入，所以「认不出题号列」
     # 不再是唯一的死因——一份两个都认不出的表头才会被拦下来。这句话把两条出路
     # 一起说出来（要么写成 `1.题干`，要么给一列总分），而不是只报前半句让操作员以为
     # 这份汇总文件不被支持。
+    #
+    # 2026-09-28：题号列的判据放宽（`1 题干` / `第1题` / `Q1` 都认），所以这一处举的
+    # 反例换成了 `题1`——**数字必须锚在开头**是放宽之后仍然成立的那一条。`Q1` 从这一处
+    # 走到下面那张接受表里去了（它此前正是这条用例的反例）。
     assert (
         _preview_error(
-            client, headers, _csv([], header=FIELDS + [f"Q{n}" for n in range(1, 101)])
+            client, headers, _csv([], header=FIELDS + [f"题{n}" for n in range(1, 101)])
         )
-        == "表头里既没有认出任何题号列（题号列应写成 1.题干），也没有「总分」列。"
+        == "表头里既没有认出任何题号列（题号列应写成 1.题干，"
+        "1 题干、第1题、Q1 这类写法也认），也没有「总分」列"
+        "（总分（标准分）这类写法也认，括号与空格不影响）。"
         "包含 100 道原始答案的文件与只包含汇总分数的文件都能导入，但至少要认得出其中一种"
     )
 
     # 四次都没建出批次来：**「这一批在哪」这个问题不该有一个答不上来的答案**
     assert db_session.scalar(select(func.count(AssessmentImportBatch.id))) == 0
+
+
+def test_the_question_header_accepts_the_common_spellings():
+    """题号列的写法（2026-09-28 放宽）：**数字锚在开头**，前面的「第 / Q」与后面的分隔符都认。
+
+    判据落在纯函数 `parse_assessment_import` 上（不走接口、不建批次）：要证明的是
+    「这一种写法被认成第 N 题」，而某一所学校文件里到底用的是哪一种，事先不知道。
+
+    **每一轮都用同一个探针行**：第 37 题答「是」、其余答「否」。于是「认出来了」与
+    「认到了正确的那个题号」是**同一次**断言——只断「没有报错」的话，一个整体错位
+    一格（把 `第1题` 认成第 1 列、`第2题` 认成第 2 列……依次往后挪）的实现照样是绿的，
+    而那正是这条链路上最坏的失败：答案错位映射到题号。
+    """
+    accepted = [
+        "{n}.题干",  # 一直在认的写法（客户那份文件里就是这个）
+        "{n}、题干",
+        "{n}．题干",
+        "{n}）题干",
+        "{n} 题干",  # ← 2026-09-28 起认
+        "{n}  题干",
+        "第{n}题",  # ← 2026-09-28 起认
+        "第 {n} 题",
+        "第{n}题：题干",
+        "Q{n}",  # ← 2026-09-28 起认
+        "q{n}",
+        "Q{n}.题干",
+        "{n}",
+    ]
+    for template in accepted:
+        header = FIELDS + [template.format(n=number) for number in range(1, 101)]
+        parsed = parse_assessment_import(
+            "题号写法.csv",
+            _csv([_row("赵同学", 1, 12, 1, 4, yes=(37,))], header=header).encode("utf-8"),
+        )
+        assert parsed["header_errors"] == [], template
+        assert parsed["form"] == SOURCE_TYPE_FULL_ANSWER, template
+        answers = parsed["rows"][0]["answers"]
+        assert answers[36] == "1", template
+        assert answers.count("1") == 1, template
+
+    # **放宽之后仍然不认的形状**：数字必须在开头。列一份在这里，是因为判据变松之后
+    # 最该记下来的就是「松到哪儿为止」——下一次再想放宽的人从这里接着往下看。
+    rejected = ["题{n}", "{n}题号", "第{n}题的答案", "{n}班人数", "第{n}题号"]
+    for template in rejected:
+        header = FIELDS + [template.format(n=number) for number in range(1, 101)]
+        parsed = parse_assessment_import(
+            "题号写法.csv",
+            _csv([_row("赵同学", 1, 12, 1, 4)], header=header).encode("utf-8"),
+        )
+        assert parsed["header_errors"], template
+
+
+def test_the_summary_total_column_ignores_brackets_and_spaces(client):
+    """`总分` 那一列的写法（2026-09-28 放宽）：全半角括号、括号内外的空格都不影响。
+
+    `总分（标准分）` 是**学校真实文件里存在的一列**，而括号在中文 Excel / WPS 里几乎
+    总是随手敲的——半角括号、两边各夹一个空格，都是同一列的变体。此前只按字面比，
+    症状是用户看着表上明明有一列「总分(标准分)」，却拿到一句「表头里既没有认出任何
+    题号列……也没有「总分」列」。
+
+    **走接口、不只走纯函数**：汇总档是 §18.9 那条**不写答卷**的路，「这一列认出来了」
+    与「这一批被当成汇总档」在界面上是两个不同的后果（后者决定了关注等级那一列从哪来）。
+    """
+    add_students(client, admin(client), [("S701", "赵同学", "男", 12)])
+    headers = counselor(client)
+
+    for label in [
+        "总分（标准分）",  # 一直在认的写法
+        "总分(标准分)",
+        "总分 ( 标准分 )",
+        "总分（ 标准分 ）",
+        "总得分（标准分）",
+    ]:
+        data = _preview_data(
+            client,
+            headers,
+            _csv(
+                [_summary_row("赵同学", 2, 12, 1, 4, 57)],
+                header=FIELDS + [label] + DIMENSION_FIELDS,
+            ),
+        )
+        assert data["import_mode"] == SOURCE_TYPE_SUMMARY, label
+        assert _statuses(data) == ["MATCHED"], (label, data["rows"])
+
+    # **括号里的内容仍然要看**：`总分（原始分）` 是另一回事（不是标准分），而归一化
+    # **只去掉括号字符、不去掉内容**——收下它会是一处静默的错（一个按原始分算出来的数
+    # 被当成标准分去判级），比认不出来糟得多。
+    assert "也没有「总分」列" in _preview_error(
+        client,
+        headers,
+        _csv([], header=FIELDS + ["总分（原始分）"] + DIMENSION_FIELDS),
+    )
 
 
 def test_bad_answer_cells_name_the_question_numbers(client):
