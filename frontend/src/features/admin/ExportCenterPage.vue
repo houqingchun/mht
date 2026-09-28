@@ -39,6 +39,7 @@ import {
   maskLevelLabel,
   maskLevelTone
 } from '../../services/labels'
+import { formatDateTime } from '../../services/dates'
 import {
   downloadExportJob,
   exportFileName,
@@ -160,19 +161,6 @@ const columns = computed<Column[]>(() => {
   base.push({ key: 'actions', label: '操作', width: '150px' })
   return base
 })
-
-/**
- * 后端发的是 `2026-09-19T14:30:00`（朴素本地时间，不是 UTC）。
- *
- * 这里只截到分钟，**不做时区换算**——`new Date(...)` 会把一个没有时区标记的串按
- * 浏览器本地时区解释，而它本来就是本地时间，转一圈只会引入一次偏移（学生交卷时间
- * 那一列用的是同一套口径，见 `models/common.py` 的两个时钟）。所以是切字符串，
- * 不是解析。
- */
-function shortMoment(value: string | null): string {
-  if (!value) return '—'
-  return value.slice(5, 16).replace('T', ' ')
-}
 
 async function download(job: ExportJob) {
   downloading.value = job.id
@@ -311,19 +299,19 @@ onMounted(load)
           </span>
         </template>
 
-        <template #created_at="{ row }">{{ shortMoment(row.created_at) }}</template>
+        <template #created_at="{ row }">{{ formatDateTime(row.created_at) }}</template>
 
         <template #expires_at="{ row }">
           <!-- 「有效期」这一格按状态分岔：可下载的写它什么时候到期，已过期的写它
                什么时候过期的。同一格两句话，因为读者要做的判断不同——一个是
                「我还有多久」，另一个是「哦，它已经没了」。 -->
           <span v-if="row.status === 'EXPIRED'" class="muted">
-            {{ shortMoment(row.expires_at) }} 已过期
+            {{ formatDateTime(row.expires_at) }} 已过期
           </span>
           <span v-else-if="row.status === 'REVOKED'" class="muted">
-            {{ shortMoment(row.revoked_at) }} 被撤销
+            {{ formatDateTime(row.revoked_at) }} 被撤销
           </span>
-          <span v-else class="nowrap">{{ shortMoment(row.expires_at) }} 前</span>
+          <span v-else class="nowrap">{{ formatDateTime(row.expires_at) }} 前</span>
         </template>
 
         <template #download_count="{ row }">

@@ -11,6 +11,7 @@ import { useDataImport } from '../../composables/useDataImport'
 import { getMe, getScaleVersions, publishScaleVersion, type ScaleVersion } from '../../services/api'
 import { showToast } from '../../services/toast'
 import { SCALE_STATUS_ORDER, scaleStatusLabel, scaleStatusTone } from '../../services/labels'
+import { formatDateTime } from '../../services/dates'
 
 const router = useRouter()
 const versions = ref<ScaleVersion[]>([])
@@ -240,7 +241,7 @@ onMounted(load)
           <div v-if="current" class="detail-grid" style="margin-top:13px">
             <div class="detail-row"><span>规则版本</span><b>{{ current.rule_version || '—' }}</b></div>
             <div class="detail-row"><span>量表编码</span><b>{{ current.code }}</b></div>
-            <div class="detail-row"><span>发布时间</span><b>{{ current.published_at?.slice(0, 10) || '—' }}</b></div>
+            <div class="detail-row"><span>发布时间</span><b>{{ formatDateTime(current.published_at) }}</b></div>
           </div>
         </div>
       </div>

@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import SkeletonBlock from '../../components/SkeletonBlock.vue'
 import ErrorState from '../../components/ErrorState.vue'
 import { getMe, getLeaderProgress, type LeaderProgressItem } from '../../services/api'
+import { formatDate } from '../../services/dates'
 import { useRoute, useRouter } from 'vue-router'
 import {
   applyProgressFilter,
@@ -149,7 +150,7 @@ onMounted(load)
             <span :class="['pill', statusTone(row.case_status)]">{{ statusLabel(row.case_status) }}</span>
           </template>
           <template #owner_name="{ row }">{{ row.owner_name || '未分配' }}</template>
-          <template #next_follow_up_date="{ row }">{{ row.next_follow_up_date || '—' }}</template>
+          <template #next_follow_up_date="{ row }">{{ formatDate(row.next_follow_up_date) }}</template>
           <template #overdue="{ row }">
             <span v-if="row.overdue" class="pill red">是</span>
             <span v-else class="pill gray">否</span>

@@ -37,6 +37,7 @@ import {
   taskStatusLabel
 } from '../../services/labels'
 import { createLatestRequest } from '../../services/latest-request'
+import { formatDateTime } from '../../services/dates'
 import {
   getMe,
   getAuditLogs,
@@ -1143,7 +1144,7 @@ onUnmounted(() => {
             </thead>
             <tbody>
               <tr v-for="job in recentJobs" :key="job.id">
-                <td class="nowrap">{{ job.created_at || '—' }}</td>
+                <td class="nowrap">{{ formatDateTime(job.created_at) }}</td>
                 <td>{{ job.action }}</td>
                 <td><span :class="['pill', jobTone(job)]">{{ jobResult(job) }}</span></td>
                 <td>{{ job.actor_role || '—' }}</td>
@@ -1541,7 +1542,7 @@ onUnmounted(() => {
         <div class="detail-row"><span>导出用途</span><b>{{ selectedExportLog.purpose || '—' }}</b></div>
         <div class="detail-row"><span>数据范围</span><b>{{ selectedExportLog.resource_id || '全部档案' }}</b></div>
         <div class="detail-row"><span>角色</span><b>{{ selectedExportLog.actor_role || '—' }}</b></div>
-        <div class="detail-row"><span>时间</span><b>{{ selectedExportLog.created_at || '—' }}</b></div>
+        <div class="detail-row"><span>时间</span><b>{{ formatDateTime(selectedExportLog.created_at) }}</b></div>
       </div>
       <template #footer>
         <button class="btn primary" @click="showExportLog = false">关闭</button>

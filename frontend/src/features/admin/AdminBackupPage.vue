@@ -27,6 +27,7 @@ import ErrorState from '../../components/ErrorState.vue'
 import SkeletonBlock from '../../components/SkeletonBlock.vue'
 import { showToast } from '../../services/toast'
 import { backupStatusLabel, backupStatusTone, backupTriggerLabel } from '../../services/labels'
+import { formatDateTime } from '../../services/dates'
 import {
   downloadBackupRecord,
   getBackupOverview,
@@ -165,16 +166,6 @@ const columns: Column[] = [
   { key: 'actions', label: '操作', align: 'right', width: '110px' }
 ]
 
-/**
- * 后端发的是 `2026-09-27T03:12:00`（**朴素本地时间**，不是 UTC）。
- * 只截到分钟、**不做时区换算** —— `new Date(...)` 会把一个没有时区标记的串按浏览器
- * 的时区解释，于是同一行在两个时区的机器上显示两个时间。
- */
-function shortMoment(value: string | null): string {
-  if (!value) return '—'
-  return value.slice(5, 16).replace('T', ' ')
-}
-
 function sizeText(bytes: number | null): string {
   if (bytes === null || bytes === undefined) return '—'
   if (bytes < 1024) return `${bytes} B`
@@ -238,7 +229,7 @@ onMounted(load)
               <template v-if="overview?.last_success">
                 <div class="detail-row">
                   <span>时间</span>
-                  <b>{{ shortMoment(overview.last_success.created_at) }}</b>
+                  <b>{{ formatDateTime(overview.last_success.created_at) }}</b>
                 </div>
                 <div class="detail-row">
                   <span>文件</span>
@@ -261,7 +252,7 @@ onMounted(load)
               <div class="section-title">最近一次失败</div>
               <div class="detail-row">
                 <span>时间</span>
-                <b>{{ shortMoment(overview.last_failure.created_at) }}</b>
+                <b>{{ formatDateTime(overview.last_failure.created_at) }}</b>
               </div>
               <div class="detail-row">
                 <span>触发方式</span>
@@ -358,7 +349,7 @@ onMounted(load)
           :page-size="20"
           :empty-text="emptyText"
         >
-          <template #created_at="{ row }">{{ shortMoment(row.created_at) }}</template>
+          <template #created_at="{ row }">{{ formatDateTime(row.created_at) }}</template>
           <template #trigger="{ row }">
             {{ backupTriggerLabel(row.trigger) }}<span v-if="!row.operator_name" class="muted tiny"> · 系统</span>
           </template>

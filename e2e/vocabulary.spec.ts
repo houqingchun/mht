@@ -371,6 +371,41 @@ async function leakedRoleNames(scope: Locator): Promise<string[]> {
 }
 
 /**
+ * **没有年份的日期**（§5.28，2026-09-28）。
+ *
+ * 用户的原话：「系统中所有的日期时间显示，要显示完整，不能仅显示日期+时间，因系统是要
+ * 长期运行，跨度可能是3年（学生整个初中），所以如果只显示9月17日，无法知道是哪一年的
+ * 9月17日」。
+ *
+ * 缺陷的原形是 `dates.ts` 里那句 `value.slice(5, 16).replace('T', ' ')` ——
+ * `2026-09-25T09:00:00` 被切成 `09-25 09:00`。它当时**有四份**（三个页面各抄了一份），
+ * 所以屏幕上看起来完全正常：一个「只是个日期」的串，没有人会怀疑它缺了什么。
+ *
+ * 判据两种形状，都要求「这一串里没有四位年份」：
+ *
+ * | 形状 | 例子 |
+ * |---|---|
+ * | `MM-DD HH:mm` / `MM-DDTHH:mm` | `09-25 09:00` |
+ * | 中文日期 | `9月17日` |
+ *
+ * **前一个负向后顾 `(?<![\d-])` 是这条正则的全部难点**：`2026-09-25 09:00`
+ * 里也含 `09-25 09:00`，若不排除「前面紧跟着数字或连字符」的那种，一条**正确**的
+ * 带年份日期会当场命中——而会无故变红的守卫很快会被人关掉（§24）。
+ * 排除之后 `2026-09-25 09:00` 从 `09-25` 那一格起不匹配（前一个字符是 `-`），
+ * 而裸的 `09-25 09:00` 前一个字符是空白或行首，照旧命中。
+ *
+ * 它扫的是 `innerText`（**像素**），不是接口 payload——所以注释与 `<svg>` 的贝塞尔
+ * 路径曲线（`M58 94C33 83…` 那种，里面全是 `数字-数字`）都不会误伤。
+ */
+const YEARLESS_DATE_PATTERN = /(?<![\d-])\d{2}-\d{2}[ T]\d{2}:\d{2}|(?<![\d-])\d{1,2}月\d{1,2}日/g;
+
+/** 给定区域内出现过的无年份日期（去重、保序）。 */
+async function datedWithoutYear(scope: Locator): Promise<string[]> {
+  const text = await scope.innerText();
+  return [...new Set(text.match(YEARLESS_DATE_PATTERN) ?? [])];
+}
+
+/**
  * 走完一个角色的页面，把出现裸编码的页面收集起来一次性报告。
  *
  * 一页一断言会让第一个泄漏挡住后面的；这个契约是「全都不许漏」，一次看全更有用。
@@ -380,6 +415,9 @@ async function auditPages(page: Page, role: RoleName, paths: string[]) {
   // 与 `leaks` 分开收集、分开断言：两者是两条不同的契约（「视图有没有调用标签函数」
   // 与「有没有用被冻结的角色名」），合成一条数组时红色的那句话会说错规矩。
   const roleLeaks: string[] = [];
+  // 第三条契约，同样单独收集、单独断言：日期缺年份与「编码没翻译」是两件事，
+  // 合成一条数组时红色那句会指向错的那张表。
+  const yearless: string[] = [];
   for (const path of paths) {
     await page.goto(path);
     await page.waitForLoadState('networkidle');
@@ -387,6 +425,9 @@ async function auditPages(page: Page, role: RoleName, paths: string[]) {
     for (const code of codes) leaks.push(`${path} → ${code}`);
     for (const name of await leakedRoleNames(page.locator('body'))) {
       roleLeaks.push(`${path} → ${name}`);
+    }
+    for (const dated of await datedWithoutYear(page.locator('body'))) {
+      yearless.push(`${path} → ${dated}`);
     }
     // 页签内容默认不渲染，只扫落地那一屏会漏掉后面几个页签。
     // 复测计划页签的 `{{ plan.status }}` 就是这样漏过第一遍扫描的。
@@ -400,10 +441,14 @@ async function auditPages(page: Page, role: RoleName, paths: string[]) {
       for (const name of await leakedRoleNames(page.locator('body'))) {
         roleLeaks.push(`${path} · ${label}页签 → ${name}`);
       }
+      for (const dated of await datedWithoutYear(page.locator('body'))) {
+        yearless.push(`${path} · ${label}页签 → ${dated}`);
+      }
     }
   }
   expect(leaks, `${role} 的页面把后端编码原样显示了`).toEqual([]);
   expect(roleLeaks, `${role} 的页面出现了被冻结的角色名`).toEqual([]);
+  expect(yearless, `${role} 的页面显示了没有年份的日期（§5.28）`).toEqual([]);
 }
 
 /**
@@ -631,6 +676,36 @@ test.describe('状态词汇：界面上不得出现后端编码', () => {
     await expect(rows.first()).toBeVisible();
     expect(await rows.count()).toBeGreaterThan(1);
     expect(await leakedCodes(page.locator('body')), '全部学生页签把后端编码原样显示了').toEqual([]);
+  });
+
+  /**
+   * 日期必须带年份（2026-09-28 加，§5.28）。**这是那条缺陷唯一能在界面上被抓住的地方。**
+   *
+   * 静态守卫（`backend/app/tests/test_date_display_includes_year.py`）挡的是「有人把
+   * `dates.ts` 改回去」与「再长出一份内联副本」，它**看不见视图有没有调用那三个函数**。
+   * 而这一条看的是像素：扫描面全站的 `auditPages` 已经把 `datedWithoutYear` 挂上去了，
+   * 但它对**每一格都恰好为空的页面**毫无信号（一个空格子里的坏实现在变异下永远是绿的），
+   * 所以这里挑一页**一定有日期**的来把「有东西可扫」证明掉。
+   *
+   * 挑审计页是因为它的「时间」列**整列**都是 `formatDateTime` 的输出，而且逐行不同
+   * ——演示库里审计行足够多（`seed_demo` 与 e2e 自己都会写），不依赖某一条特定记录。
+   * 它同时是 M2 变异（把插槽换成 `row.created_at.slice(5, 16)`）的现场。
+   */
+  test('日期的年份不许省', async ({ page }) => {
+    await loginAs(page, 'counselor');
+    await page.goto('/counselor/audit');
+    await page.waitForLoadState('networkidle');
+
+    // 先证明有东西可扫：审计页的「时间」列必须真的印出带年份的完整时刻。
+    // 少了这一句，一个「日期列整列没渲染」的实现会让下面那条断言在白纸上通过。
+    const rows = page.locator('.card-body tbody tr');
+    await expect(rows.first()).toBeVisible();
+    await expect(page.locator('body')).toContainText(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}/);
+
+    expect(
+      await datedWithoutYear(page.locator('body')),
+      '页面上出现了没有年份的日期（§5.28：系统按整个初中三年运行，09-25 读不出是哪一年）'
+    ).toEqual([]);
   });
 
   test('学生页面', async ({ page }) => {

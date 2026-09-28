@@ -42,6 +42,7 @@ import {
   OWNER_TABS,
   type OwnerFilter
 } from '../../services/careQueue'
+import { formatDate } from '../../services/dates'
 
 const route = useRoute()
 const router = useRouter()
@@ -758,7 +759,7 @@ onMounted(load)
             <template #owner_name="{ row }">{{ row.owner_name || '未分配' }}</template>
             <template #next_follow_up_date="{ row }">
               <span v-if="row.overdue" class="pill red">已逾期</span>
-              <span v-else>{{ row.next_follow_up_date || '—' }}</span>
+              <span v-else>{{ formatDate(row.next_follow_up_date) }}</span>
             </template>
             <template #actions="{ row }">
               <button class="btn small" @click="openDetail(row.student_id)">查看档案</button>
@@ -820,7 +821,12 @@ onMounted(load)
             </template>
             <!-- 数值列的界面约定是「—」而不是空（§3；CSV 那一侧才留空）。 -->
             <template #total_score="{ row }">{{ row.total_score ?? '—' }}</template>
-            <template #submitted_at="{ row }">{{ row.submitted_at?.slice(0, 10) || '—' }}</template>
+            <!-- 按**日期**渲染而不是连同时刻：这一列是与「学生记录 / 历次趋势」同一个
+                 字段（每名学生最近一场会话），而外部导入那一场的时间部分是
+                 `datetime(年,月,日)`（恒 `00:00`，见 `assessment_import_service`）——
+                 同一列里两种精度并存时读者分不出哪一行是哪种，所以整列按日期
+                 （`dates.ts` 那张表的第四行）。 -->
+            <template #submitted_at="{ row }">{{ formatDate(row.submitted_at) }}</template>
             <!-- 没有会话时是「—」而不是「系统内作答」：没有测过与「测评是系统内做的」
                  不是一回事（`export_service` 的「来源」列同一条约定）。 -->
             <template #source="{ row }">

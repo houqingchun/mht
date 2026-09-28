@@ -30,7 +30,7 @@ import ProfessionalReportList from '../components/ProfessionalReportList.vue'
 import ProfessionalReportVersions from '../components/ProfessionalReportVersions.vue'
 import { useSettings } from '../../../composables/useSettings'
 import { createLatestRequest } from '../../../services/latest-request'
-import { formatDateTime } from '../../../services/dates'
+import { formatDateTime, formatLocalMoment } from '../../../services/dates'
 import { reportStatusLabel, reportStatusTone, reportVersionLabel } from '../../../services/labels'
 import {
   createProfessionalReport,
@@ -780,7 +780,7 @@ async function exportReport() {
   try {
     const job = await exportProfessionalReport(report.id, purpose, versionNo)
     lastExport.value = {
-      at: new Date().toLocaleString('zh-CN', { hour12: false }),
+      at: formatLocalMoment(new Date()),
       jobNo: job.job_no,
       purpose,
       version: `V${versionNo}`

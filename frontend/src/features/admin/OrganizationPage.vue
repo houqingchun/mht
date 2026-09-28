@@ -28,6 +28,7 @@ import {
   studentStatusLabel,
   studentStatusTone
 } from '../../services/labels'
+import { formatDateTime } from '../../services/dates'
 
 /**
  * 组织与学生账号 —— 名册的**唯一**入口（2026-09-17 合并）。
@@ -436,7 +437,7 @@ onMounted(load)
                   <!-- 错误数只在**真的有问题**时标红：`0` 与 `3` 在同一列里长得一样的话，
                        这一列就白留了。 -->
                   <td :class="batch.error_rows ? 'status-bad' : ''">{{ batch.error_rows }}</td>
-                  <td>{{ batch.created_at }}</td>
+                  <td>{{ formatDateTime(batch.created_at) }}</td>
                   <td><button class="btn" @click="openBatchDetail(batch)">查看明细</button></td>
                 </tr>
               </tbody>

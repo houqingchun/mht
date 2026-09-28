@@ -17,6 +17,7 @@
  * `innerText`，而 SVG 的 `<text>` 也在 innerText 里，漏一个码就会让它变红。
  */
 import { computed } from 'vue'
+import { formatDate } from '../services/dates'
 import { levelLabel, levelTone } from '../services/labels'
 import { scoredPoints } from '../services/trend'
 
@@ -93,8 +94,10 @@ const legend = computed(() => {
   return seen.map(level => ({ level, label: levelLabel(level), tone: levelTone(level) }))
 })
 
+// 按**日期**渲染（`dates.ts` 那张表的第四行）：这一列混着两个来源，外部导入那一场
+// 存的是 `datetime(年,月,日)`、时间恒为 `00:00`，弹出时刻等于替它编一个没发生过的事件。
 function dateOf(value: string | null) {
-  return value ? value.slice(0, 10) : '—'
+  return formatDate(value)
 }
 </script>
 

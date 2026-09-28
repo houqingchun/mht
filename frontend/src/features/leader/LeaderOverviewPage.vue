@@ -25,6 +25,7 @@ import {
   statusTone
 } from '../../services/labels'
 import { PROGRESS_FILTERS, type ProgressFilter } from './progressFilters'
+import { formatDate } from '../../services/dates'
 
 const router = useRouter()
 
@@ -414,7 +415,7 @@ onMounted(load)
               <span :class="['pill', statusTone(row.case_status)]">{{ statusLabel(row.case_status) }}</span>
             </template>
             <template #owner_name="{ row }">{{ row.owner_name || '未分配' }}</template>
-            <template #next_follow_up_date="{ row }">{{ row.next_follow_up_date || '—' }}</template>
+            <template #next_follow_up_date="{ row }">{{ formatDate(row.next_follow_up_date) }}</template>
             <template #overdue="{ row }">
               <span v-if="row.overdue" class="pill red">是</span>
               <span v-else class="pill gray">否</span>

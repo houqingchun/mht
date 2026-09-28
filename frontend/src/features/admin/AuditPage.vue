@@ -8,6 +8,7 @@ import { showToast } from '../../services/toast'
 import { downloadCsv } from '../../services/csv'
 import { ROLE_LABELS } from '../../services/labels'
 import { getMe, getAuditLogs, type AuditLogItem } from '../../services/api'
+import { formatDateTime } from '../../services/dates'
 import { createLatestRequest } from '../../services/latest-request'
 
 const router = useRouter()
@@ -213,6 +214,15 @@ onMounted(load)
           @update:page="load"
           @update:page-size="page = 1; load()"
         >
+          <!-- 「时间」这一列此前没有插槽，走的是 `DataTable` 的默认渲染
+               （`{{ row[column.key] ?? '—' }}`）——于是它印的是**原始 ISO 串**
+               `2026-09-28T14:33:05`：`T` 是给人看的噪音，而它恰好是这个项目里
+               日期三套长相中的一种（`dates.ts` 开头列着那三套）。年份本来就在，
+               所以它不是 §5.28 那个缺陷的现场，但同一屏上只有这一列长得不一样。
+               导出那一份（`audit-log.csv`）**仍然是 ISO**：那是本机拼的文件、与后端
+               每一份 CSV（`export_service` 全用 `.isoformat()`）同一个约定，
+               而 ISO 在文件里是机器与人都读得准的形状。 -->
+          <template #created_at="{ row }">{{ formatDateTime(row.created_at) }}</template>
           <template #actor_name="{ row }">
             <span>{{ actorLabel(row) }}</span>
             <span v-if="row.actor_account && row.actor_name" class="muted tiny"> · {{ row.actor_account }}</span>

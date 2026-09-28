@@ -8,7 +8,7 @@ import SkeletonBlock from '../../components/SkeletonBlock.vue'
 import ErrorState from '../../components/ErrorState.vue'
 import { showToast } from '../../services/toast'
 import { useSettings } from '../../composables/useSettings'
-import { daysFromNow, today } from '../../services/dates'
+import { daysFromNow, formatDate, today } from '../../services/dates'
 import {
   dimensionLabel,
   levelLabel,
@@ -1080,7 +1080,7 @@ onMounted(load)
                     <td>{{ c.owner_name || '未分配' }}</td>
                     <td>
                       <span v-if="c.overdue" class="pill red">已逾期</span>
-                      <span v-else>{{ c.next_follow_up_date || '—' }}</span>
+                      <span v-else>{{ formatDate(c.next_follow_up_date) }}</span>
                     </td>
                     <td>
                       <!-- `@click.stop` 不能省：整行已经挂了同一个 `openDetail`，
@@ -1291,19 +1291,19 @@ onMounted(load)
         <h3>跟进记录</h3>
         <ul>
           <li v-for="record in detail.follow_ups" :key="record.id">
-            {{ record.record_type }} · 下次 {{ record.next_follow_up_date }}
+            {{ record.record_type }} · 下次 {{ formatDate(record.next_follow_up_date) }}
           </li>
         </ul>
         <h3>家庭回访</h3>
         <ul>
           <li v-for="record in detail.family_contacts" :key="record.id">
-            {{ record.contact_date }} · {{ record.channel }} · {{ record.result }}
+            {{ formatDate(record.contact_date) }} · {{ record.channel }} · {{ record.result }}
           </li>
         </ul>
         <h3>复测计划</h3>
         <ul>
           <li v-for="plan in detail.retest_plans" :key="plan.id">
-            {{ plan.planned_date }} · {{ retestStatusLabel(plan.status) }}
+            {{ formatDate(plan.planned_date) }} · {{ retestStatusLabel(plan.status) }}
           </li>
         </ul>
       </template>

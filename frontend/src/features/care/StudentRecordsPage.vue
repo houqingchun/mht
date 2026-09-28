@@ -49,6 +49,7 @@ import {
   type StudentAssessmentRecords,
   type FullAnswerItem
 } from '../../services/api'
+import { formatDate } from '../../services/dates'
 import { deltaTone, latestScoreDelta, scoreRange, scoredPoints } from '../../services/trend'
 
 const route = useRoute()
@@ -121,11 +122,15 @@ const activeTab = ref('history')
  * 两个字段分开取是有理由的：`tested_at` 是**真实发生**的测评日（外部导入的那一场
  * 存的是文件里的日期），`submitted_at` 在在线作答时与它相同，而历史行两者都是 null
  * （0013 刻意没有回填，§21）——那时按 `submitted_at` 兜底，读不出日期就留 `—`。
+ *
+ * 按**日期**渲染而不是连同时刻：这一列混着两个来源，外部导入写的是
+ * `datetime(年,月,日)`、时间恒为 `00:00`，只有在线那一场才有真实时刻。两种精度
+ * 并存时读者分不出哪一行是哪种，所以整列按日期——`dates.ts` 那张表的第四行。
  */
 const recentDate = computed(() => {
   const assessment = records.value?.assessment
   if (!assessment) return '—'
-  return (assessment.tested_at || assessment.submitted_at || '').slice(0, 10) || '—'
+  return formatDate(assessment.tested_at || assessment.submitted_at)
 })
 
 /**
@@ -380,7 +385,7 @@ async function loadAnswers() {
             empty-text="这名学生还没有已交卷的测评"
           >
             <template #submitted_at="{ row }">
-              {{ row.submitted_at?.slice(0, 10) || '—' }}
+              {{ formatDate(row.submitted_at) }}
             </template>
             <!-- 「来源」这一格顺带承担**已作废**的标识（V2.0.0 §4.6）。不另开一列：
                  作废是少数行的属性，单开一列会让绝大多数行都空着，而「来源」正是

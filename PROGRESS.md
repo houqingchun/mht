@@ -6604,3 +6604,217 @@ def _question_number_of(match: re.Match) -> int:
 **残留照旧**：`backend/` 及其子目录下那 4 个 `.DS_Store`（合计 28,688 B）**这次仍然进了包**
 （`copy_backend` 的忽略列表里没有它们）。Windows 上无害。改 `build_package.py` 的排除列表
 要单独一批（§5.26.9 记着同一条），这次没有顺手带上。
+
+---
+
+### 5.28 日期时间的年份不许省：四份副本收敛成一处（2026-09-28，V2.3.0）
+
+#### 5.28.1 用户原话与判据
+
+> 系统中所有的日期时间显示，要显示完整，不能仅显示日期+时间，因系统是要长期运行，跨度
+> 可能是3年（学生整个初中），所以如果只显示9月17日，无法知道是哪一年的9月17日。
+> 请拉取一个新的分支V2.3.0来更新，全部完整后重新打包
+
+用户指的是 `formatDateTime` 渲染出来的 **`09-25 09:00`**——`MM-DD HH:mm`，**没有年份**。
+判据落成两条，全站一律：
+
+| 函数 | 形状 | 用在哪 |
+|---|---|---|
+| `formatDateTime` | `YYYY-MM-DD HH:mm` | 一切**时刻** |
+| `formatDate` | `YYYY-MM-DD` | 一切**纯日期**列 |
+| `formatLocalMoment` | `YYYY-MM-DD HH:mm` | 浏览器本地的「此刻」（用户刚点了导出那一下） |
+
+分支 `V2.3.0` 从 `V2.2.0` 的 HEAD `490e42e` 分出（`git switch -c V2.3.0`）。
+
+#### 5.28.2 ★ 缺陷原形是**四份**，不是一个
+
+`slice(5, 16).replace('T', ' ')` 当时在四处各写了一遍：`services/dates.ts` 一处，加三个页面
+**各自抄的一份**（`ExportCenterPage` / `SessionListDialog` / `AdminBackupPage`）。
+
+所以「补年份」这件事在它们身上是**三个独立的改动点**，而**只要漏掉一个，那一页就继续印
+没有年份的时间**——它看起来只是一个正常的日期，没有任何东西会红。这与 §3 那条
+「表在 `labels.ts` 里而没人从那儿取，也算没接上」是同一个形状的第 N 次发作：
+
+> 同一处只许有一个定义；**多份副本的代价不是重复，是「改一处不动另一处」不会被发现**。
+
+处置：三处内联副本删掉，改用 `dates.ts`。`SessionListDialog` 那一处同时换掉了
+`toLocaleString('zh-CN', …)` 出来的 `2026/9/28 14:33:05`（斜杠、不补零、带秒）——它
+**本来就有年份**，所以它不是本缺陷的现场，收敛过来只为了一处定义、一个形状
+（`formatLocalMoment` 这个函数就是为它新增的）。
+
+#### 5.28.3 粒度判据：四行表，写在 `dates.ts` 的 docstring 里
+
+`formatDateTime` 与 `formatDate` 的分工**只有一个判据**，写在该文件里：
+
+> **这一列承载了几分信息，由写入方决定**（§21 那条「`tested_at` 刻意不回填」同一个口径
+> ——不替数据编一个它没有的精度）。
+
+| 这一列怎么写进去的 | 用它 |
+|---|---|
+| `Date` 列（`next_follow_up_date` / `contact_date` / `next_contact_date` / `planned_date`） | `formatDate` |
+| `DateTime` 列，由系统写（`now_utc_naive()` / `func.now()`） | `formatDateTime` |
+| `DateTime` 列，由 `<input type="date">` 写（**任务窗口** `start_at` / `end_at`） | `formatDate` |
+| `DateTime` 列，但**同一列混有两个来源**（`tested_at`） | `formatDate` |
+
+第三、四行不是「例外」，是同一条判据的另一半：那两处的 `DateTime` 上一次**只可能**被写成
+`00:00`，弹出 `00:00` 才是编精度。
+
+第四行是唯一一条**按整列而不是按单个值**的：一列里一半的行有真实时刻（在线作答）、
+另一半没有（外部导入写的是 `datetime(年,月,日)`）。读者**从屏幕上分不出哪一半是哪一半**，
+同一列里两种精度并存等于让 `00:00` 冒充一个发生过的事件。所以整列按日期渲染。
+
+**`<input type="date">` 的那些 `.slice(0, 10)` 不能顺手换成 `formatDate`**（`TasksPage.vue`
+里留了「有意保留」的注释）：空值回 `—` 会被浏览器判成非法日期，那不是显示问题，是表单坏掉。
+
+#### 5.28.4 两族输入不能互换
+
+`formatLocalMoment` 与另两个**分开不是因为粒度，是因为输入**，两边都换成对方那一套都会错：
+
+- `formatDateTime` 处理**服务端来的朴素串**，所以它切字符串、**绝不 `new Date()` 解析**
+  ——`new Date('2026-09-25T09:00:00')`（不带时区标记）会按**浏览器本地时区**解释它，
+  而它本来就是后端那台机器的朴素本地时间。全库有两个时钟（§20），前端一次都不该参与换算。
+- `formatLocalMoment` 手上本来就是一个本地 `Date` 对象，必须用 `getFullYear()` 一类的
+  **本地**读数去拼；拿 `toISOString()` 会给 UTC，UTC+8 的晚上 08:30 会显示成前一天的
+  00:30，**跨年夜连年份都会差一位**。
+
+#### 5.28.5 守卫两半，各挡一种再犯法
+
+| 判据 | 在哪 | 挡的是 |
+|---|---|---|
+| `formatDateTime` 的返回值必须从含年份的那一段切出来 | `backend/app/tests/test_date_display_includes_year.py::test_format_datetime_keeps_the_year` | 有人把 `slice(0, 16)` 改回 `slice(5, 16)`（改一处、全站退化） |
+| `frontend/src` 下**再长出**一份 `slice(5, 16)` 的内联副本 | 同文件 `::test_no_page_re_introduces_an_inline_truncated_copy`（`rglob` + 空转自检 `len(scanned) >= 30`） | **更值钱的那一半**：缺陷当年之所以存活，正是因为它是四份 |
+| **视图有没有调用那三个函数** | `e2e/vocabulary.spec.ts` 的 `YEARLESS_DATE_PATTERN` / `datedWithoutYear` | 一个页面内联写别的形状（`{{ row.created_at.substring(5, 16) }}` 那类），静态守卫看不见 |
+
+**静态那一半的网眼写明了**：它判的是**文本**不是语义，读的是源码字符串、不认识 TypeScript，
+所以它挡的是「有人改回去」，不是「这个函数在任何输入下都对」——后者只有 e2e 的像素能证。
+
+e2e 那一半挂进既有的 `auditPages`，是**第三条契约**（前两条是 `leakedCodes` 与
+`leakedRoleNames`），**单独一个数组、单独一条断言**：
+
+```ts
+const YEARLESS_DATE_PATTERN = /(?<![\d-])\d{2}-\d{2}[ T]\d{2}:\d{2}|(?<![\d-])\d{1,2}月\d{1,2}日/g;
+```
+
+**负向后顾 `(?<![\d-])` 是这条判据唯一的技术要害**：没有它，`2026-09-25 09:00` 里的
+`09-25 09:00` **自己就匹配**，于是一次全绿也会红（或反过来被人改成更松的形状）。
+`\d{2}-\d{2}` 前面紧跟着数字或连字符的一律不要，正是「这一格属于一个更长的、含年份的串」。
+
+另外两条写法上的讲究：扫的是 `innerText`（**像素**），所以注释、`<svg>` 的 `path d=`、
+`title=` 这些都在 `innerText` 之外，不会误伤；「会无故变红的守卫很快会被人关掉」（§24）——
+所以宁可窄，不宁可宽。
+
+**新用例（`日期的年份不许省`）自己先证明有东西可扫**：挑审计页是因为它的「时间」列**整列**都是
+`formatDateTime` 的输出、逐行不同、演示库里行足够多；先
+`toContainText(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}/)` 再断言 `datedWithoutYear(...) === []`。
+**没有前面那一句，一个「日期列整列没渲染」的实现会让后面那条断言在白纸上通过。**
+
+#### 5.28.6 ★ 变异验证：M3 红在自证那一行，M4 才是考收集器的形状
+
+第一次变异（M3）把审计页插槽换成 `{{ row.created_at.substring(5, 16).replace('T',' ') }}`
+（**刻意用 `substring` 而不是 `slice`**，为了绕开静态守卫那个 `slice(5, 16)` 正则，
+单独考 e2e 这一半）。结果：用例**确实变红，但红在第 703 行那句自证 `toContainText` 上**
+——收集器那条断言根本没执行到。
+
+改成 M4「**保留带年份的那一份，额外再渲染一个无年份副本**」：
+
+```html
+{{ formatDateTime(row.created_at) }} {{ row.created_at.substring(5, 16) }}
+```
+
+自证通过，**收集器那条（第 708 行）变红**，才真正证明 `datedWithoutYear` 有牙。
+
+> **可复用的那条**：「先证明有东西可扫」这一句在「**整页丢年份**」这种变异下**会先拦住**，
+> 于是它挡住了收集器自己的自证——**要考收集器本身，变异必须是「两者并存」的形状**。
+> 这与 §32 那条「一处判据的措辞如果超出它的判据范围，会让下一个验证它的人打错靶」
+> 是同一族：**变异没红时，先怀疑变异写错了。**
+
+另一次记录在案的网眼：M3 之下**静态守卫仍然全绿**（它判 `slice(5, 16)`，`substring(5, 16)`
+不匹配）。这不是失灵——两半各管一种再犯法，静态管「改回去 / 再长出内联副本」，
+e2e 管「视图有没有调用那三个函数」。
+
+#### 5.28.7 ★ 升版本必须跟两条生成器，否则后端 4 条守卫变红
+
+`__version__` 从 `2.2.0` 升到 `2.3.0`（§19 唯一出处；唯一镜像 `frontend/package.json`；
+`VERSION_LABEL` 自动变 `V2.3`；`test_app_version.py` 里三处字面量一并改）之后，
+后端全量 **4 failed**：
+
+- `test_incremental_upgrade_sql.py` 两条（`[V1.0.0]` / `[V1.1.6]`）
+- `test_seed_sql.py` 两条（`test_the_snapshot_is_what_todays_seed_renders` /
+  `test_the_snapshot_really_imports_into_an_empty_database`）
+
+**原因是两条 `upgrade_from_*.sql` 与 `seed_mysql8.sql` 的「文件头里带着版本号」**
+（`-- 到  V2.2.0（迁移 0024_backup_record）`、`-- 版本：V2.2（2.2.0）`），
+而这三份是**生成物**、守卫逐字节比对今天这棵树渲染出来的东西（§30 / §31）。
+**这是守卫按设计工作，不是回归。**
+
+修法两条，都要跑：
+
+```
+make db-upgrade-sql    # 纯文件操作，两份落到 backend/sql/ 与 dist/，cmp 确认一致
+make db-seed-sql       # 要连一台活着的 MySQL：真的跑一遍 seed + reset 再从 <主库名>_init 读回
+```
+
+复跑那两个文件 → **11 passed in 6.52s**。重渲染后两份增量 SQL 是 69434 / 10709 B、
+`seed_mysql8.sql` 39140 B。
+
+> **代价如实记：`V2.2.0 → V2.3.0` 是同一个长度，所以字节数一模一样**——
+> 「看体积变了没有」这个最省事的自查手段在这里**发现不了它**。判据只能是守卫。
+> 顺带一条：`make db-seed-sql` 是这三条里唯一**不能**做成纯文件操作的那一条（§31），
+> 所以在没有 MySQL 的机器上改版本号会卡在这里。
+
+**全仓 grep 残留的 `2.2.0` 是历史记述、不是活的版本常量**：`deploy/windows/ops.ps1`
+（`V2.2.0` 那一版装出来的东西）、`deploy/README.md`、`e2e/vocabulary.spec.ts:518`
+的「V2.2.0 §5.25」——它们说的是「这个功能落在哪一版」，改掉就是改历史。不动。
+
+#### 5.28.8 跑数与那次「3 failed 全在 loginAs」
+
+| | 数 |
+|---|---|
+| `make test`（后端全量） | **920 passed / 0 failed / 537.44s（8:57）** |
+| `make e2e`（第一次全量） | 3 failed / 202 passed / 6 did not run（**35.5m**） |
+| `make e2e`（第二次全量，`rm -rf test-results` 之后） | **211 passed (4.4m)** |
+| `npx vue-tsc -b` | exit 0 |
+| `npm run build` | 通过（`index-*.js` 529.58 kB / `index-*.css` 74.10 kB） |
+| `e2e/vocabulary.spec.ts` 单文件 | 20 passed (1.2m) |
+
+后端那 920 里有 4 条是本次新增的 `test_date_display_includes_year.py`；**那 5 条 warning
+是既有误报，一条不多**（`export_service.py` 与 `analytics_service.py` 的
+「cartesian product」——行号随功能层往前漂，形状与 §23 记的那两处逐字相同，
+**不要去改它**）。
+
+**第一次那 3 failed 一条都没到断言，全部停在 `helpers.ts:41` 的 `loginAs` →
+`page.waitForURL(user.home)`**：
+
+```
+Test timeout of 30000ms exceeded.
+Error: expect(page).toHaveURL(expected) failed
+Expected: "http://localhost:5173/admin/overview"   Received: ""
+  - Protocol error (Runtime.callFunctionOn): Internal server error, session closed.
+```
+
+三条是「系统配置 › admin can open settings…」/「MHT测评记录导入 › counselor sees the
+per-row reason…」/「状态词汇 › 管理员页面」（`vocabulary.spec.ts:726`，它挂进了 `auditPages`）。
+
+分诊过程与结论（**全部照 §29 的既有处置，没有改任何断言**）：
+
+1. 三条**都在登录那一步**，无一走到被测的那句话；
+2. **单独复跑那三条** → `2 passed, 1 failed (15.6m)`，仍红的是同一条；
+3. 接口探针：`/api/v1/auth/login` **1.2ms**、`http://localhost:5173/login` **200 / 1.3ms**
+   ——**服务本身不慢**，慢的是浏览器那一侧；
+4. **再单独跑那一条 → `1 passed (698ms)`** ——决定性证据：**负载/顺序引起的挂起**；
+5. 与 §5.25 记着的那两条同形（「红是挂起不是功能问题、根因未定」）。
+
+`6 did not run` 与失败无关：`playwright.config.ts` **没有 `maxFailures`**，那是 serial
+describe 组里前一条失败导致的跳过。202 + 3 + 6 = **211**，与第二次那个全绿的 211 吻合。
+
+**★ 耗时那一项要单独记：第一次 35.5m vs 第二次 4.4m，而配置注释里记的基线是 193 passed /
+3.6m。** 第二次与前两次同机、同一份代码，差的是**机器负载**（当时 WPS Office 等抢 CPU）——
+它同时解释了那三条挂起。所以：
+
+> **`make e2e` 红在 `loginAs` 上时，先看这一次跑了多久。** 远超基线（3～4 分钟）的那一次，
+> 它的红不携带任何关于代码的信息——`retries` 本地是 **0**（`process.env.CI ? 2 : 0`），
+> 所以一次负载抖动不会被自动兜住。**正确处置是复跑，不是改断言**，更不是把
+> `waitForURL` 的超时调大（那会把一次真实的登录回归也一起吞掉）。
+
+这 920 是**改完版本号、重生成两份 SQL 之后**跑的一次（§5.28.7 那次 4 failed 是重生成
+**之前**的现场）；重生成之后单跑那两条守卫文件是 `11 passed in 6.52s`。

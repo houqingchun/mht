@@ -29,6 +29,8 @@ import {
   DEFAULT_FOLLOW_UP,
   DEFAULT_RETEST,
   DEFAULT_TASK_END,
+  formatDate,
+  formatDateTime,
   formatDuration,
   today
 } from '../../services/dates'
@@ -302,6 +304,10 @@ async function newTask() {
 }
 
 async function editTask(task: AssessmentTaskItem) {
+  // 下面两处 `.slice(0, 10)` **不是**日期显示、不能换成 `formatDate`：它们喂的是
+  // `<input type="date">` 的表单初值，那个控件只认 `YYYY-MM-DD`，而 `formatDate`
+  // 在空值上回 `—`（界面占位符）——填进 date input 会被浏览器判成非法、回空串，
+  // 于是「这次编辑把开始日期清掉了」。全站就这两处是这个形状。
   const values = await showFormDialog('编辑测评任务', [
     { key: 'name', label: '任务名称', type: 'text', required: true, defaultValue: task.name },
     { key: 'start_at', label: '开始日期', type: 'date', defaultValue: task.start_at?.slice(0, 10) || '' },
@@ -966,8 +972,11 @@ onMounted(load)
             <div class="muted tiny">{{ row.task_no }}</div>
           </template>
           <template #scope_type="{ row }">{{ scopeTypeLabel(row.scope_type) }}</template>
+          <!-- 任务窗口按**天**渲染，尽管这两列在库里是 `DateTime`：写它们的只有
+               `<input type="date">`（见下面 `editTask` 的 `type: 'date'`），所以那个
+               值上一次只承载一天，弹出 `00:00` 反而是编精度（`dates.ts` 那张表的第三行）。 -->
           <template #start_at="{ row }">
-            {{ row.start_at?.slice(0, 10) || '—' }} — {{ row.end_at?.slice(0, 10) || '—' }}
+            {{ formatDate(row.start_at) }} — {{ formatDate(row.end_at) }}
           </template>
           <template #completion_rate="{ row }">
             <div style="min-width:145px">
@@ -1160,8 +1169,8 @@ onMounted(load)
                     <!-- 「本来就在名单上」与「后来补进来的」是两个数：一份完成率报表里
                          把补发的算成原始目标，会让「这场普查的应答率」看起来比实际高。 -->
                     <td>{{ targetSourceLabel(row.target_source) }}</td>
-                    <td>{{ row.assigned_at?.slice(0, 10) || '—' }}</td>
-                    <td>{{ row.completed_at?.slice(0, 10) || '—' }}</td>
+                    <td>{{ formatDateTime(row.assigned_at) }}</td>
+                    <td>{{ formatDateTime(row.completed_at) }}</td>
                   </tr>
                   <tr v-if="!visibleTargetRows.length && !targetQuery">
                     <td colspan="10"><div class="empty">暂无目标学生</div></td>
@@ -1294,7 +1303,7 @@ onMounted(load)
                     }}</span>
                   </td>
                   <td>{{ row.total_score ?? '—' }}</td>
-                  <td>{{ row.completed_at || '—' }}</td>
+                  <td>{{ formatDateTime(row.completed_at) }}</td>
                   <td>{{ formatDuration(row.duration_seconds) }}</td>
                 </tr>
                 <tr v-if="!visibleDetailRows.length && !detailQuery">

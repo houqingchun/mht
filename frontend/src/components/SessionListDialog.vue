@@ -24,6 +24,7 @@ import SkeletonBlock from './SkeletonBlock.vue'
 import { showToast } from '../services/toast'
 import { getMySessions, revokeOtherSessions, revokeSession, type SessionItem } from '../services/api'
 import { authSessionStatusLabel, authSessionStatusTone } from '../services/labels'
+import { formatDateTime } from '../services/dates'
 
 const props = defineProps<{ open: boolean }>()
 
@@ -87,12 +88,6 @@ async function kickOthers() {
   }
 }
 
-/** `2026-09-19T14:30:00` → `09-19 14:30`。切字符串，不解析（后端发的是本地时间）。 */
-function shortMoment(value: string | null): string {
-  if (!value) return '—'
-  return value.slice(5, 16).replace('T', ' ')
-}
-
 function deviceText(session: SessionItem): string {
   const ua = (session.user_agent || '').trim()
   if (!ua) return '未知设备'
@@ -130,8 +125,8 @@ const others = computed(
               <span v-if="session.is_current" class="pill blue">这一台</span>
             </div>
             <div class="muted tiny">
-              {{ session.ip || '未知地址' }} · 最近活跃 {{ shortMoment(session.last_seen_at) }}
-              · 登录于 {{ shortMoment(session.issued_at) }}
+              {{ session.ip || '未知地址' }} · 最近活跃 {{ formatDateTime(session.last_seen_at) }}
+              · 登录于 {{ formatDateTime(session.issued_at) }}
             </div>
           </div>
           <div class="session-actions">

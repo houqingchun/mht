@@ -13,7 +13,7 @@ import ClassComparisonPanel from '../../components/ClassComparisonPanel.vue'
 import { showToast } from '../../services/toast'
 import { useSettings } from '../../composables/useSettings'
 import { useSafeBack } from '../../composables/useSafeBack'
-import { daysFromNow, formatDateTime, formatDuration, today } from '../../services/dates'
+import { daysFromNow, formatDate, formatDateTime, formatDuration, today } from '../../services/dates'
 import { deltaTone, latestScoreDelta, scoredPoints } from '../../services/trend'
 import {
   VOIDED_SITTING_LABEL,
@@ -739,9 +739,13 @@ onMounted(loadComparison)
             <template v-else>{{ summaryDimensionText }}</template>
           </span>
         </div>
+        <!-- 三格用两个不同的函数，这不是随手写的：`最近测评` 与 `下次跟进` 是**日期**
+             粒度（前者混着导入那一场恒 `00:00` 的时间部分、后者本来就是 `Date` 列），
+             而 `最近跟进` 是系统记下的一个**真实时刻**（`follow_ups[0].created_at`）。
+             判据是「写入方给了几分信息」（`dates.ts` 那张表）。 -->
         <div class="case-summary-cell">
           <span class="case-summary-label">最近测评</span>
-          <span class="case-summary-value">{{ formatDateTime(summaryLastTestedAt) }}</span>
+          <span class="case-summary-value">{{ formatDate(summaryLastTestedAt) }}</span>
         </div>
         <div class="case-summary-cell">
           <span class="case-summary-label">最近跟进</span>
@@ -749,7 +753,7 @@ onMounted(loadComparison)
         </div>
         <div class="case-summary-cell">
           <span class="case-summary-label">下次跟进</span>
-          <span class="case-summary-value">{{ formatDateTime(summaryNextFollowUp) }}</span>
+          <span class="case-summary-value">{{ formatDate(summaryNextFollowUp) }}</span>
         </div>
       </div>
 
@@ -850,14 +854,18 @@ onMounted(loadComparison)
                  回填真实测评日（CLAUDE.md §21），所以那时按 `submitted_at` 兜底，
                  日期来源照实说「待核实」。
 
-                 取值与格式都走 `summaryLastTestedAt` + `formatDateTime()`（2026-09-27，
+                 取值与格式都走 `summaryLastTestedAt` + `formatDate()`（2026-09-27，
                  §5.15.3）。此前这里是 `tested_at || submitted_at` 的**内联副本**、印的是
                  原始 ISO 串——于是同一屏上摘要头写「09-20 13:24」、这一行写
                  「2026-09-20T13:24:00」，同一个日期两个长相。取值与格式各归一处之后，
-                 两处**构造上不可能漂**。 -->
+                 两处**构造上不可能漂**。
+
+                 按**日期**渲染（2026-09-28，§5.28）：这一列混着两个来源，外部导入那一场
+                 存的是 `datetime(年,月,日)`、时间恒 `00:00`，弹出时刻等于替它编一个没发生
+                 过的事件。这与上面那格「最近测评」是同一处口径、同一个函数。 -->
             <div class="detail-row">
               <span>测评日期</span>
-              <b>{{ formatDateTime(summaryLastTestedAt) }}</b>
+              <b>{{ formatDate(summaryLastTestedAt) }}</b>
             </div>
             <div class="detail-row">
               <span>日期来源</span>
@@ -934,9 +942,9 @@ onMounted(loadComparison)
         <div class="timeline" style="margin-top:21px">
           <div v-for="record in detail.follow_ups" :key="record.id" class="timeline-item">
             <div class="timeline-dot"></div>
-            <div class="muted tiny">{{ record.created_at || '—' }} · {{ record.record_type }}</div>
+            <div class="muted tiny">{{ formatDateTime(record.created_at) }} · {{ record.record_type }}</div>
             <div class="timeline-title">{{ record.confirmed_facts }}</div>
-            <div class="timeline-text">下次跟进：{{ record.next_follow_up_date || '—' }}</div>
+            <div class="timeline-text">下次跟进：{{ formatDate(record.next_follow_up_date) }}</div>
           </div>
           <div v-if="!detail.follow_ups.length" class="empty">暂无跟进记录</div>
         </div>
@@ -965,12 +973,12 @@ onMounted(loadComparison)
                 </thead>
                 <tbody>
                   <tr v-for="record in detail.family_contacts" :key="record.id">
-                    <td>{{ record.contact_date }}</td>
+                    <td>{{ formatDate(record.contact_date) }}</td>
                     <td>{{ record.contact_person }}</td>
                     <td>{{ record.channel }}</td>
                     <td>{{ record.result }}</td>
                     <td>{{ record.support_status }}</td>
-                    <td>{{ record.next_contact_date || '—' }}</td>
+                    <td>{{ formatDate(record.next_contact_date) }}</td>
                   </tr>
                   <tr v-if="!detail.family_contacts.length">
                     <td colspan="6"><div class="empty">暂无家庭回访记录</div></td>
@@ -1083,7 +1091,7 @@ onMounted(loadComparison)
           <div class="checklist" style="margin-top:14px">
             <div v-for="plan in detail.retest_plans" :key="plan.id" class="check-row">
               <span>
-                <b>{{ plan.planned_date }}</b>
+                <b>{{ formatDate(plan.planned_date) }}</b>
                 <br>
                 <span class="tiny muted">{{ plan.reason }}</span>
               </span>
@@ -1108,7 +1116,7 @@ onMounted(loadComparison)
             <div class="timeline-title">
               <span :class="['pill', careEventTone(event.event_type)]">{{ careEventLabel(event.event_type) }}</span>
               <span class="muted tiny">
-                {{ event.operator_name || '系统' }} · {{ event.created_at || '—' }}
+                {{ event.operator_name || '系统' }} · {{ formatDateTime(event.created_at) }}
               </span>
             </div>
             <!-- 转派是这张表上唯一不涉及状态迁移的事件，它的两列都为空，这一行就不出现。 -->
@@ -1139,7 +1147,7 @@ onMounted(loadComparison)
             </thead>
             <tbody>
               <tr v-for="log in detail.audit_logs" :key="log.id">
-                <td class="nowrap">{{ log.created_at || '—' }}</td>
+                <td class="nowrap">{{ formatDateTime(log.created_at) }}</td>
                 <td>{{ log.actor_name || '—' }}</td>
                 <td>{{ log.actor_role || '—' }}</td>
                 <td>
