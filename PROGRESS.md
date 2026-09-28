@@ -6818,3 +6818,30 @@ describe 组里前一条失败导致的跳过。202 + 3 + 6 = **211**，与第�
 
 这 920 是**改完版本号、重生成两份 SQL 之后**跑的一次（§5.28.7 那次 4 failed 是重生成
 **之前**的现场）；重生成之后单跑那两条守卫文件是 `11 passed in 6.52s`。
+
+#### 5.28.9 重出包（2026-09-28，`make deploy-package`）
+
+| 项 | 值 |
+|---|---|
+| 产物 | `dist/心晴部署包_V2.3.0.zip` |
+| 字节数 | **12,188,301 B**（11.6 MB） |
+| sha256（前 16） | `71cc60b9b792cd0b` |
+| `deploy/package-info.txt` | `version=2.3.0+20260928` / `built_at=2026-09-28 13:34` |
+| 前端产物 | `index-MjcIOvWl.js`（529.58 kB）——**源 / staging / zip 内三处 sha256 相同**（`6a4aca6580c49db0`） |
+| 两份增量 SQL | 69434 / 10709 B，`backend/sql/` 与包内**逐字节相同**（`0ef3051c…` / `a748c36a…`）；`seed_mysql8.sql` 39140 B（`b69a65dd…`） |
+| 六步自检 | 全过（必需文件齐全 / `task.xml` 与 `python/` 都没混进来 / 依赖闭环 31 wheel 31 锁定项 / 题库在 `seed.py` 算出来的位置上 / `.ps1` 与 `.txt` 恰好一个 BOM、`.bat` 与 `lock` 纯 ASCII / zip 内中文名带 UTF-8 标志位） |
+
+**第三项核验（用包里那份代码跑探针）**，两个方向各一条：
+
+- **后端**：`PYTHONPATH=<包>/backend .venv/bin/python` → `__version__ = 2.3.0`、
+  `VERSION_LABEL = V2.3`，且 `app/main.py` 的路径确实落在 `心晴部署包_V2.3.0/backend/` 之内
+  （**这一句不能省**：`PYTHONPATH` 指错地方时任一套源码都会给出同一个 `2.3.0`）；
+- **前端**：压缩产物的函数体逐字抠出来是
+  `function ct(e){return e?e.slice(0,16).replace("T"," "):"—"}`——**带年份的那一支**，
+  同时包里那份 `index-*.js` 里 `slice(5,16)` **零命中**。
+
+**默认路径不带 `--keep`**，所以 `build()` 进门那句 `rmtree` 照常执行，
+「上一版前端产物留成孤儿」那个坑（§5.26.9）这一次不适用。
+
+**这一版包才含 §5.28**：客户机上那份 11.8 MB（V2.2.0）里的 `formatDateTime` 仍然是
+`slice(5, 16)`，所以「日期看不到年份」在旧包上照旧。
