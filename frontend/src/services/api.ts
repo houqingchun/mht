@@ -2573,23 +2573,47 @@ export async function batchAssignOwner(
   })
 }
 
+/**
+ * 受控导出的请求体：驼峰 → 后端的 snake_case。**全站唯一的映射点。**
+ *
+ * 三个端点共用它（`/care-cases/export`、`/care-cases/high-risk/export`、
+ * `/care-cases/{id}/export`）。此前是 `{ ...rest }` 直接摊进去的，于是
+ * `maskNames` / `includeScore` **以驼峰原样发出去**，而 pydantic 默认
+ * `extra="ignore"` 把认不出的键**静默丢弃**——后端永远拿不到 `mask_names`，
+ * 于是「保留姓名（需特别授权）」选了也没用、导出来永远是脱敏的，不报错也不 422。
+ * （`studentIds` 当初是唯一做了映射的键，所以只有它一直是好的。）
+ *
+ * ★ 两边的字段名必须对得上：`backend/app/tests/test_export_request_keys_match_frontend.py`
+ *   把 `ExportOptions` 的每个键与这个函数体逐字对一遍，加字段时它会红。
+ */
+function controlledExportPayload(options: ExportOptions) {
+  return {
+    purpose: options.purpose,
+    mask_names: options.maskNames,
+    include_score: options.includeScore
+  }
+}
+
 export async function exportCareCases(options: ExportOptions): Promise<ExportJob> {
-  const { studentIds, ...rest } = options
   // 勾选了几个人就只导这几个人——那一支本来就是学生 id 的集合，服务端照它筛。
   // 不勾选是「整个范围」，不是「一个都不导」，所以两个分支的载荷不同而不是同一个。
-  const payload = studentIds && studentIds.length > 0 ? { ...rest, student_ids: studentIds } : rest
+  // `student_ids` 只有这一个端点收：另两个（高度关注、单学生）后端不收名单，
+  // 高度关注那一支带上它会直接 422。
+  const { studentIds } = options
+  const payload =
+    studentIds && studentIds.length > 0
+      ? { ...controlledExportPayload(options), student_ids: studentIds }
+      : controlledExportPayload(options)
   return runExport('/care-cases/export', 'care-cases', payload)
 }
 
 export async function exportHighRiskCareCases(options: ExportOptions): Promise<ExportJob> {
-  const { studentIds: _ignored, ...rest } = options
-  return runExport('/care-cases/high-risk/export', 'high-risk-care-cases', rest)
+  return runExport('/care-cases/high-risk/export', 'high-risk-care-cases', controlledExportPayload(options))
 }
 
 /** Single-student controlled export — the prototype's `exportOne`. */
 export async function exportCareCase(studentId: number, options: ExportOptions): Promise<ExportJob> {
-  const { studentIds: _ignored, ...rest } = options
-  return runExport(`/care-cases/${studentId}/export`, 'care-case', rest)
+  return runExport(`/care-cases/${studentId}/export`, 'care-case', controlledExportPayload(options))
 }
 
 /**

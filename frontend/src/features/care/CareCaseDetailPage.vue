@@ -1216,6 +1216,17 @@ onMounted(loadComparison)
               <option value="masked">姓名脱敏</option>
               <option value="full">保留姓名（需特别授权）</option>
             </select>
+            <!-- 「保留姓名」是按能力矩阵放行的（`export_service.py` 那道 `MASK_FORBIDDEN`：
+                 解除姓名遮蔽要「学生心理详情」达到「授权范围」），而界面上此前一个字都没说
+                 它在哪里配——用户原话就是「不知道在哪里授权」。所以这一行只在**真的选了它**
+                 的时候出现：默认的「姓名脱敏」不需要任何授权，那时候摆一句授权说明只会让人
+                 以为这一页还有别的门槛。四个名字都是磁盘/界面上的真名：`学生心理详情` /
+                 `授权范围`（security/permissions.py）、`账号与权限`（路由 /admin/system）、
+                 `角色权限矩阵`（AdminSystemPage.vue）。 -->
+            <p v-if="exportMask === 'full'" class="muted tiny" style="margin:6px 0 0">
+              「保留姓名」需要「学生心理详情」达到<b>授权范围</b>。心理老师默认已有；若没有，
+              请管理员到「账号与权限 → 角色权限矩阵」把该角色的「学生心理详情」设为「授权范围」。
+            </p>
           </div>
           <div class="field">
             <label>字段范围</label>

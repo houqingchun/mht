@@ -548,10 +548,24 @@ def seed_demo_data(db: Session) -> dict:
         if stage == 1:
             continue  # 已复核，尚未跟进
 
+        # **「逾期」与「今天必须处理」各按构造产出一部分。** 工作台首屏那两张卡
+        # （`CounselorWorkbenchPage.vue` 的 `overdueCount` / `todayCount`）读的就是这一列，
+        # 而 `app.spec.ts` 那两条对账用例末尾各有一条自证断言（「演示数据里没有一份逾期的
+        # 关注档案，这条对账用例会退化成空转」）。全落在未来会让它们在**刚种完的库上必红**
+        # ——而红的原因不是代码坏了：此前之所以是绿的，只是那批数据放了十天刚好过期
+        # （时间凑巧，不是构造）。按 `position` 交替，两类才各有其数据。
+        #
+        # 只在这里分岔、**不动上面那条复核记录**：逾期判据读的是 `follow_up_record`
+        # （`care_service.list_care_cases` 的子查询），`manual_review.next_follow_up_date`
+        # 不参与——而「复核时约了下次时间、跟进时又重定一次」在真实业务里本来就是常态。
         care_service.create_follow_up(db, counselor, case.id, FollowUpRequest(
             record_type="心理老师访谈",
             confirmed_facts="完成一次支持性沟通，约定下次见面的时间与话题。",
-            next_follow_up_date=date.today() + timedelta(days=7),
+            # 只有 `stage >= 2` 的档案会走到这里（0/1 在半路 `continue` 掉了），
+            # `position % 2` 在这几份之间交替 —— 不写死份数，名册一变那个数就会漂。
+            next_follow_up_date=(
+                date.today() - timedelta(days=3) if position % 2 == 0 else date.today()
+            ),
         ))
         summary["follow_ups"] += 1
 

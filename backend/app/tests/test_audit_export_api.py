@@ -182,6 +182,59 @@ def test_single_care_case_export_masks_too(client, db_session):
     assert "王小明" not in response.text
 
 
+def test_an_unknown_request_key_is_refused_instead_of_dropped(client):
+    """写错的键必须 422，不能静默消失。
+
+    2026-10-08 之前 `CareCaseExportRequest` 用的是 pydantic 的默认 `extra="ignore"`：
+    认不出的键不报错、不 422，只是**消失**。前端 `api.ts` 曾把驼峰 `maskNames` 直接摊进
+    请求体（只有 `student_ids` 做了映射），于是 `mask_names` 永远缺席、后端用默认的
+    `True`、姓名永远脱敏 —— 而屏幕上没有任何一处看得出来（用户报的那件事）。
+
+    现在 `extra="forbid"` 让写错的键当场 422。第二条断言是**反证**：同一个端点、只把
+    那个错键拿掉就照常 200 —— 否则「422」可能来自别的地方（比如 purpose 没认出来）。
+    """
+    headers = create_case_with_followup(client)
+
+    refused = client.post(
+        "/api/v1/care-cases/export",
+        headers=headers,
+        json={"purpose": "阶段工作统计", "maskNames": False},
+    )
+    assert refused.status_code == 422, refused.text
+
+    accepted = client.post(
+        "/api/v1/care-cases/export", headers=headers, json={"purpose": "阶段工作统计"}
+    )
+    assert accepted.status_code == 200, accepted.text
+
+
+def test_unmasking_and_the_score_column_reach_the_file(client, db_session):
+    """`mask_names=False` + `include_score=True` 走完整条链。
+
+    与 `test_masking_mode_changes_the_file` 的区别是多断了两样 —— 而这两样正是用户报的
+    那件事的两个可见后果：作业行的 `mask_level`（导出中心「遮罩」列读的就是它，§29）
+    与「包含量表总分」那一档真正多出来的列（它此前与前一个键一起被静默丢弃）。
+    """
+    headers = create_case_with_followup(client)
+    rename_seeded_student(db_session, "王小明")
+
+    created = client.post(
+        "/api/v1/care-cases/export",
+        headers=headers,
+        json={"purpose": "阶段工作统计", "mask_names": False, "include_score": True},
+    )
+    assert created.status_code == 200, created.text
+    job = created.json()["data"]
+    assert job["mask_level"] == "IDENTIFIED", job
+
+    downloaded = client.get(f"/api/v1/export-jobs/{job['id']}/download", headers=headers)
+    assert downloaded.status_code == 200, downloaded.text
+    header = downloaded.text.splitlines()[0].lstrip("﻿")
+    for column in ("性别", "年龄", "MHT总分"):
+        assert column in header, f"实名 + 含总分的导出少了「{column}」列：{header}"
+    assert "王小明" in downloaded.text
+
+
 def test_mask_student_name_keeps_the_surname_only():
     assert mask_student_name("王小明") == "王同学"
     assert mask_student_name("林同学") == "林同学"

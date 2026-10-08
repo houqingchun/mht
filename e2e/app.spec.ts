@@ -5108,6 +5108,50 @@ test.describe('缺陷回归', () => {
     expect(dataRows).toBe(claimed);
   });
 
+  test('选「保留姓名」时发出去的是 mask_names，不是一个会被丢掉的驼峰键', async ({ page }) => {
+    // 用户报的（2026-10-08）：「高度关注导出」里选了「保留姓名（需特别授权）」，
+    // 导出来仍然是脱敏的、而且没有任何提示。
+    //
+    // 根因在**键名**：`api.ts` 把驼峰 `maskNames` 原样发出去（只有 `studentIds`
+    // 做了映射），而后端 `CareCaseExportRequest` 只认 `mask_names`——pydantic 的默认
+    // `extra="ignore"` 把认不出的键**静默丢弃**，于是后端永远用默认的 `mask_names=True`。
+    // 那道 `MASK_FORBIDDEN` 只在 `mask_names=False` 时检查，所以连 403 都不会报。
+    //
+    // 判据**只能是请求体本身**：屏幕上的选中状态、导出中心的「遮罩」列、审计行，
+    // 在修好之前全都长得像「正常」——静默丢弃与正确传递在屏幕上是一样的。
+    //
+    // 拦掉那一次 POST（`route.abort()`）而不让它真的导出：这一条不该往共享的演示库
+    // 里写 `export_job` 与审计行（§24 那条「与审计页抢最新 20 行时间线」）。
+    await loginAs(page, 'counselor');
+    await page.goto('/counselor/cases');
+
+    await page.getByRole('button', { name: '高度关注导出' }).click();
+    const panel = page.locator('.modal-panel');
+    await panel.locator('div.field').filter({ hasText: '身份处理' }).locator('select').selectOption('full');
+
+    // 用途那一格**不写死**：它的选项来自 `settings.export.purposes`（`settings_service.py`
+    // 的三条默认值只是回退值，§5——操作员能改）。写死一条文案会让这条用例在
+    // 「有人改过用途列表」的库上红在一个与本次缺陷无关的地方，与「数行数要问接口要」同源。
+    const purposeSelect = panel.locator('div.field').filter({ hasText: '导出用途' }).locator('select');
+    const firstPurpose = await purposeSelect.locator('option').nth(1).getAttribute('value');
+    expect(firstPurpose, '导出用途一个有值的选项都没有，弹层里的选择框是空转').toBeTruthy();
+    await purposeSelect.selectOption(firstPurpose as string);
+
+    await panel.locator('input[type=checkbox]').check();
+
+    await page.route('**/care-cases/high-risk/export', (route) => route.abort());
+    const requestPromise = page.waitForRequest(
+      (r) => r.method() === 'POST' && r.url().includes('/care-cases/high-risk/export')
+    );
+    await page.getByRole('button', { name: '确认导出' }).click();
+
+    const body = (await requestPromise).postDataJSON() as Record<string, unknown>;
+    expect(body.mask_names).toBe(false);
+    expect(body.include_score).toBe(false);
+    // 驼峰键一个都不许漏出去：后端要么静默丢掉它（今天之前），要么 422（`extra="forbid"`）。
+    expect(Object.keys(body).filter((key) => /[A-Z]/.test(key))).toEqual([]);
+  });
+
   test('副面板加载失败时说的是失败，不是「没有数据」', async ({ page }) => {
     // 桩要打在**页面真的会调的那个端点**上。工作台那一格 2026-09-22 从独立的
     // `/analytics/dimensions` 换成 `/analytics/report`（与五个报表页共享同一数据源，

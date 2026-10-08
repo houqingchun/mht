@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ExportRequest(BaseModel):
@@ -42,8 +42,22 @@ class RevokeExportRequest(BaseModel):
 
 
 class CareCaseExportRequest(BaseModel):
+    """受控导出（学生摘要 / 高度关注 / 单个学生）的请求体，三个端点共用。
+
+    **`extra="forbid"` 是一道防再犯的门，不是风格偏好。** 2026-10-08 之前这里是
+    pydantic 的默认值 `extra="ignore"`：认不出的键被**静默丢弃**，不报错、不 422。
+    而前端 `api.ts` 曾把驼峰 `maskNames` 原样发出来（只有 `student_ids` 做了映射），
+    于是 `mask_names` 永远缺席 → 后端用默认值 `True` → **姓名永远脱敏，且完全静默**
+    （`export_service.py` 那道 `MASK_FORBIDDEN` 只在 `mask_names=False` 时检查，
+    所以它连 403 都不会报）。用户报的「选了保留姓名，导出来还是脱敏的」就是它。
+
+    现在写错的键会立刻 422，缺陷从静默变响亮。**只给这一个模型加**：它是唯一一个被
+    前端驼峰载荷打过的模型，「全站 API 模型统一 forbid」是另一件事。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     purpose: str | None = Field(default=None, max_length=255)
-    mask_level: str = Field(default="MASKED", pattern="^(MASKED|SUMMARY)$")
     """False keeps full names; only permitted under explicit authorisation and always audited."""
     mask_names: bool = True
     """Adds the MHT total-score column to the export."""

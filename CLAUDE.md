@@ -3716,6 +3716,43 @@ field_policy={"columns": list(document.columns)}   # document 是那个 ExportDo
 同一个形状。**`row_count` 不数表头那一行**——它在界面上是「导出 N 行」，把表头算进去
 会每一份都多一行。
 
+#### ★ 请求体的键名映射**只有一处**，而写错的键必须变成 422（2026-10-08 补）
+
+用户报的那件事（「高度关注导出选了『保留姓名（需特别授权）』，导出结果姓名仍然脱敏」）
+的根因**不在权限、也不在导出逻辑**，在**键名**：
+
+`api.ts` 的三个受控导出函数把驼峰字段名直接摊进请求体，只有 `studentIds → student_ids`
+一个键做了映射，而后端 `CareCaseExportRequest` 要的是 `mask_names` / `include_score`。
+pydantic 用的是**默认的 `extra="ignore"`** —— 认不出的键**静默丢弃**，不报错、不 422。
+于是 `mask_names` 永远缺席 → 后端用默认的 `True` → **姓名永远脱敏**；而那道
+`MASK_FORBIDDEN`（它只在 `mask_names=False` 时检查）**连 403 都不会报**。
+`includeScore`（字段范围 → 包含量表总分）走同一条路，同样坏掉，只是没人报。
+
+**这条与 §19 那条「没人设过、却看起来像设过」是同一个形状的两面**：那一次是
+`/openapi.json` 的版本号没人设过，这一次是**没人读过的字段，静默丢弃与正确传递在屏幕上
+长得一样**——屏幕上选中状态、导出中心的「遮罩」列、审计行，在修好之前全都像「正常」。
+
+三处约束，缺一处这个洞就会以另一种形状回来：
+
+| # | 约束 | 落点 | 谁守着 |
+|---|---|---|---|
+| 1 | 驼峰→下划线的映射**只有一处**（不给 `api.ts` 加全局隐式转换——那会让「哪些键被改了名」不再能从调用点读出来，而这次的 bug 恰恰是「一个键被静默改名/丢弃」；显式映射符合仓库既有形状，同 `resolveAssessmentImportRow`） | `api.ts` 的 `controlledExportPayload(options)`，三个导出函数共用（`studentIds` 仍只有 `exportCareCases` 挂） | `test_export_request_keys_match_frontend.py`（**跨语言静态守卫**，把 `api.ts` 当数据读，手法照 `test_export_labels_match_frontend.py`）：`ExportOptions` 的每个驼峰键推导出 snake_case 后必须出现在那个函数体里、必须是 `CareCaseExportRequest.model_fields` 里的键、且三个函数都**调用了**它 |
+| 2 | 写错的键**当场 422**，不静默丢弃 | `schemas/export.py` 的 `model_config = ConfigDict(extra="forbid")`（全站 API 模型**只有这一个**加；把「全站加 forbid」当默认值是另一件事） | `test_an_unknown_request_key_is_refused_instead_of_dropped`（第二条断言是**反证**：同一个端点、只把那个错键拿掉就照常 200——否则「422」可能来自别处） |
+| 3 | 「保留姓名」需要什么授权，**写在用户要动手的那一处** | 三处导出弹层的「身份处理」下拉下面（`CasesPage.vue` / `CounselorWorkbenchPage.vue` / `CareCaseDetailPage.vue`），**只在选中「保留姓名」时出现**（默认的「姓名脱敏」不需要授权，那时摆一句授权说明只会让人以为这一页还有别的门槛） | **无自动守卫**，是人工验证项（那三处对话框的 e2e 会写库）。四个名字都是磁盘/界面上的真名：`学生心理详情` / `授权范围`（`permissions.py`）、`账号与权限`（`/admin/system`）、`角色权限矩阵`（`AdminSystemPage.vue`） |
+
+**同一处还删掉了一个死字段**：`CareCaseExportRequest.mask_level` 全库零读者（三个端点读的
+都是 `mask_names`），而它的 `pattern="^(MASKED|SUMMARY)$"` 本身是抄错的——`SUMMARY` 是能力
+等级，不是遮蔽等级。死字段加上 `extra="ignore"` 组合起来最坏：它看起来像一个「遮蔽等级
+也能直接指定」的入口。
+
+**★ 加 `extra="forbid"` 这类收紧时，要搜的不是键名风格，是「谁故意发未知键来断静默忽略」。**
+`test_export_jobs.py::test_the_columns_are_the_servers_own_whitelist` 就是这样一个调用点：
+它**故意**往请求体里塞 `columns` / `fields`，断的是「多传的键没有效果」——那是
+`extra="ignore"` 时代的话。`forbid` 让它变成 422，于是它红了，**而这条红是这次改动应得的**：
+它的命题（§16.3「导出接口不得接受任意字段名」）没变，只有落地形状从「没有效果」升级成
+「当场拒绝」。处置是改那一条用例的两半（第一半断 422、第二半照旧断列白名单），**不是把它
+改回 `ignore`**。
+
 #### `mask_level` 单独一列，与 `purpose` 分开
 
 理由与 §8 那条缺口逐字同源：`purpose` 是**自由文本**，担不起任何机器判据；而

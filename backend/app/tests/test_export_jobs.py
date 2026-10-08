@@ -170,20 +170,35 @@ def test_a_missing_file_says_so_instead_of_handing_back_an_empty_one(
 
 
 def test_the_columns_are_the_servers_own_whitelist(client, counselor_headers):
-    """请求体里塞进来的字段名**没有任何效果**。
+    """请求体里塞进来的字段名**进不去**，这一条 2026-10-08 之前断错了半边。
 
     这是 §16.3「导出接口不得接受任意字段名」的可执行形式：白名单从文件自己的表头
     取（`export_care_cases_csv` 里那几张固定的列清单），请求模型里根本没有能表达
-    「我要哪几列」的字段，所以多传的键连服务层都到不了。
+    「我要哪几列」的字段。
+
+    **从前它断的是「多传的键被静默丢掉」**——那时模型是 pydantic 默认的
+    `extra="ignore"`，多传两个键照样 200、只是没有效果。而「静默丢掉」正是用户报的
+    那件事的成因（`api.ts` 把驼峰 `maskNames` 发出去，被丢掉，于是姓名永远脱敏、
+    连 403 都不报）。所以第一半现在是 **422**：同一个保证从「没有效果」升级成
+    「当场拒绝」。它与 `test_audit_export_api.py::test_an_unknown_request_key_is_refused_instead_of_dropped`
+    是同一句话在两个文件里的落点，别把其中一条删了当成重复。
+
+    第二半照旧：真建出来的那一份作业，列仍然只有服务端自己那几张清单里的。
     """
-    job = create_job(
-        client,
-        counselor_headers,
-        # 三个都是「如果有一天有人把白名单做成可配的」，最可能被当成入口的形状。
-        columns=["密码", "家庭回访正文", "重点题回答"],
-        fields=["password"],
-        mask_names=True,
+    refused = client.post(
+        EXPORT_PATH,
+        headers=counselor_headers,
+        json={
+            "purpose": "阶段工作统计",
+            # 三个都是「如果有一天有人把白名单做成可配的」，最可能被当成入口的形状。
+            "columns": ["密码", "家庭回访正文", "重点题回答"],
+            "fields": ["password"],
+            "mask_names": True,
+        },
     )
+    assert refused.status_code == 422, refused.text
+
+    job = create_job(client, counselor_headers, mask_names=True)
 
     assert "密码" not in job["columns"]
     assert "家庭回访正文" not in job["columns"]

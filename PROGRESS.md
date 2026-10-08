@@ -7018,3 +7018,200 @@ mht-assessment-import-template (5).csv: form=EXTERNAL_FULL_ANSWER 题号列=100 
    **代价如实记**：同一天两次出包，`package-info.txt` 的构建戳只到天（`2.3.0+20260928`），
    两份包**靠 sha256 区分**，靠构建戳分不出来。
 3. `build_package.py` 仍未忽略 `backend/` 下 4 个 `.DS_Store`（28,688 B，Windows 上无害）。
+
+---
+
+### 5.30 「保留姓名（需特别授权）」失效：一个被静默丢弃的键（2026-10-08，V2.4.0，**已交付**）
+
+> 用户原话：
+> 请升级一个版本到 V2.4.0，并修复如下问题后重新打包
+> 1. 心理老师在操作高度关注导出时，身份处理信息中「保留姓名（需特别授权）」不知道在哪里授权，
+>    当前选择了保留姓名（特别授权），但导出结果姓名仍然是脱敏的
+
+#### 5.30.1 根因：`api.ts` 发的是驼峰键，后端认的是下划线键
+
+`frontend/src/services/api.ts` 的三个受控导出函数把**驼峰**字段名直接摊进请求体，只有
+`studentIds → student_ids` 一个键做了映射：
+
+```ts
+const { studentIds, ...rest } = options      // rest 里是 maskNames / includeScore / purpose
+const payload = { ...rest, student_ids: studentIds }
+```
+
+而后端 `CareCaseExportRequest` 要的是 `mask_names` / `include_score`，pydantic 用的是
+**默认的 `extra="ignore"`** —— 认不出的键**静默丢弃**，不报错、不 422。于是
+`mask_names` 永远缺席 → 后端用默认值 `True` → **姓名永远脱敏**；而
+`export_service.py` 那道 `MASK_FORBIDDEN` 只在 `mask_names=False` 时才检查，
+**连 403 都不会报**。缺陷因此完全静默（屏幕上一切正常）。
+
+同一个 bug 顺手废掉了「字段范围 → 包含量表总分」（`includeScore`）——用户没报，一样坏。
+
+**已用 curl 实测复现**（上一会话）：驼峰载荷 → `mask_level: "MASKED"`、CSV 无性别/年龄/
+MHT总分列；下划线载荷 → `"IDENTIFIED"`、有那三列。
+
+#### 5.30.2 已完成
+
+| # | 改动 | 状态 |
+|---|---|---|
+| 1 | `frontend/src/services/api.ts` 新增 `controlledExportPayload(options)`（模块级私有，**唯一的映射点**），三个导出函数共用；`studentIds` 仍只有 `exportCareCases` 挂 | ✅ |
+| 2 | `backend/app/schemas/export.py`：`CareCaseExportRequest` 加 `model_config = ConfigDict(extra="forbid")` + **删掉死字段 `mask_level`**（零读者，且 `pattern="^(MASKED\|SUMMARY)$"` 本身抄错了） | ✅ |
+| 3 | 新增 `backend/app/tests/test_export_request_keys_match_frontend.py`（跨语言静态守卫，把 `api.ts` 当数据读，手法照 `test_export_labels_match_frontend.py`），3 条 | ✅ 3 passed |
+| 4 | `test_audit_export_api.py` 加两条（未知键 422 / `mask_names=False`+`include_score=True` 走到文件与作业行） | ✅ |
+| 5 | `e2e/app.spec.ts` 加一条：选「保留姓名」后抓请求体断 `mask_names === false`（用 `page.route` **拦掉那次 POST**，不写库、不产生审计行） | ✅ 已跑，全量 212 passed 里的那一条 |
+| 6 | 三处导出弹层加「特别授权在哪配」的指路小字（`CasesPage.vue` / `CounselorWorkbenchPage.vue` / `CareCaseDetailPage.vue`），**只在选中「保留姓名」时出现** | ✅ |
+| 7 | 版本 `2.3.0 → 2.4.0`（`backend/app/version.py` + 唯一镜像 `frontend/package.json` + `test_app_version.py` 的字面量） | ✅ |
+| 8 | 跑两个 SQL 生成器（三份产物文件头带版本号） | ✅ 已跑，文件头已是 `V2.4.0` / `V2.4` |
+| 9 | **`make test` 全量** | ✅ **926 passed / 0 failed / 559.85s**（**改完 `seed_demo` 之后**的复核，见 5.30.5；改 `seed_demo` 之前那一跑是 555.70s，两次同为 926 条） |
+| 10 | `make e2e` 全量（基线 211 条） | ✅ **212 passed / 0 failed (4.5m)** —— 重建演示库之后才成立，见 5.30.5 |
+| 11 | `make deploy-package` → `dist/心晴部署包_V2.4.0.zip` | ✅ 12,191,383 B / sha256 `1fe1064d…`，见 5.30.6 |
+| 12 | 清理诊断残留（开发库 `export_job` 两行 `EXPORT-20261008-1/2` + `var/exports/` 对应文件） | ⬜ **如实留下**（`export_job` 没有删除端点，只能直连 SQL 删；先例 §32 那次「比擦掉它更诚实」） |
+
+**变异验证 3/3 全红**（每条红的正是它该红的那一条，一律 `cp -p` 落盘备份 + `cmp` 逐字节还原）：
+
+| 变异 | 位置 | 结果 |
+|---|---|---|
+| M1 摘掉 `    mask_names: options.maskNames,` | `api.ts` | `test_the_shared_mapper_carries_every_key_it_should` 1 failed / 2 passed |
+| M2 摘掉 `extra="forbid"` | `schemas/export.py` | `test_an_unknown_request_key_is_refused_instead_of_dropped` 1 failed / 1 passed |
+| M3 把 `header.append("MHT总分")` 换成 `pass` | `export_service.py` | `test_unmasking_and_the_score_column_reach_the_file` 1 failed / 1 passed |
+
+#### 5.30.3 ★ 全量 `make test` 撞出一条既有用例，它断的正是「旧口径」
+
+**`925 passed / 1 failed`**（`test_export_jobs.py::test_the_columns_are_the_servers_own_whitelist`，
+553.85s）。它**故意**往请求体里塞 `columns` / `fields` 两个未知键，断的是「多传的键
+**没有效果**」——而那是 `extra="ignore"` 时代的话：静默丢掉之后照样 200。
+
+`extra="forbid"` 把同一件事变成 422，于是它红了。**这条红是这次改动应得的、不是误伤**：
+它的命题（§16.3「导出接口不得接受任意字段名」）没变，变的是落地形状——从「没有效果」
+升级成「当场拒绝」，比原来更强。
+
+**处置：改那一条用例的两半**（不是删、也不是把它改回 `ignore`）：第一半断言未知键
+**422**，第二半照旧断言真建出来的作业列仍然只有服务端自己那几张清单（`学号` 在、
+`密码` / `家庭回访正文` 不在）。**第二条守卫在 `test_audit_export_api.py` 里也有一份**，
+两处都留着（同一句话在两个文件里的落点）。
+
+**教训（记进计划漏项）**：计划里「兼容性已确认：仓库内所有既有调用点都不会被 `forbid`
+破坏」这句**是错的**——它只扫了「并发方是不是 snake_case」，漏了「有谁**故意**发未知键
+来断静默忽略」。加 `extra="forbid"` 这类收紧时，要搜的不是键名风格，是
+**`create_job`/`json=` 里带未知键的调用点**。
+
+#### 5.30.4 更新后的跑数
+
+- `app/tests/test_export_jobs.py` + `test_audit_export_api.py` + `test_export_request_keys_match_frontend.py`
+  → **35 passed**（改完那一条之后重跑）。
+- `test_app_version.py` + `test_incremental_upgrade_sql.py` + `test_seed_sql.py` → **19 passed**。
+- **全量 `make test` → 926 passed / 0 failed / 559.85s**（**改完 `seed_demo` 之后**重跑的那一次；
+  改 `seed_demo` 之前那一跑是 555.70s，两次同为 926 条）。V2.3.0 基线 921 + 新增 5 条：
+  `test_audit_export_api.py` 两条、`test_export_request_keys_match_frontend.py` 三条。
+  **两次都实测过**，因为 `seed_demo` 是本次唯一动到演示数据的改动，而引用它的测试只有
+  `test_purge_demo.py` 与 `test_analytics_report_extended.py` 两处（改完先单独跑过一次
+  → 29 passed / 140.33s，再补了这次全量）。
+
+**★ 全量 `make e2e` 第一次跑出 8 红，根因是演示数据过期，与本次改动无关（已定案）。**
+红的是 7 条学生答题用例（`student can start answering questions` 与
+`学生端信任与进度` 组六条，全部超时在 `startableTask(page)` 上）与 1 条
+`测评任务的目标学生 › 补发是「先看后补」…`（弹层里两条文案一条都没渲染）。定案证据：
+
+| 事实 | 值 |
+|---|---|
+| 演示任务窗口 | `TASK-2026-FALL-MHT`：**2026-09-05 → 2026-10-05** |
+| 跑那一次 e2e 的日期 | **2026-10-08**（已过期 3 天） |
+| §12 的判据 | `effective_task_status` 过了 `end_at` 一律 `CLOSED` |
+| §24 的连带 | 学生端 `canAnswer` 只认 `ACTIVE` → 卡片上没有可点的「开始作答」 |
+| §22 的连带 | 任务 `CLOSED` → 补发预览 422「任务已结束就不补」→ 弹层不渲染候选名单 |
+
+**它为什么没被「先跑 `make seed-demo`」这条既有纪律挡住**：`seed_demo._ensure_task`
+走 `_get_or_create`，而后者遇到已存在的行**原样返回、不更新 `defaults`** ——
+窗口是**种下那天**按 `today ± N` 算死的，此后再种多少次都不会延长。
+所以正解是 `make purge-demo && make seed-demo`（§28 那次演示数据重建的同一处置），
+重建后窗口是 `2026-09-18 → 2026-10-18`，今天是 10-08，落在窗口内。
+
+**这是一条新的、值得记的性质**：CLAUDE.md 测试注意那条「跑 E2E 之前必须先
+`make seed-demo`」**不足以保证绿** —— 当演示库是**上一次某个日子**种下的、
+而任务窗口已经走完时，`make seed-demo` 是空转的。判据是「窗口的 `end_at` 与今天比」，
+不是「有没有跑过 seed-demo」。
+
+#### 5.30.5 ★ 第二波 `make e2e`：演示数据没兑现用例注释声称的构造（不是断言坏了）
+
+重建演示库（`make purge-demo && make seed-demo`）之后重跑全量 e2e，**又红了 2 条**，
+两条都是「工作台首屏」那一组，都在同一个数上：
+
+| 用例 | 断言 |
+|---|---|
+| `工作台首屏就看得到逾期与今天的入口，点进去落到已筛选的列表` | 卡上「逾期跟进」> 0 |
+| `工作台的指标卡点进去，名单人数与卡上那个数一致（切了负责人档也一样）` | `onCard` > 0 |
+
+**定案：`seed_demo` 里两处 `next_follow_up_date` 全在未来，一处都不在过去。**
+
+| 位置 | 值 | 结果 |
+|---|---|---|
+| `create_manual_review(..., next_follow_up_date=date.today() + timedelta(days=7))` | 未来 | —— |
+| `create_follow_up(..., next_follow_up_date=date.today() + timedelta(days=7))` | 未来 | 工作台两档恒 0 |
+
+而「逾期」的判据读的是 `follow_up_record`（`care_service.list_care_cases` 的子查询，
+**取最新那条跟进记录的 `next_follow_up_date`**），`manual_review` 那一列不参与。所以
+干净种出来的库上「逾期跟进」与「今天必须处理」**恒为 0**。
+
+**此前一直是绿的，靠的是时间凑巧**：9/27 种下的 `+7` 落到 10/4，10/8 跑的时候已经过期，
+于是「逾期」偶然有了数据。**构造上它从来没有兑现过。**
+
+**处置是改数据、不是改断言**——依据是用例注释自己写的原话（那两条注释里写着「演示数据里
+逾期与今日各按构造产出（`seed_demo` 的跟进日期落在过去与今天），所以这一条红了要先去看
+数据，不是先改断言。」）。改动只有一处：
+
+```python
+# 只有 stage >= 2 的档案会走到这里（0/1 在半路 continue 掉了），
+# position % 2 在这几份之间交替 —— 不写死份数，名册一变那个数就会漂。
+next_follow_up_date=(
+    date.today() - timedelta(days=3) if position % 2 == 0 else date.today()
+),
+```
+
+**上面那条 `create_manual_review` 的日期刻意不动**：逾期判据不读它，而「复核时约了下次
+时间、跟进时又重定一次」在真实业务里本来就是常态。重建后实测**逾期 4 份 / 今天 6 份**，
+两档都 > 0。
+
+这是 CLAUDE.md 测试注意那条「数行数要问接口要，不要写死」的**反面同一条**：
+那一条说「别写死一个会随数据漂的数」，这一条说「**演示数据要真的兑现用例声称的构造**」
+——一条靠时间凑巧才成立的用例，在某个日子之后会**必然**变红，而红的原因看起来像功能坏了。
+
+#### 5.30.6 收尾、出包与提交
+
+```bash
+cd /Users/houboris/Documents/workspace/xinliceping
+make test          # 926 passed / 0 failed / 559.85s   ← 改完 seed_demo 之后的复核
+make e2e           # 212 passed / 0 failed (4.5m)   ← 重建演示库之后
+make deploy-package
+```
+
+**出包前必查**：staging 干净（`copytree(dirs_exist_ok=True)` 会把上一版 `frontend/dist`
+留成孤儿）。本次**手动清过 staging**（只留 `wheels/`）再出包，所以包里的前端产物必然
+是本次构建的、没有混进上一版——判据是 `ls` 出来的 `assets/` 只有两个文件。
+
+| | 值 |
+|---|---|
+| 包 | `dist/心晴部署包_V2.4.0.zip` |
+| 字节数 | **12,191,383** |
+| sha256 | `1fe1064d94c01715d0253cf984bd2046f498c43e3afd413a160376091c16cb69` |
+| 前端产物 | `index-qdW5VxLs.js` + `index-V2eopEZJ.css` |
+| `package-info.txt` | `2.4.0+20261008` |
+
+**这份包比 13:31 那一份多带了 `seed_demo.py` 的修复**（12,190,788 → 12,191,383 B，
++595 B）。对客户是**零行为影响**——`seed_demo` 只在开发机上跑，交付链路上没有任何东西
+调它；重出只是为了让包与源码逐字节一致。13:31 那份备份在
+`/tmp/xlp-deploy-V2.4.0-20261008-1331.zip`（若用户已经把它拷走，两份都能用）。
+
+**前端产物与 V2.3.0 那份不同，实测过**（`api.ts` 与三个 `.vue` 都改了）：
+
+| | V2.3.0 包内 | V2.4.0 包内 |
+|---|---|---|
+| `index-*.js` | `index-MjcIOvWl.js` 529,580 B | `index-qdW5VxLs.js` **530,807 B** |
+| `index-*.css` | `index-CePiiFvE.css` 74,101 B | `index-V2eopEZJ.css` 74,101 B |
+
+JS 大 1,227 B（三段指路小字 + `controlledExportPayload`）；CSS **字节数相同而内容不同**
+（sha256 `dbf11ddc…` → `8f65a283…`）——三个 `.vue` 的模板各多了一段，scoped 样式的
+哈希跟着变。这正是「装完看不到新功能先查浏览器缓存」那条的判据。
+
+**本版本相对 V2.3.0 无数据库结构变更**：alembic 零改动（head 仍是 `0024`），三份 SQL
+产物各只改文件头版本号一行，`schemas/export.py` 改的是 pydantic 模型不是表。
+**从 V2.3.0 升级不需要跑迁移。**
+
